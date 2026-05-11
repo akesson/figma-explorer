@@ -1,0 +1,14 @@
+# LibraryAnalyticsStyleUsagesByFile
+
+## Properties
+
+Name | Type | Description | Notes
+------------ | ------------- | ------------- | -------------
+**file_name** | **String** | The name of the file using the library. | 
+**team_name** | **String** | The name of the team the file belongs to. | 
+**workspace_name** | Option<**String**> | The name of the workspace that the file belongs to. | [optional]
+**usages** | **f64** | The number of times styles from this library are used within the file. | 
+
+[[Back to Model list]](../README.md#documentation-for-models) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to README]](../README.md)
+
+

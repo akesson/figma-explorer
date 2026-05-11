@@ -1,0 +1,7 @@
+packageName: figma-api
+library: reqwest
+supportAsync: true
+useSingleRequestParameter: true
+preferUnsignedInt: true
+bestFitInt: true
+avoidBoxedModels: false

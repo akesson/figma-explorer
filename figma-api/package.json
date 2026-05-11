@@ -1,0 +1,8 @@
+{
+  "name": "figma-api-codegen",
+  "private": true,
+  "description": "Local toolchain for regenerating the figma-api Rust crate from openapi.yaml. Not a published package.",
+  "devDependencies": {
+    "@openapitools/openapi-generator-cli": "2.13.4"
+  }
+}
