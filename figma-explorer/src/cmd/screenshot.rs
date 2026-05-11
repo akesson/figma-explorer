@@ -50,12 +50,18 @@ impl Args {
             // Resolve by name. We need to fetch the file to find the node id.
             let file = fetch_file_json(cfg, &file_key, None).await?;
             let doc = &file["document"];
-            let page_query = self.page.as_deref().unwrap_or("");
+            let page_query = self.page.as_deref().ok_or_else(|| {
+                anyhow!("--page is required (or pin the target with --node-id/--url)")
+            })?;
             let page = resolve::resolve_page(doc, page_query)
                 .ok_or_else(|| anyhow!("no page matching {page_query:?}"))?;
             let node = match self.frame.as_deref() {
-                Some(q) => resolve::resolve_frame(page, q)
-                    .ok_or_else(|| anyhow!("no frame matching {q:?} on page"))?,
+                Some(q) => resolve::resolve_frame(page, q).ok_or_else(|| {
+                    anyhow!(
+                        "no frame matching {q:?} on page {:?}",
+                        crate::node::name(page).unwrap_or("")
+                    )
+                })?,
                 None => page,
             };
             id(node)

@@ -17,8 +17,7 @@ pub struct Args {
     #[command(flatten)]
     pub locator: LocatorArgs,
 
-    /// Page name (used together with --frame; ignored if --node-id/--url
-    /// already pin the target).
+    /// Page name. Required unless --node-id/--url pins the target directly.
     #[arg(long)]
     pub page: Option<String>,
 
@@ -48,12 +47,18 @@ impl Args {
             resolve::resolve_node_id(doc, nid)
                 .ok_or_else(|| anyhow::anyhow!("no node with id {nid}"))?
         } else {
-            let page_query = self.page.as_deref().unwrap_or("");
+            let page_query = self.page.as_deref().ok_or_else(|| {
+                anyhow::anyhow!("--page is required (or pin the target with --node-id/--url)")
+            })?;
             let page = resolve::resolve_page(doc, page_query)
                 .ok_or_else(|| anyhow::anyhow!("no page matching {page_query:?}"))?;
             match self.frame.as_deref() {
-                Some(q) => resolve::resolve_frame(page, q)
-                    .ok_or_else(|| anyhow::anyhow!("no frame matching {q:?} on page"))?,
+                Some(q) => resolve::resolve_frame(page, q).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "no frame matching {q:?} on page {:?}",
+                        crate::node::name(page).unwrap_or("")
+                    )
+                })?,
                 None => page,
             }
         };

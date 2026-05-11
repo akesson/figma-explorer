@@ -57,10 +57,18 @@ impl Args {
             let page = resolve::resolve_page(doc, page_q)
                 .ok_or_else(|| anyhow!("no page matching {page_q:?}"))?;
             Some(match self.frame.as_deref() {
-                Some(q) => resolve::resolve_frame(page, q)
-                    .ok_or_else(|| anyhow!("no frame matching {q:?} on page"))?,
+                Some(q) => resolve::resolve_frame(page, q).ok_or_else(|| {
+                    anyhow!(
+                        "no frame matching {q:?} on page {:?}",
+                        crate::node::name(page).unwrap_or("")
+                    )
+                })?,
                 None => page,
             })
+        } else if self.frame.is_some() {
+            return Err(anyhow!(
+                "--frame requires --page (or pin the target with --node-id/--url)"
+            ));
         } else {
             None
         };
