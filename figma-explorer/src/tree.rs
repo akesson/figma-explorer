@@ -7,7 +7,7 @@
 use serde_json::Value;
 use std::fmt::Write;
 
-use crate::node::{bounds, children, is_visible, name, primary_solid_hex, type_str};
+use crate::node::{bounds, children, id, is_visible, name, primary_solid_hex, type_str};
 
 /// Render `root` as a tree, traversing at most `max_depth` levels of children
 /// (0 = just the node itself).
@@ -58,6 +58,9 @@ fn format_node_line(node: &Value) -> String {
     if let Some(hex) = primary_solid_hex(node) {
         let _ = write!(s, " {}", hex);
     }
+    if let Some(nid) = id(node) {
+        let _ = write!(s, " id:{}", nid);
+    }
     s
 }
 
@@ -80,9 +83,9 @@ mod tests {
             ]
         });
         let out = render(&n, 2);
-        assert!(out.contains("FRAME \"Hero\" (1440×800 @0,0)"));
-        assert!(out.contains("├─ TEXT \"Title\" (200×40 @0,0)"));
-        assert!(out.contains("└─ RECTANGLE \"bg\" (1440×800 @0,0) #ffffff"));
+        assert!(out.contains("FRAME \"Hero\" (1440×800 @0,0) id:1"));
+        assert!(out.contains("├─ TEXT \"Title\" (200×40 @0,0) id:2"));
+        assert!(out.contains("└─ RECTANGLE \"bg\" (1440×800 @0,0) #ffffff id:3"));
     }
 
     #[test]
