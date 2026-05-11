@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["figma-api", "figma-explorer"]
+members = ["figma-api", "figma-explorer", "figma-get"]
 
 [workspace.package]
 edition = "2021"

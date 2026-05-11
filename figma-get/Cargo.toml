@@ -1,0 +1,20 @@
+[package]
+name = "figma-get"
+version = "0.1.0"
+description = "Command-line tool for read-only access to the Figma REST API."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "figma-get"
+path = "src/main.rs"
+
+[dependencies]
+figma-api = { path = "../figma-api" }
+clap = { version = "4", features = ["derive", "env"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+anyhow = "1"
+serde = "1"
+serde_json = "1"
+serde_yaml_ng = "0.10"
