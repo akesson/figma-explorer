@@ -27,7 +27,7 @@ impl ProjectFilesArgs {
 #[derive(Args, Debug)]
 pub struct TeamProjectsArgs {
     /// Team ID.
-    #[arg(long)]
+    #[arg(long, env = "FIGMA_TEAM_ID")]
     pub team_id: String,
 }
 

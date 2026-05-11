@@ -19,6 +19,7 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let _ = dotenvy::dotenv();
     let cli = Cli::parse();
     let cfg = build_config(cli.token.as_deref())?;
     let value = cli.command.run(&cfg).await?;

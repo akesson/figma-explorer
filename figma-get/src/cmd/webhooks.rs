@@ -7,7 +7,7 @@ use crate::finalize;
 #[derive(Args, Debug)]
 pub struct TeamWebhooksArgs {
     /// Team ID.
-    #[arg(long)]
+    #[arg(long, env = "FIGMA_TEAM_ID")]
     pub team_id: String,
 }
 

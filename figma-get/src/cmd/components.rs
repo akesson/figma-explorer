@@ -37,7 +37,7 @@ impl FileComponentsArgs {
 #[derive(Args, Debug)]
 pub struct TeamComponentsArgs {
     /// Team ID.
-    #[arg(long)]
+    #[arg(long, env = "FIGMA_TEAM_ID")]
     pub team_id: String,
     /// Page size. Defaults to 30; max 1000.
     #[arg(long)]
