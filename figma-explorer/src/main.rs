@@ -8,9 +8,9 @@ use figma_explorer::{build_config, cmd::Command, Output};
 #[derive(Parser, Debug)]
 #[command(name = "figma-explorer", version, about, long_about = None)]
 struct Cli {
-    /// Output format for tool-readable subcommand results.
-    #[arg(long, value_enum, default_value_t = Output::default(), global = true)]
-    format: Output,
+    /// Emit full pretty JSON instead of the default compact YAML.
+    #[arg(long, global = true)]
+    json: bool,
 
     /// Personal access token. Falls back to the FIGMA_TOKEN environment variable.
     #[arg(long, env = "FIGMA_TOKEN", global = true, hide_env_values = true)]
@@ -25,5 +25,6 @@ async fn main() -> anyhow::Result<()> {
     let _ = dotenvy::dotenv();
     let cli = Cli::parse();
     let cfg = build_config(cli.token.as_deref())?;
-    cli.command.run(&cfg, cli.format).await
+    let output = if cli.json { Output::Json } else { Output::Yaml };
+    cli.command.run(&cfg, output).await
 }

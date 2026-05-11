@@ -4,8 +4,9 @@ use figma_api::apis::configuration::Configuration;
 use serde_json::{json, Map, Value};
 
 use crate::cmd::{fetch_file_json, LocatorArgs};
-use crate::node::{bounds, children, is_visible, name};
+use crate::node::{bounds, children, id, is_visible, name};
 use crate::resolve::resolve_page;
+use crate::tree::format_node_line;
 use crate::{print, Output};
 
 /// List the top-level frames on a given page.
@@ -27,27 +28,39 @@ impl Args {
         let doc = &file["document"];
         let page = resolve_page(doc, &self.page)
             .ok_or_else(|| anyhow!("no page matching {:?}", self.page))?;
-        let frames: Vec<_> = children(page)
-            .iter()
-            .filter(|n| is_visible(n))
-            .map(|f| {
-                let mut obj = Map::new();
-                obj.insert("name".into(), json!(name(f).unwrap_or("")));
-                obj.insert(
-                    "type".into(),
-                    json!(f.get("type").and_then(|v| v.as_str()).unwrap_or("")),
-                );
-                if let Some(b) = bounds(f) {
-                    obj.insert("bounds".into(), json!(b.to_string()));
-                }
-                Value::Object(obj)
-            })
-            .collect();
-        let out = json!({
-            "file_key": file_key,
-            "page": name(page).unwrap_or(""),
-            "frames": frames,
-        });
-        print(&out, format)
+        let frames: Vec<&Value> = children(page).iter().filter(|n| is_visible(n)).collect();
+
+        let value = match format {
+            Output::Yaml => {
+                let lines: Vec<String> = frames.iter().map(|f| format_node_line(f)).collect();
+                json!(lines)
+            }
+            Output::Json => {
+                let frame_objs: Vec<Value> = frames
+                    .iter()
+                    .map(|f| {
+                        let mut obj = Map::new();
+                        if let Some(nid) = id(f) {
+                            obj.insert("node_id".into(), json!(nid));
+                        }
+                        obj.insert("name".into(), json!(name(f).unwrap_or("")));
+                        obj.insert(
+                            "type".into(),
+                            json!(f.get("type").and_then(|v| v.as_str()).unwrap_or("")),
+                        );
+                        if let Some(b) = bounds(f) {
+                            obj.insert("bounds".into(), json!(b.to_string()));
+                        }
+                        Value::Object(obj)
+                    })
+                    .collect();
+                json!({
+                    "file_key": file_key,
+                    "page": name(page).unwrap_or(""),
+                    "frames": frame_objs,
+                })
+            }
+        };
+        print(&value, format)
     }
 }

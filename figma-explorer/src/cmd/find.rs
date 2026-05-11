@@ -29,16 +29,33 @@ impl Args {
         let file = fetch_file_json(cfg, &file_key, None).await?;
         let doc = &file["document"];
         let hits = resolve::fuzzy_search(doc, &self.query, self.limit);
-        let out = json!({
-            "file_key": file_key,
-            "query": self.query,
-            "hits": hits.iter().map(|h| json!({
-                "node_id": h.node_id,
-                "name": h.name,
-                "type": h.kind,
-                "path": h.path,
-            })).collect::<Vec<_>>(),
-        });
-        print(&out, format)
+
+        let value = match format {
+            Output::Yaml => {
+                let lines: Vec<String> = hits
+                    .iter()
+                    .map(|h| {
+                        let kind = if h.kind.is_empty() { "?" } else { &h.kind };
+                        let mut line = format!("{} \"{}\" id:{}", kind, h.name, h.node_id);
+                        if !h.path.is_empty() {
+                            line.push_str(&format!(" ({})", h.path.join(" > ")));
+                        }
+                        line
+                    })
+                    .collect();
+                json!(lines)
+            }
+            Output::Json => json!({
+                "file_key": file_key,
+                "query": self.query,
+                "hits": hits.iter().map(|h| json!({
+                    "node_id": h.node_id,
+                    "name": h.name,
+                    "type": h.kind,
+                    "path": h.path,
+                })).collect::<Vec<_>>(),
+            }),
+        };
+        print(&value, format)
     }
 }

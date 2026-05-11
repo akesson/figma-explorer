@@ -4,7 +4,7 @@
 //! for the structure and a short payload (type, name, dimensions, primary
 //! color when applicable). Invisible nodes are skipped.
 
-use serde_json::Value;
+use serde_json::{json, Map, Value};
 use std::fmt::Write;
 
 use crate::node::{bounds, children, id, is_visible, name, primary_solid_hex, type_str};
@@ -48,7 +48,81 @@ fn render_children(
     }
 }
 
-fn format_node_line(node: &Value) -> String {
+/// Render `root` as a compact YAML-friendly tree: each node is its
+/// `format_node_line` string. Leaves stay as scalar strings; parents become
+/// single-key maps `{ "<line>": [children] }` so hierarchy round-trips
+/// through YAML nesting. Depth truncation appends ` [+N children]` to the
+/// parent's line and leaves it a scalar. Invisible nodes are dropped.
+pub fn render_compact(root: &Value, max_depth: usize) -> Value {
+    fn build(node: &Value, max_depth: usize, depth: usize) -> Value {
+        let line = format_node_line(node);
+        let kids: Vec<&Value> = children(node).iter().filter(|n| is_visible(n)).collect();
+        if kids.is_empty() {
+            return Value::String(line);
+        }
+        if depth >= max_depth {
+            return Value::String(format!("{} [+{} children]", line, kids.len()));
+        }
+        let rendered: Vec<Value> = kids
+            .iter()
+            .map(|c| build(c, max_depth, depth + 1))
+            .collect();
+        let mut obj = Map::new();
+        obj.insert(line, Value::Array(rendered));
+        Value::Object(obj)
+    }
+    if !is_visible(root) {
+        return Value::Null;
+    }
+    build(root, max_depth, 0)
+}
+
+/// Render `root` as a nested JSON tree, one object per visible node, with
+/// child arrays. Truncates at `max_depth` with a `truncated` marker so
+/// downstream consumers can detect cut-offs. Invisible nodes are dropped.
+pub fn render_structured(root: &Value, max_depth: usize) -> Value {
+    fn build(node: &Value, max_depth: usize, depth: usize) -> Value {
+        let mut obj = Map::new();
+        if let Some(nid) = id(node) {
+            obj.insert("id".into(), json!(nid));
+        }
+        if let Some(t) = type_str(node) {
+            obj.insert("type".into(), json!(t));
+        }
+        if let Some(nm) = name(node) {
+            obj.insert("name".into(), json!(nm));
+        }
+        if let Some(b) = bounds(node) {
+            obj.insert("bounds".into(), json!(b.to_string()));
+        }
+        if let Some(hex) = primary_solid_hex(node) {
+            obj.insert("fill".into(), json!(hex));
+        }
+        let kids: Vec<&Value> = children(node).iter().filter(|n| is_visible(n)).collect();
+        if !kids.is_empty() {
+            if depth >= max_depth {
+                obj.insert("truncated".into(), json!({ "children": kids.len() }));
+            } else {
+                let rendered: Vec<Value> = kids
+                    .iter()
+                    .map(|c| build(c, max_depth, depth + 1))
+                    .collect();
+                obj.insert("children".into(), Value::Array(rendered));
+            }
+        }
+        Value::Object(obj)
+    }
+    if !is_visible(root) {
+        return Value::Null;
+    }
+    build(root, max_depth, 0)
+}
+
+/// Single-line summary of a node: `TYPE "name" (bounds) #hex id:nid`.
+///
+/// Bounds and color are emitted only when present. Shared with the `pages`
+/// and `frames` compact renderings so node-listing commands look consistent.
+pub fn format_node_line(node: &Value) -> String {
     let kind = type_str(node).unwrap_or("?");
     let nm = name(node).unwrap_or("");
     let mut s = format!("{} \"{}\"", kind, nm);
@@ -115,5 +189,87 @@ mod tests {
         assert!(out.contains("L1"));
         assert!(out.contains("…"));
         assert!(!out.contains("L2"));
+    }
+
+    #[test]
+    fn structured_nests_visible_children() {
+        let n = json!({
+            "id": "1", "type": "FRAME", "name": "Hero",
+            "absoluteBoundingBox": { "x": 0.0, "y": 0.0, "width": 1440.0, "height": 800.0 },
+            "children": [
+                { "id": "2", "type": "TEXT", "name": "Title" },
+                { "id": "3", "type": "TEXT", "name": "hidden", "visible": false },
+            ]
+        });
+        let out = render_structured(&n, 4);
+        assert_eq!(out["id"], "1");
+        assert_eq!(out["bounds"], "1440×800 @0,0");
+        let kids = out["children"].as_array().unwrap();
+        assert_eq!(kids.len(), 1);
+        assert_eq!(kids[0]["name"], "Title");
+    }
+
+    #[test]
+    fn compact_leaf_is_scalar_string() {
+        let n = json!({ "id": "1", "type": "FRAME", "name": "Hero" });
+        let out = render_compact(&n, 4);
+        assert_eq!(out, json!("FRAME \"Hero\" id:1"));
+    }
+
+    #[test]
+    fn compact_parent_is_single_key_map() {
+        let n = json!({
+            "id": "1", "type": "FRAME", "name": "Hero",
+            "children": [
+                { "id": "2", "type": "TEXT", "name": "Title" },
+                { "id": "3", "type": "TEXT", "name": "hidden", "visible": false },
+                { "id": "4", "type": "FRAME", "name": "Body",
+                  "children": [{ "id": "5", "type": "TEXT", "name": "Sub" }] }
+            ]
+        });
+        let out = render_compact(&n, 4);
+        let parent_key = "FRAME \"Hero\" id:1";
+        let kids = out[parent_key].as_array().unwrap();
+        assert_eq!(kids.len(), 2);
+        assert_eq!(kids[0], json!("TEXT \"Title\" id:2"));
+        let body = &kids[1];
+        let body_key = "FRAME \"Body\" id:4";
+        assert_eq!(body[body_key][0], json!("TEXT \"Sub\" id:5"));
+    }
+
+    #[test]
+    fn compact_truncates_appends_child_count_suffix() {
+        let n = json!({
+            "type": "FRAME", "name": "root", "id": "0",
+            "children": [
+                { "type": "FRAME", "name": "L1", "id": "1",
+                  "children": [
+                      { "type": "TEXT", "name": "L2a", "id": "2" },
+                      { "type": "TEXT", "name": "L2b", "id": "3" }
+                  ]}
+            ]
+        });
+        let out = render_compact(&n, 1);
+        let root_key = "FRAME \"root\" id:0";
+        let l1 = &out[root_key][0];
+        assert_eq!(l1, &json!("FRAME \"L1\" id:1 [+2 children]"));
+    }
+
+    #[test]
+    fn structured_truncates_marks_remaining_count() {
+        let n = json!({
+            "type": "FRAME", "name": "root",
+            "children": [
+                { "type": "FRAME", "name": "L1",
+                  "children": [
+                      { "type": "TEXT", "name": "L2a" },
+                      { "type": "TEXT", "name": "L2b" }
+                  ]}
+            ]
+        });
+        let out = render_structured(&n, 1);
+        let l1 = &out["children"][0];
+        assert!(l1.get("children").is_none());
+        assert_eq!(l1["truncated"]["children"], 2);
     }
 }

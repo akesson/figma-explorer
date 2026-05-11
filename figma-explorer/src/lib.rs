@@ -15,10 +15,14 @@ pub mod styles;
 pub mod tree;
 pub mod url;
 
-#[derive(Clone, Copy, Debug, Default, clap::ValueEnum)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Output {
+    /// Compact YAML (default): node-list commands emit a sequence of one-liner
+    /// strings; `tree` emits a nested structured tree; non-list commands emit
+    /// their current short structured YAML. No metadata headers.
     #[default]
     Yaml,
+    /// Full pretty JSON with all metadata headers — for jq-style pipelines.
     Json,
 }
 

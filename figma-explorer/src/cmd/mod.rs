@@ -22,7 +22,7 @@ pub enum Command {
     Pages(pages::Args),
     /// List top-level frames on a page.
     Frames(frames::Args),
-    /// Render a compact ASCII tree of a frame (skips invisible nodes).
+    /// Render a frame as a nested tree (skips invisible nodes).
     Tree(tree::Args),
     /// Fuzzy-search for a node by name across the whole file.
     Find(find::Args),

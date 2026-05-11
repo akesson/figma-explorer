@@ -4,14 +4,13 @@ use figma_api::apis::configuration::Configuration;
 use serde_json::{json, Value};
 
 use crate::cmd::{fetch_file_json, LocatorArgs};
-use crate::resolve;
-use crate::{print, tree, Output};
+use crate::{print, resolve, tree, Output};
 
-/// Render a compact ASCII tree of a target node.
+/// Render a target node as a nested tree.
 ///
-/// Tree output goes to stdout as plain text by default (the `--format`
-/// global flag switches to a structured JSON/YAML payload). Invisible
-/// nodes are skipped at every level.
+/// Default (compact YAML) emits the structured tree directly — no metadata
+/// wrapper. `--json` adds `file_key`/`node_id`/`name` headers around the same
+/// tree. Invisible nodes are skipped at every level.
 #[derive(ClapArgs, Debug)]
 pub struct Args {
     #[command(flatten)]
@@ -28,10 +27,6 @@ pub struct Args {
     /// Max traversal depth (default 6 — deeper trees can get long).
     #[arg(long, default_value_t = 6)]
     pub depth: usize,
-
-    /// Force the structured (yaml/json) output even when stdout looks textual.
-    #[arg(long)]
-    pub as_structured: bool,
 }
 
 impl Args {
@@ -63,20 +58,15 @@ impl Args {
             }
         };
 
-        let rendered = tree::render(target, self.depth);
-        if self.as_structured {
-            let out = json!({
+        let value = match format {
+            Output::Yaml => tree::render_compact(target, self.depth),
+            Output::Json => json!({
                 "file_key": file_key,
                 "node_id": crate::node::id(target),
                 "name": crate::node::name(target),
-                "tree": rendered,
-            });
-            print(&out, format)
-        } else {
-            // Always emit the plain-text tree to stdout. Users who pipe to
-            // YAML/JSON consumers can pass `--as-structured`.
-            print!("{}", rendered);
-            Ok(())
-        }
+                "tree": tree::render_structured(target, self.depth),
+            }),
+        };
+        print(&value, format)
     }
 }
