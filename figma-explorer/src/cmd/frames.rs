@@ -44,10 +44,7 @@ impl Args {
             .collect();
         let out = json!({
             "file_key": file_key,
-            "page": {
-                "id": id(page).unwrap_or(""),
-                "name": name(page).unwrap_or(""),
-            },
+            "page": name(page).unwrap_or(""),
             "frames": frames,
         });
         print(&out, format)
