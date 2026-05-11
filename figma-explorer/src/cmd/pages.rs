@@ -3,7 +3,8 @@ use clap::Args as ClapArgs;
 use figma_api::apis::configuration::Configuration;
 use serde_json::json;
 
-use crate::cmd::{fetch_file_json, LocatorArgs};
+use crate::cache;
+use crate::cmd::LocatorArgs;
 use crate::node::{children, is_visible};
 use crate::tree::format_node_line;
 use crate::{print, Output};
@@ -18,8 +19,7 @@ pub struct Args {
 impl Args {
     pub async fn run(self, cfg: &Configuration, format: Output) -> Result<()> {
         let (file_key, _) = self.locator.resolve()?;
-        // depth=1 is the minimum that returns canvases.
-        let file = fetch_file_json(cfg, &file_key, Some(1.0)).await?;
+        let file = cache::load_file_doc(cfg, &file_key).await?;
         let doc = &file["document"];
         let pages: Vec<&serde_json::Value> =
             children(doc).iter().filter(|p| is_visible(p)).collect();

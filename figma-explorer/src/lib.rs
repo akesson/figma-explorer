@@ -6,6 +6,7 @@ use figma_api::apis::Error as ApiError;
 use serde::Serialize;
 
 pub mod assets;
+pub mod cache;
 pub mod cmd;
 pub mod context;
 pub mod node;

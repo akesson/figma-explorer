@@ -4,6 +4,7 @@ use figma_api::apis::configuration::Configuration;
 
 use crate::Output;
 
+pub mod cache;
 pub mod context;
 pub mod extract_assets;
 pub mod files;
@@ -34,6 +35,8 @@ pub enum Command {
     Styles(styles::Args),
     /// Aggregate command: dump tree + screenshot + styles + assets for a frame.
     Context(context::Args),
+    /// Prime / refresh the local file cache (structural projection only).
+    Cache(cache::Args),
 }
 
 impl Command {
@@ -48,6 +51,7 @@ impl Command {
             Self::ExtractAssets(a) => a.run(cfg, format).await,
             Self::Styles(a) => a.run(cfg, format).await,
             Self::Context(a) => a.run(cfg, format).await,
+            Self::Cache(a) => a.run(cfg, format).await,
         }
     }
 }

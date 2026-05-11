@@ -3,7 +3,8 @@ use clap::Args as ClapArgs;
 use figma_api::apis::configuration::Configuration;
 use serde_json::{json, Map, Value};
 
-use crate::cmd::{fetch_file_json, LocatorArgs};
+use crate::cache;
+use crate::cmd::LocatorArgs;
 use crate::node::{bounds, children, id, is_visible, name};
 use crate::resolve::resolve_page;
 use crate::tree::format_node_line;
@@ -23,8 +24,7 @@ pub struct Args {
 impl Args {
     pub async fn run(self, cfg: &Configuration, format: Output) -> Result<()> {
         let (file_key, _) = self.locator.resolve()?;
-        // depth=2 gets us pages and their top-level frame children.
-        let file = fetch_file_json(cfg, &file_key, Some(2.0)).await?;
+        let file = cache::load_file_doc(cfg, &file_key).await?;
         let doc = &file["document"];
         let page = resolve_page(doc, &self.page)
             .ok_or_else(|| anyhow!("no page matching {:?}", self.page))?;

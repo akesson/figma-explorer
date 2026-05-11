@@ -3,7 +3,8 @@ use clap::Args as ClapArgs;
 use figma_api::apis::configuration::Configuration;
 use serde_json::{json, Value};
 
-use crate::cmd::{fetch_file_json, LocatorArgs};
+use crate::cache;
+use crate::cmd::LocatorArgs;
 use crate::{print, resolve, tree, Output};
 
 /// Render a target node as a nested tree.
@@ -32,7 +33,7 @@ pub struct Args {
 impl Args {
     pub async fn run(self, cfg: &Configuration, format: Output) -> Result<()> {
         let (file_key, url_node_id) = self.locator.resolve()?;
-        let file = fetch_file_json(cfg, &file_key, None).await?;
+        let file = cache::load_file_doc(cfg, &file_key).await?;
         let doc = &file["document"];
 
         let target: &Value = if let Some(nid) = url_node_id
