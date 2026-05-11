@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 use clap::Args as ClapArgs;
 use figma_api::apis::configuration::Configuration;
-use serde_json::json;
+use serde_json::{json, Map, Value};
 
 use crate::cmd::{fetch_file_json, LocatorArgs};
 use crate::node::{bounds, children, is_visible, name};
@@ -31,14 +31,16 @@ impl Args {
             .iter()
             .filter(|n| is_visible(n))
             .map(|f| {
-                let bb = bounds(f).map(|b| {
-                    json!({ "width": b.width, "height": b.height, "x": b.x, "y": b.y })
-                });
-                json!({
-                    "name": name(f).unwrap_or(""),
-                    "type": f.get("type").and_then(|v| v.as_str()).unwrap_or(""),
-                    "bounds": bb,
-                })
+                let mut obj = Map::new();
+                obj.insert("name".into(), json!(name(f).unwrap_or("")));
+                obj.insert(
+                    "type".into(),
+                    json!(f.get("type").and_then(|v| v.as_str()).unwrap_or("")),
+                );
+                if let Some(b) = bounds(f) {
+                    obj.insert("bounds".into(), json!(b.to_string()));
+                }
+                Value::Object(obj)
             })
             .collect();
         let out = json!({

@@ -53,7 +53,7 @@ fn format_node_line(node: &Value) -> String {
     let nm = name(node).unwrap_or("");
     let mut s = format!("{} \"{}\"", kind, nm);
     if let Some(b) = bounds(node) {
-        let _ = write!(s, " ({}×{})", b.width.round() as i64, b.height.round() as i64);
+        let _ = write!(s, " ({})", b);
     }
     if let Some(hex) = primary_solid_hex(node) {
         let _ = write!(s, " {}", hex);
@@ -80,9 +80,9 @@ mod tests {
             ]
         });
         let out = render(&n, 2);
-        assert!(out.contains("FRAME \"Hero\" (1440×800)"));
-        assert!(out.contains("├─ TEXT \"Title\" (200×40)"));
-        assert!(out.contains("└─ RECTANGLE \"bg\" (1440×800) #ffffff"));
+        assert!(out.contains("FRAME \"Hero\" (1440×800 @0,0)"));
+        assert!(out.contains("├─ TEXT \"Title\" (200×40 @0,0)"));
+        assert!(out.contains("└─ RECTANGLE \"bg\" (1440×800 @0,0) #ffffff"));
     }
 
     #[test]

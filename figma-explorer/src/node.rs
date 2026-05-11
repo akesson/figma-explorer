@@ -57,6 +57,19 @@ pub struct Bounds {
     pub height: f64,
 }
 
+impl std::fmt::Display for Bounds {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}×{} @{},{}",
+            self.width.round() as i64,
+            self.height.round() as i64,
+            self.x.round() as i64,
+            self.y.round() as i64,
+        )
+    }
+}
+
 pub fn fills(node: &Value) -> &[Value] {
     node.get("fills")
         .and_then(|f| f.as_array())

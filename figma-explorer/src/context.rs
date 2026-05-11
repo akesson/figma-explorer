@@ -15,7 +15,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use figma_api::apis::configuration::Configuration;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use crate::node::{bounds, name as node_name, type_str};
 use crate::{assets, screenshot, styles, tree};
@@ -75,15 +75,15 @@ pub async fn build(
     let readme = render_readme(frame, &manifest);
     std::fs::write(out_dir.join("README.md"), readme)?;
 
+    let mut frame_obj = Map::new();
+    frame_obj.insert("name".into(), json!(node_name(frame).unwrap_or("")));
+    frame_obj.insert("type".into(), json!(type_str(frame).unwrap_or("")));
+    if let Some(b) = bounds(frame) {
+        frame_obj.insert("bounds".into(), json!(b.to_string()));
+    }
     Ok(json!({
         "out_dir": out_dir.display().to_string(),
-        "frame": {
-            "name": node_name(frame).unwrap_or(""),
-            "type": type_str(frame).unwrap_or(""),
-            "bounds": bounds(frame).map(|b| json!({
-                "width": b.width, "height": b.height
-            })),
-        },
+        "frame": Value::Object(frame_obj),
         "wrote": {
             "tree_txt_bytes": tree_text.len(),
             "screenshot_png_bytes": shot.bytes.len(),
@@ -97,11 +97,12 @@ pub async fn build(
 
 fn render_readme(frame: &Value, manifest: &assets::Manifest) -> String {
     let name = node_name(frame).unwrap_or("");
-    let dim = bounds(frame)
-        .map(|b| format!("{}×{}", b.width.round() as i64, b.height.round() as i64))
-        .unwrap_or_else(|| "?".into());
+    let title = match bounds(frame) {
+        Some(b) => format!("# {name} ({b})"),
+        None => format!("# {name}"),
+    };
     format!(
-        "# {name} ({dim})\n\n\
+        "{title}\n\n\
          ## Contents\n\
          - `tree.txt` — full hierarchy (skipping invisible nodes)\n\
          - `screenshot.png` — 2x render of the frame\n\

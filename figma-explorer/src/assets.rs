@@ -49,7 +49,6 @@ pub struct AssetSpec {
     pub node_id: String,
     pub original_name: String,
     pub kind: AssetKind,
-    pub bounds: Option<(f64, f64)>,
 }
 
 #[derive(Serialize)]
@@ -108,7 +107,6 @@ fn walk(node: &Value, out: &mut Vec<AssetSpec>, seen: &mut HashSet<String>) {
                     node_id: id_str.to_owned(),
                     original_name: name(node).unwrap_or("untitled").to_owned(),
                     kind,
-                    bounds: bounds(node).map(|b| (b.width, b.height)),
                 });
                 // A composite/icon is exported as a single asset — don't
                 // recurse into its children (they're part of the asset).
