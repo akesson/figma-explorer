@@ -78,7 +78,6 @@ pub async fn build(
     Ok(json!({
         "out_dir": out_dir.display().to_string(),
         "frame": {
-            "id": frame_id,
             "name": node_name(frame).unwrap_or(""),
             "type": type_str(frame).unwrap_or(""),
             "bounds": bounds(frame).map(|b| json!({

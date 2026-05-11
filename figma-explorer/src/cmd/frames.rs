@@ -4,7 +4,7 @@ use figma_api::apis::configuration::Configuration;
 use serde_json::json;
 
 use crate::cmd::{fetch_file_json, LocatorArgs};
-use crate::node::{bounds, children, id, is_visible, name};
+use crate::node::{bounds, children, is_visible, name};
 use crate::resolve::resolve_page;
 use crate::{print, Output};
 
@@ -35,7 +35,6 @@ impl Args {
                     json!({ "width": b.width, "height": b.height, "x": b.x, "y": b.y })
                 });
                 json!({
-                    "id": id(f).unwrap_or(""),
                     "name": name(f).unwrap_or(""),
                     "type": f.get("type").and_then(|v| v.as_str()).unwrap_or(""),
                     "bounds": bb,
