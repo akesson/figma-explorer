@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Default, Debug, PartialEq, Serialize, Deserialize)]
 pub struct InlineObject40 {
     /// Status code
-    #[serde(rename = "status")]
+    #[serde(skip)]
     pub status: Status,
     /// A string describing the error
     #[serde(rename = "err")]

@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Default, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ErrorResponsePayloadWithErrorBoolean {
     /// For erroneous requests, this value is always `true`.
-    #[serde(rename = "error")]
+    #[serde(skip)]
     pub error: Error,
     /// Status code
     #[serde(rename = "status")]

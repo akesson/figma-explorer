@@ -14,10 +14,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Default, Debug, PartialEq, Serialize, Deserialize)]
 pub struct InlineObject18 {
     /// The status of the request.
-    #[serde(rename = "status")]
+    #[serde(skip)]
     pub status: Status,
     /// For successful requests, this value is always `false`.
-    #[serde(rename = "error")]
+    #[serde(skip)]
     pub error: Error,
     #[serde(rename = "meta")]
     pub meta: Box<models::InlineObject18Meta>,

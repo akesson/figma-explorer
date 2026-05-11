@@ -162,14 +162,6 @@ pub async fn get_comments(
         };
         req_builder = req_builder.header("X-Figma-Token", value);
     };
-    if let Some(ref apikey) = configuration.api_key {
-        let key = apikey.key.clone();
-        let value = match apikey.prefix {
-            Some(ref prefix) => format!("{} {}", prefix, key),
-            None => key,
-        };
-        req_builder = req_builder.header("X-Figma-Token", value);
-    };
 
     let req = req_builder.build()?;
     let resp = configuration.client.execute(req).await?;
