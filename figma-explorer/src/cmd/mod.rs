@@ -6,6 +6,7 @@ use crate::Output;
 
 pub mod context;
 pub mod extract_assets;
+pub mod files;
 pub mod find;
 pub mod frames;
 pub mod pages;
@@ -15,6 +16,8 @@ pub mod tree;
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
+    /// List files across all projects in FIGMA_PROJECTS_IDS.
+    Files(files::Args),
     /// List all pages in a file.
     Pages(pages::Args),
     /// List top-level frames on a page.
@@ -36,6 +39,7 @@ pub enum Command {
 impl Command {
     pub async fn run(self, cfg: &Configuration, format: Output) -> Result<()> {
         match self {
+            Self::Files(a) => a.run(cfg, format).await,
             Self::Pages(a) => a.run(cfg, format).await,
             Self::Frames(a) => a.run(cfg, format).await,
             Self::Tree(a) => a.run(cfg, format).await,
