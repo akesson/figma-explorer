@@ -12,6 +12,7 @@ pub mod library_analytics;
 pub mod o_embed;
 pub mod payments;
 pub mod projects;
+pub mod raw;
 pub mod styles;
 pub mod users;
 pub mod variables;
@@ -91,6 +92,8 @@ pub enum Command {
     WebhookRequests(webhooks::WebhookRequestsArgs),
     /// GET /v2/webhooks — webhooks for a context or plan.
     Webhooks(webhooks::WebhooksArgs),
+    /// GET an arbitrary path — bypasses typed deserialization, returns whatever Figma sends.
+    Raw(raw::RawArgs),
 }
 
 impl Command {
@@ -132,6 +135,7 @@ impl Command {
             Self::Webhook(a) => a.run(cfg).await,
             Self::WebhookRequests(a) => a.run(cfg).await,
             Self::Webhooks(a) => a.run(cfg).await,
+            Self::Raw(a) => a.run(cfg).await,
         }
     }
 }
