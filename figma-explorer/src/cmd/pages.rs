@@ -22,11 +22,11 @@ impl Args {
         let doc = &file["document"];
         let pages: Vec<_> = children(doc)
             .iter()
+            .filter(|p| is_visible(p))
             .map(|p| {
                 json!({
                     "id": id(p).unwrap_or(""),
                     "name": name(p).unwrap_or(""),
-                    "visible": is_visible(p),
                 })
             })
             .collect();
