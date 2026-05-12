@@ -74,13 +74,115 @@ pub struct Collector {
     /// Ids of descendants that were dropped because `max_nodes` was hit.
     /// Output by `node-info` under the top-level `truncated` block.
     pub omitted_ids: Vec<String>,
+    /// Shapes encountered during the walk that the view builder didn't know
+    /// how to render. Fires when Figma adds a paint type, effect/layout
+    /// field, bound-variables shape, or variable `resolvedType` we haven't
+    /// taught the builder about — so silent data loss becomes a surfaced
+    /// `_warnings` block in node-info output instead.
+    pub warnings: Vec<UnknownShape>,
+}
+
+/// One unrecognized shape encountered during view building. `subject` is the
+/// node id, variable id, or whatever the warning is attributed to; empty when
+/// no obvious attribution applies.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct UnknownShape {
+    pub location: String,
+    pub subject: String,
+    pub detail: String,
 }
 
 impl Collector {
     pub fn truncated(&self) -> bool {
         !self.omitted_ids.is_empty()
     }
+
+    /// Record an unknown-shape warning. De-duplicated on the (location,
+    /// detail) pair so a single Figma schema gap doesn't fire once per node.
+    pub fn record_unknown(&mut self, location: &str, subject: &str, detail: impl Into<String>) {
+        let detail = detail.into();
+        let dedupe_key = (location, detail.as_str());
+        if self
+            .warnings
+            .iter()
+            .any(|w| (w.location.as_str(), w.detail.as_str()) == dedupe_key)
+        {
+            return;
+        }
+        self.warnings.push(UnknownShape {
+            location: location.to_owned(),
+            subject: subject.to_owned(),
+            detail,
+        });
+    }
 }
+
+/// Paint `type` strings the view builder knows how to render. Anything not in
+/// this list lands in `_warnings` so an added Figma paint kind doesn't
+/// silently emit a stub object.
+const KNOWN_PAINT_TYPES: &[&str] = &[
+    "SOLID",
+    "GRADIENT_LINEAR",
+    "GRADIENT_RADIAL",
+    "GRADIENT_ANGULAR",
+    "GRADIENT_DIAMOND",
+    "IMAGE",
+    "PATTERN",
+];
+
+/// Effect-object keys the view builder consumes; any other key on an effect
+/// object that isn't on this allow-list raises a warning.
+const KNOWN_EFFECT_KEYS: &[&str] = &[
+    "type",
+    "visible",
+    "color",
+    "offset",
+    "radius",
+    "spread",
+    "blendMode",
+    "showShadowBehindNode",
+    "boundVariables",
+];
+
+/// Node-level keys consumed by the layout builder. Membership is checked
+/// against keys whose prefix matches `LAYOUT_KEY_PREFIXES`, so unrelated
+/// node keys (id, name, fills, …) aren't flagged.
+const KNOWN_LAYOUT_KEYS: &[&str] = &[
+    "layoutMode",
+    "layoutWrap",
+    "layoutGrids",
+    "layoutAlign",
+    "layoutGrow",
+    "layoutPositioning",
+    "layoutSizingHorizontal",
+    "layoutSizingVertical",
+    "primaryAxisSizingMode",
+    "primaryAxisAlignItems",
+    "primaryAxisMinSize",
+    "primaryAxisMaxSize",
+    "counterAxisSizingMode",
+    "counterAxisAlignItems",
+    "counterAxisAlignContent",
+    "counterAxisSpacing",
+    "paddingTop",
+    "paddingRight",
+    "paddingBottom",
+    "paddingLeft",
+    "itemSpacing",
+];
+
+const LAYOUT_KEY_PREFIXES: &[&str] = &[
+    "layout",
+    "primaryAxis",
+    "counterAxis",
+    "padding",
+    "itemSpacing",
+];
+
+/// Variable `resolvedType` values the view builder renders without warning.
+/// Other values pass the raw payload through unchanged but surface a warning
+/// so the LLM consumer knows the value wasn't normalized.
+const KNOWN_RESOLVED_TYPES: &[&str] = &["COLOR", "FLOAT", "STRING", "BOOLEAN"];
 
 // ───────────────────────────────────────────────────────────────────────────
 // Top-level entry point
@@ -101,6 +203,9 @@ fn build_view_recursive(
     depth: usize,
 ) -> Value {
     let mut out = Map::new();
+    // Attribution for any unknown-shape warnings raised below. Empty when
+    // the node lacks an `id` (rare; defensive against bad input).
+    let node_id = node.get("id").and_then(Value::as_str).unwrap_or("");
 
     // ── Identity ───────────────────────────────────────────────────────────
     if let Some(v) = node.get("id") {
@@ -192,13 +297,13 @@ fn build_view_recursive(
 
     // ── Fills / strokes / effects ──────────────────────────────────────────
     if let Some(arr) = node.get("fills").and_then(Value::as_array) {
-        let paints = build_paints(arr, collector);
+        let paints = build_paints(arr, collector, node_id);
         if !paints.is_empty() {
             out.insert("fills".into(), Value::Array(paints));
         }
     }
     if let Some(arr) = node.get("strokes").and_then(Value::as_array) {
-        let paints = build_paints(arr, collector);
+        let paints = build_paints(arr, collector, node_id);
         if !paints.is_empty() {
             out.insert("strokes".into(), Value::Array(paints));
             // Companion `stroke` block (weight/align/join/cap/dashes).
@@ -212,7 +317,7 @@ fn build_view_recursive(
     // Effects are noise for non-target depths. Keep on target, drop deeper.
     if depth == 0 {
         if let Some(arr) = node.get("effects").and_then(Value::as_array) {
-            let effects = build_effects(arr, collector);
+            let effects = build_effects(arr, collector, node_id);
             if !effects.is_empty() {
                 out.insert("effects".into(), Value::Array(effects));
             }
@@ -222,7 +327,7 @@ fn build_view_recursive(
     // ── Layout (auto-layout) ───────────────────────────────────────────────
     if let Some(mode) = node.get("layoutMode").and_then(Value::as_str) {
         if mode != "NONE" {
-            out.insert("layout".into(), build_layout(node));
+            out.insert("layout".into(), build_layout(node, collector, node_id));
         }
     }
     let layout_child = build_layout_child(node);
@@ -256,7 +361,7 @@ fn build_view_recursive(
     // ── Prototype (opt-in, but always emit when this node starts a flow) ───
     if opts.prototype || node.get("prototypeStartNodeID").is_some() {
         if let Some(proto) = build_prototype(node, opts.prototype) {
-            if !proto.as_object().map_or(true, Map::is_empty) {
+            if !proto.as_object().is_none_or(Map::is_empty) {
                 out.insert("prototype".into(), proto);
             }
         }
@@ -297,7 +402,7 @@ fn build_view_recursive(
         }
     }
     if let Some(bv) = node.get("boundVariables") {
-        let flat = flatten_bound_variables(bv);
+        let flat = flatten_bound_variables(bv, collector, node_id);
         if let Some(map) = flat.as_object() {
             for v in map.values() {
                 if let Some(s) = v.as_str() {
@@ -316,7 +421,7 @@ fn build_view_recursive(
     }
 
     // ── Children ───────────────────────────────────────────────────────────
-    let allow_deeper = opts.depth.map_or(true, |d| depth < d);
+    let allow_deeper = opts.depth.is_none_or(|d| depth < d);
     if allow_deeper {
         if let Some(arr) = node.get("children").and_then(Value::as_array) {
             let mut out_children: Vec<Value> = Vec::new();
@@ -344,11 +449,13 @@ fn build_view_recursive(
 // Paints
 // ───────────────────────────────────────────────────────────────────────────
 
-fn build_paints(arr: &[Value], collector: &mut Collector) -> Vec<Value> {
-    arr.iter().map(|p| build_paint(p, collector)).collect()
+fn build_paints(arr: &[Value], collector: &mut Collector, node_id: &str) -> Vec<Value> {
+    arr.iter()
+        .map(|p| build_paint(p, collector, node_id))
+        .collect()
 }
 
-fn build_paint(paint: &Value, collector: &mut Collector) -> Value {
+fn build_paint(paint: &Value, collector: &mut Collector, node_id: &str) -> Value {
     let mut out = Map::new();
     if let Some(t) = paint.get("type") {
         out.insert("type".into(), t.clone());
@@ -368,6 +475,9 @@ fn build_paint(paint: &Value, collector: &mut Collector) -> Value {
     }
 
     let ty = paint.get("type").and_then(Value::as_str).unwrap_or("");
+    if !ty.is_empty() && !KNOWN_PAINT_TYPES.contains(&ty) {
+        collector.record_unknown("paint.type", node_id, ty);
+    }
     match ty {
         "SOLID" => {
             if let Some(c) = paint.get("color") {
@@ -505,11 +615,13 @@ fn build_stroke(node: &Value) -> Map<String, Value> {
 // Effects
 // ───────────────────────────────────────────────────────────────────────────
 
-fn build_effects(arr: &[Value], collector: &mut Collector) -> Vec<Value> {
-    arr.iter().map(|e| build_effect(e, collector)).collect()
+fn build_effects(arr: &[Value], collector: &mut Collector, node_id: &str) -> Vec<Value> {
+    arr.iter()
+        .map(|e| build_effect(e, collector, node_id))
+        .collect()
 }
 
-fn build_effect(effect: &Value, collector: &mut Collector) -> Value {
+fn build_effect(effect: &Value, collector: &mut Collector, node_id: &str) -> Value {
     let mut out = Map::new();
     if let Some(t) = effect.get("type") {
         out.insert("type".into(), t.clone());
@@ -528,6 +640,13 @@ fn build_effect(effect: &Value, collector: &mut Collector) -> Value {
         if let Some(v) = effect.get(key) {
             if !v.is_null() {
                 out.insert(out_key.into(), v.clone());
+            }
+        }
+    }
+    if let Some(obj) = effect.as_object() {
+        for k in obj.keys() {
+            if !KNOWN_EFFECT_KEYS.contains(&k.as_str()) {
+                collector.record_unknown("effect.field", node_id, k.as_str());
             }
         }
     }
@@ -554,8 +673,16 @@ fn build_effect(effect: &Value, collector: &mut Collector) -> Value {
 // Layout (auto-layout block)
 // ───────────────────────────────────────────────────────────────────────────
 
-fn build_layout(node: &Value) -> Value {
+fn build_layout(node: &Value, collector: &mut Collector, node_id: &str) -> Value {
     let mut out = Map::new();
+    if let Some(obj) = node.as_object() {
+        for k in obj.keys() {
+            let prefix_match = LAYOUT_KEY_PREFIXES.iter().any(|p| k.starts_with(p));
+            if prefix_match && !KNOWN_LAYOUT_KEYS.contains(&k.as_str()) {
+                collector.record_unknown("layout.field", node_id, k.as_str());
+            }
+        }
+    }
     if let Some(m) = node.get("layoutMode") {
         out.insert("mode".into(), m.clone());
     }
@@ -668,11 +795,12 @@ fn build_layout_child(node: &Value) -> Map<String, Value> {
 
 fn build_text(node: &Value, opts: &ViewOptions, collector: &mut Collector) -> Option<Value> {
     let mut out = Map::new();
+    let node_id = node.get("id").and_then(Value::as_str).unwrap_or("");
     if let Some(c) = node.get("characters") {
         out.insert("characters".into(), c.clone());
     }
     if let Some(style) = node.get("style") {
-        out.insert("style".into(), build_type_style(style, collector));
+        out.insert("style".into(), build_type_style(style, collector, node_id));
     }
     if opts.rich_text {
         let has_overrides = node
@@ -700,7 +828,7 @@ fn build_text(node: &Value, opts: &ViewOptions, collector: &mut Collector) -> Op
                                     "style": if style.is_null() {
                                         Value::Null
                                     } else {
-                                        build_type_style(&style, collector)
+                                        build_type_style(&style, collector, node_id)
                                     },
                                 })
                             })
@@ -717,7 +845,7 @@ fn build_text(node: &Value, opts: &ViewOptions, collector: &mut Collector) -> Op
     }
 }
 
-fn build_type_style(style: &Value, collector: &mut Collector) -> Value {
+fn build_type_style(style: &Value, collector: &mut Collector, node_id: &str) -> Value {
     let mut out = Map::new();
     for (key, out_key) in [
         ("fontFamily", "font_family"),
@@ -755,14 +883,14 @@ fn build_type_style(style: &Value, collector: &mut Collector) -> Value {
         }
     }
     if let Some(arr) = style.get("fills").and_then(Value::as_array) {
-        let paints = build_paints(arr, collector);
+        let paints = build_paints(arr, collector, node_id);
         if !paints.is_empty() {
             out.insert("fills".into(), Value::Array(paints));
         }
     }
     // Per-style boundVariables (e.g. text color bound to a token).
     if let Some(bv) = style.get("boundVariables") {
-        let flat = flatten_bound_variables(bv);
+        let flat = flatten_bound_variables(bv, collector, node_id);
         if let Some(map) = flat.as_object() {
             for v in map.values() {
                 if let Some(s) = v.as_str() {
@@ -903,24 +1031,54 @@ fn build_prototype(node: &Value, include_interactions: bool) -> Option<Value> {
 /// - `{ cornerRadius: { id, type: VARIABLE_ALIAS } }` → `cornerRadius -> id`
 /// - `{ fills: [{ id, type }, { id, type }] }` → `fills[0] -> id`, `fills[1] -> id`
 /// - `{ characters: { id } }` → string-property bindings on TEXT nodes.
-fn flatten_bound_variables(bv: &Value) -> Value {
+fn flatten_bound_variables(bv: &Value, collector: &mut Collector, subject: &str) -> Value {
     let mut out = Map::new();
     let obj = match bv.as_object() {
         Some(o) => o,
-        None => return Value::Object(out),
+        None => {
+            collector.record_unknown(
+                "bound_variables.root",
+                subject,
+                format!("expected object, got {}", value_kind(bv)),
+            );
+            return Value::Object(out);
+        }
     };
     for (key, value) in obj {
         if let Some(arr) = value.as_array() {
             for (i, entry) in arr.iter().enumerate() {
                 if let Some(id) = entry.get("id").and_then(Value::as_str) {
                     out.insert(format!("{key}[{i}]"), json!(id));
+                } else {
+                    collector.record_unknown(
+                        "bound_variables.entry",
+                        subject,
+                        format!("{key}[{i}] has no .id"),
+                    );
                 }
             }
         } else if let Some(id) = value.get("id").and_then(Value::as_str) {
             out.insert(key.clone(), json!(id));
+        } else {
+            collector.record_unknown(
+                "bound_variables.entry",
+                subject,
+                format!("{key} has no .id and is not an array"),
+            );
         }
     }
     Value::Object(out)
+}
+
+fn value_kind(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "bool",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -930,7 +1088,11 @@ fn flatten_bound_variables(bv: &Value) -> Value {
 /// Build the top-level `variables` block from the variables sidecar, but
 /// only for ids that the emitted nodes referenced. `vars_root` is the raw
 /// `/v1/files/{key}/variables/local` response or `None` if no sidecar.
-pub fn build_variables_block(vars_root: Option<&Value>, refs: &BTreeSet<String>) -> Value {
+pub fn build_variables_block(
+    vars_root: Option<&Value>,
+    refs: &BTreeSet<String>,
+    collector: &mut Collector,
+) -> Value {
     if refs.is_empty() {
         return Value::Object(Map::new());
     }
@@ -946,12 +1108,20 @@ pub fn build_variables_block(vars_root: Option<&Value>, refs: &BTreeSet<String>)
         let Some(v) = variables.and_then(|m| m.get(id)) else {
             continue;
         };
-        out.insert(id.clone(), build_variable_entry(v, collections));
+        out.insert(
+            id.clone(),
+            build_variable_entry(v, collections, collector, id),
+        );
     }
     Value::Object(out)
 }
 
-fn build_variable_entry(v: &Value, collections: Option<&Map<String, Value>>) -> Value {
+fn build_variable_entry(
+    v: &Value,
+    collections: Option<&Map<String, Value>>,
+    collector: &mut Collector,
+    subject: &str,
+) -> Value {
     let mut out = Map::new();
     if let Some(name) = v.get("name") {
         out.insert("name".into(), name.clone());
@@ -1021,7 +1191,10 @@ fn build_variable_entry(v: &Value, collections: Option<&Map<String, Value>>) -> 
                 .get(mode_id)
                 .cloned()
                 .unwrap_or_else(|| mode_id.clone());
-            vbm.insert(key, resolve_variable_value(raw_val, resolved_type));
+            vbm.insert(
+                key,
+                resolve_variable_value(raw_val, resolved_type, collector, subject),
+            );
         }
         if !vbm.is_empty() {
             out.insert("values_by_mode".into(), Value::Object(vbm));
@@ -1032,8 +1205,14 @@ fn build_variable_entry(v: &Value, collections: Option<&Map<String, Value>>) -> 
 
 /// Convert a raw variable value to its display form. COLOR values become
 /// hex strings; FLOAT/BOOLEAN/STRING pass through; aliases surface as
-/// `{ alias: <id> }`.
-fn resolve_variable_value(raw: &Value, resolved_type: &str) -> Value {
+/// `{ alias: <id> }`. Unknown `resolved_type` strings raise a warning so the
+/// caller can tell the value wasn't normalized.
+fn resolve_variable_value(
+    raw: &Value,
+    resolved_type: &str,
+    collector: &mut Collector,
+    subject: &str,
+) -> Value {
     // Alias indirection: {"type": "VARIABLE_ALIAS", "id": "..."}.
     if let Some(obj) = raw.as_object() {
         if obj.get("type").and_then(Value::as_str) == Some("VARIABLE_ALIAS") {
@@ -1041,6 +1220,9 @@ fn resolve_variable_value(raw: &Value, resolved_type: &str) -> Value {
                 return json!({ "alias": id.clone() });
             }
         }
+    }
+    if !resolved_type.is_empty() && !KNOWN_RESOLVED_TYPES.contains(&resolved_type) {
+        collector.record_unknown("variable.resolved_type", subject, resolved_type);
     }
     match resolved_type {
         "COLOR" => json!(rgba_to_hex(raw)),
@@ -1309,11 +1491,26 @@ mod tests {
             "color": {"r": 1.0, "g": 0.0, "b": 0.0, "a": 1.0},
             "boundVariables": {"color": {"type": "VARIABLE_ALIAS", "id": "VariableID:42:1"}},
         });
-        let v = build_paint(&paint, &mut c);
+        let v = build_paint(&paint, &mut c, "1:2");
         assert_eq!(v["type"], "SOLID");
         assert_eq!(v["hex"], "#ff0000");
         assert_eq!(v["bound_variable"], "VariableID:42:1");
         assert!(c.variables.contains("VariableID:42:1"));
+        assert!(c.warnings.is_empty());
+    }
+
+    #[test]
+    fn unknown_paint_type_surfaces_warning() {
+        let mut c = Collector::default();
+        let paint = json!({"type": "GLITCH"});
+        let _ = build_paint(&paint, &mut c, "1:42");
+        assert!(
+            c.warnings
+                .iter()
+                .any(|w| w.location == "paint.type" && w.detail == "GLITCH"),
+            "expected paint.type warning, got {:?}",
+            c.warnings
+        );
     }
 
     #[test]
@@ -1330,7 +1527,8 @@ mod tests {
             "paddingLeft": 16,
             "paddingRight": 16,
         });
-        let v = build_layout(&node);
+        let mut c = Collector::default();
+        let v = build_layout(&node, &mut c, "1:2");
         assert_eq!(v["mode"], "VERTICAL");
         assert_eq!(v["primary_axis"]["sizing"], "AUTO");
         assert_eq!(v["primary_axis"]["align"], "MIN");
@@ -1349,11 +1547,35 @@ mod tests {
                 {"type": "VARIABLE_ALIAS", "id": "v3"}
             ]
         });
-        let v = flatten_bound_variables(&bv);
+        let mut c = Collector::default();
+        let v = flatten_bound_variables(&bv, &mut c, "1:2");
         let m = v.as_object().unwrap();
         assert_eq!(m["cornerRadius"], "v1");
         assert_eq!(m["fills[0]"], "v2");
         assert_eq!(m["fills[1]"], "v3");
+        assert!(c.warnings.is_empty());
+    }
+
+    #[test]
+    fn flatten_bound_variables_warns_on_non_object_root() {
+        let mut c = Collector::default();
+        let bv = json!("oops");
+        let _ = flatten_bound_variables(&bv, &mut c, "1:99");
+        assert!(c
+            .warnings
+            .iter()
+            .any(|w| w.location == "bound_variables.root"));
+    }
+
+    #[test]
+    fn flatten_bound_variables_warns_on_missing_id_in_entry() {
+        let mut c = Collector::default();
+        let bv = json!({ "fills": [ {"type": "VARIABLE_ALIAS"} ] });
+        let _ = flatten_bound_variables(&bv, &mut c, "1:99");
+        assert!(c
+            .warnings
+            .iter()
+            .any(|w| w.location == "bound_variables.entry"));
     }
 
     #[test]
@@ -1443,7 +1665,8 @@ mod tests {
                 }
             }
         });
-        let block = build_variables_block(Some(&vars_root), &refs);
+        let mut c = Collector::default();
+        let block = build_variables_block(Some(&vars_root), &refs, &mut c);
         let entry = &block["VariableID:42:1"];
         assert_eq!(entry["name"], "color/brand/primary");
         assert_eq!(entry["resolved_type"], "COLOR");

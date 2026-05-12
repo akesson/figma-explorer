@@ -36,7 +36,20 @@ Three sidecars live next to each file's rkyv payload:
 - `{file_key}.full.json.gz` — full raw `/v1/files/{key}` body, gzipped (`src/full_cache.rs`). Read by `node-info` so it works offline without the rkyv projection dropping fields it needs. Stamped via `FULL_SCHEMA_VERSION` on the meta. Disable with `cache prefetch --no-full`.
 - `{file_key}.variables.json` — local variables (`/v1/files/{key}/variables/local`). Paid-tier endpoint; `cache prefetch` auto-disables further variables fetches after 3 consecutive 403s in a single run and records the error on the meta. Disable with `--no-variables` or `FIGMA_EXPLORER_FETCH_VARIABLES=0`.
 
-**Untyped JSON reads** (`src/cmd/mod.rs::fetch_file_json`): commands hit Figma's REST endpoint directly with `serde_json::Value` rather than going through `figma-api`'s typed deserializer, because real files routinely contain nodes the OpenAPI spec doesn't model. The cache projection (`CacheNode`) drops fields the structural commands don't need; live-data commands (`context`, `styles`, `screenshot`, `extract_assets`) still walk raw `Value` for access to `fills`/`strokes`/`characters`. See parallel APIs in `src/resolve.rs` (`pages` vs `pages_cache`, etc.). `node-info` reads `fills`/`strokes`/`style`/etc. from the `.full.json.gz` sidecar instead of refetching live on every call.
+**Untyped JSON reads** (`src/cmd/mod.rs::fetch_file_json`): commands hit Figma's REST endpoint directly with `serde_json::Value` rather than going through `figma-api`'s typed deserializer, because real files routinely contain nodes the OpenAPI spec doesn't model. The cache projection (`CacheNode`) drops fields the structural commands don't need; live-data commands (`context`, `styles`, `screenshot`, `extract_assets`) still walk raw `Value` for access to `fills`/`strokes`/`characters`. `node-info` reads `fills`/`strokes`/`style`/etc. from the `.full.json.gz` sidecar instead of refetching live on every call.
+
+**Resolve-then-fetch pattern.** Every subcommand follows the same two-step shape:
+
+1. **Resolve** the tagged ID through `Resolver::resolve(cfg, &id)` → `ResolvedTarget`. Always cache-first; the only cold-fetch fallback is `cache::load_file`, invoked from inside `resolve_url` when a URL points at a file_key the cache has never seen. `load_file` returns the payload *and* the newly-interned file synth so the resolver does not need to reload `synth.json` from disk to learn what was just assigned.
+2. **Fetch full data**, if the command needs fields the structural cache drops, via `cmd::fetch_file_json`. This is independent of step 1 — the resolved target supplies the file_key, then the command hits the live REST endpoint.
+
+Which lane each subcommand uses:
+- *Structural only* (no step 2): `ls`, `find`.
+- *Resolve, then fetch live*: `tokens`, `assets`, `screenshot`, `context`.
+- *Resolve, then read sidecar (with live fetch as fallback)*: `node-info` (consumes `.full.json.gz` for offline-correct paint/text/effect data; only fetches live when the sidecar is absent and `--cache-only` is not set).
+- *Cache plane*: `cache prefetch` bypasses the resolver entirely and writes meta+payload+sidecars by walking project listings.
+
+New subcommands should pick one of these lanes deliberately rather than hand-rolling a third path.
 
 **Global flags** (`Globals` struct in `lib.rs`) are threaded through every subcommand: `--json` (else compact YAML), `--cache-only` (refuse live API fallback), `--in <ID>` (scope override for bare-id resolution; only `ls` and `find` consume it).
 

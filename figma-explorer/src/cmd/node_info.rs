@@ -74,7 +74,7 @@ pub struct Args {
 
     /// Include per-text-range overrides on TEXT nodes (`characterStyleOverrides`
     /// + `styleOverrideTable`). Off by default — overrides are noise unless
-    /// you specifically need the inline link / colored span data.
+    ///   you specifically need the inline link / colored span data.
     #[arg(long)]
     pub rich_text: bool,
 
@@ -218,7 +218,12 @@ async fn emit_node(
     } else {
         full_cache::read_variables(cache, &meta.file_key)?
     };
-    let variables = build_variables_block(vars_root.as_ref(), &collector.variables);
+    // Snapshot the variable refs before we hand `&mut collector` to the
+    // variables block — `build_variables_block` may record warnings via the
+    // collector, which would alias the immutable borrow if we passed the set
+    // directly.
+    let var_refs = collector.variables.clone();
+    let variables = build_variables_block(vars_root.as_ref(), &var_refs, &mut collector);
     let styles_index = build_styles_index_block(&file_root, &collector.styles);
 
     let mut out = Map::new();
@@ -265,6 +270,12 @@ async fn emit_node(
                 "omitted_node_ids": collector.omitted_ids,
                 "hint": "call node-info on an omitted id, or re-run with --max-nodes N",
             }),
+        );
+    }
+    if !collector.warnings.is_empty() {
+        out.insert(
+            "_warnings".into(),
+            serde_json::to_value(&collector.warnings)?,
         );
     }
 

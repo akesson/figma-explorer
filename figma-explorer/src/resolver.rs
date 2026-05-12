@@ -129,7 +129,8 @@ impl Resolver {
         if let Some(idx) = self.node_index.get() {
             return Ok(idx);
         }
-        let idx = NodeIndex::build(&self.cache, &self.synth).map_err(ResolveError::internal)?;
+        let idx =
+            NodeIndex::load_or_build(&self.cache, &self.synth).map_err(ResolveError::internal)?;
         Ok(self.node_index.get_or_init(|| idx))
     }
 
@@ -293,22 +294,16 @@ impl Resolver {
             return Err(ResolveError::CacheOnlyMiss(format!("url:{}", url.file_key)));
         }
 
-        // Cold path: live fetch. `cache::load_file` writes meta+payload and
-        // (via the synth intern hook in cache.rs) registers a new file synth.
-        let _payload = cache::load_file(cfg, &url.file_key)
+        // Cold path: live fetch. `cache::load_file` writes meta+payload,
+        // interns the file synth, and hands it back so we don't have to
+        // reload SynthState from disk to learn what it just assigned.
+        let (_payload, synth) = cache::load_file(cfg, &url.file_key)
             .await
             .map_err(|e| ResolveError::Internal(format!("fetching {}: {e:#}", url.file_key)))?;
-
-        // Reload the synth state — `load_file` ran on a fresh SynthState
-        // inside the cache layer and persisted, but our in-memory copy is
-        // stale. Re-read just enough to learn the new synth.
-        let fresh = SynthState::load(&self.cache).map_err(ResolveError::internal)?;
-        let synth = fresh.file_synth(&url.file_key).ok_or_else(|| {
-            ResolveError::Internal(format!(
-                "synth state didn't record file_key {} after fetch",
-                url.file_key
-            ))
-        })?;
+        // `self.synth` is intentionally not updated here. The current
+        // invocation needs the synth for this one resolution, which we hold,
+        // and resolve_url is always terminal in a command's flow — no later
+        // step queries `self.synth` for `url.file_key`.
         let target = self.load_file_target(synth, &url.file_key)?;
         narrow_to_node_if_requested(target, url.node_id.as_deref())
     }

@@ -1,22 +1,12 @@
-//! Resolve a user-facing target (page name, frame name, or fuzzy query)
-//! to a concrete node id within a Figma document.
+//! Two unrelated lookups over Figma documents:
 //!
-//! Match precedence (mirrors figma-mcp behavior):
-//!   1. Exact case-insensitive match on `name`.
-//!   2. Case-insensitive substring match.
-//!   3. Fuzzy rank via nucleo-matcher.
-//!
-//! Hidden nodes (`visible: false`) are skipped from candidate sets — they
-//! aren't part of the design surface.
-//!
-//! Two parallel APIs live here:
-//! - `&serde_json::Value`-based functions for live-data consumers (`context`,
-//!   `styles`, `screenshot`, `extract_assets`) that need access to fields the
-//!   cache projection drops (fills, strokes, characters, …).
-//! - `_cache` suffixed functions over `&CacheNode` for the cached structural
-//!   consumers (`pages`, `frames`, `tree`, `search`). These are the future
-//!   direction; the Value-based path stays for now to avoid breaking live
-//!   commands during this migration.
+//! - `resolve_node_id`: single-node lookup by native node id on a raw
+//!   `serde_json::Value` document. Used by the live-data commands
+//!   (`tokens`, `assets`, `context`, `node_info`) that need fields the cache
+//!   projection drops (fills, strokes, characters, …).
+//! - `multi_token_search`: ancestor-chain ranked search over `CacheNode`
+//!   trees. Used by `find`. See the section header further down for the
+//!   algorithm.
 
 use nucleo_matcher::{
     pattern::{CaseMatching, Normalization, Pattern},
@@ -25,29 +15,7 @@ use nucleo_matcher::{
 use serde_json::Value;
 
 use crate::cache::CacheNode;
-use crate::node::{children, id, is_visible, name};
-
-/// Top-level pages of the document (CANVAS nodes), in order.
-pub fn pages(doc: &Value) -> &[Value] {
-    children(doc)
-}
-
-/// First page that matches `query` (exact → substring → fuzzy).
-pub fn resolve_page<'a>(doc: &'a Value, query: &str) -> Option<&'a Value> {
-    pick_match(pages(doc), query)
-}
-
-/// First direct child of `page` that matches `query`.
-pub fn resolve_frame<'a>(page: &'a Value, query: &str) -> Option<&'a Value> {
-    pick_match(children(page), query)
-}
-
-/// First descendant of `root` that matches `query`. Walks the whole subtree.
-pub fn resolve_descendant<'a>(root: &'a Value, query: &str) -> Option<&'a Value> {
-    let mut all: Vec<&'a Value> = Vec::new();
-    collect_visible(root, &mut all);
-    pick_match_slice(&all, query)
-}
+use crate::node::{children, id};
 
 /// Find a node by exact node id anywhere in the tree. Node ids are stable
 /// identifiers; we don't filter on visibility here.
@@ -64,160 +32,6 @@ pub fn resolve_node_id<'a>(doc: &'a Value, node_id: &str) -> Option<&'a Value> {
         None
     }
     find(doc, node_id)
-}
-
-/// Pick the best match from a slice of node references.
-fn pick_match_slice<'a>(candidates: &[&'a Value], query: &str) -> Option<&'a Value> {
-    let q = query.trim();
-    if q.is_empty() {
-        return candidates.iter().find(|n| is_visible(n)).copied();
-    }
-    let q_lower = q.to_lowercase();
-
-    if let Some(hit) = candidates
-        .iter()
-        .find(|n| is_visible(n) && name(n).is_some_and(|nm| nm.eq_ignore_ascii_case(q)))
-    {
-        return Some(*hit);
-    }
-    if let Some(hit) = candidates
-        .iter()
-        .find(|n| is_visible(n) && name(n).is_some_and(|nm| nm.to_lowercase().contains(&q_lower)))
-    {
-        return Some(*hit);
-    }
-    let mut matcher = Matcher::new(nucleo_matcher::Config::DEFAULT);
-    let pattern = Pattern::parse(q, CaseMatching::Ignore, Normalization::Smart);
-    let mut buf: Vec<char> = Vec::new();
-    candidates
-        .iter()
-        .filter_map(|n| {
-            if !is_visible(n) {
-                return None;
-            }
-            let nm = name(n)?;
-            buf.clear();
-            buf.extend(nm.chars());
-            let score = pattern.score(nucleo_matcher::Utf32Str::new(nm, &mut buf), &mut matcher)?;
-            Some((score, *n))
-        })
-        .max_by_key(|(s, _)| *s)
-        .map(|(_, n)| n)
-}
-
-/// Pick the best match from a slice of owned `Value`s (typical case: results
-/// of `children(...)`).
-fn pick_match<'a>(candidates: &'a [Value], query: &str) -> Option<&'a Value> {
-    let refs: Vec<&Value> = candidates.iter().collect();
-    pick_match_slice(&refs, query)
-}
-
-fn collect_visible<'a>(root: &'a Value, out: &mut Vec<&'a Value>) {
-    if !is_visible(root) {
-        return;
-    }
-    for c in children(root) {
-        out.push(c);
-        collect_visible(c, out);
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// CacheNode-typed API (cache consumers)
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Top-level pages of the document (CANVAS nodes), in order.
-pub fn pages_cache(doc: &CacheNode) -> &[CacheNode] {
-    &doc.children
-}
-
-/// First page that matches `query` (exact → substring → fuzzy).
-pub fn resolve_page_cache<'a>(doc: &'a CacheNode, query: &str) -> Option<&'a CacheNode> {
-    pick_match_cache(&doc.children, query)
-}
-
-/// First direct child of `page` that matches `query`.
-pub fn resolve_frame_cache<'a>(page: &'a CacheNode, query: &str) -> Option<&'a CacheNode> {
-    pick_match_cache(&page.children, query)
-}
-
-/// First descendant of `root` that matches `query`. Walks the whole subtree.
-pub fn resolve_descendant_cache<'a>(root: &'a CacheNode, query: &str) -> Option<&'a CacheNode> {
-    let mut all: Vec<&'a CacheNode> = Vec::new();
-    collect_visible_cache(root, &mut all);
-    pick_match_cache_slice(&all, query)
-}
-
-/// Find a node by exact node id anywhere in the tree. Node ids are stable
-/// identifiers; we don't filter on visibility here.
-pub fn resolve_node_id_cache<'a>(doc: &'a CacheNode, node_id: &str) -> Option<&'a CacheNode> {
-    fn find<'a>(n: &'a CacheNode, target: &str) -> Option<&'a CacheNode> {
-        if n.id == target {
-            return Some(n);
-        }
-        for c in &n.children {
-            if let Some(hit) = find(c, target) {
-                return Some(hit);
-            }
-        }
-        None
-    }
-    find(doc, node_id)
-}
-
-fn pick_match_cache<'a>(candidates: &'a [CacheNode], query: &str) -> Option<&'a CacheNode> {
-    let refs: Vec<&CacheNode> = candidates.iter().collect();
-    pick_match_cache_slice(&refs, query)
-}
-
-fn pick_match_cache_slice<'a>(candidates: &[&'a CacheNode], query: &str) -> Option<&'a CacheNode> {
-    let q = query.trim();
-    if q.is_empty() {
-        return candidates.iter().find(|n| n.visible).copied();
-    }
-    let q_lower = q.to_lowercase();
-
-    if let Some(hit) = candidates
-        .iter()
-        .find(|n| n.visible && n.name.eq_ignore_ascii_case(q))
-    {
-        return Some(*hit);
-    }
-    if let Some(hit) = candidates
-        .iter()
-        .find(|n| n.visible && n.name.to_lowercase().contains(&q_lower))
-    {
-        return Some(*hit);
-    }
-    let mut matcher = Matcher::new(nucleo_matcher::Config::DEFAULT);
-    let pattern = Pattern::parse(q, CaseMatching::Ignore, Normalization::Smart);
-    let mut buf: Vec<char> = Vec::new();
-    candidates
-        .iter()
-        .filter_map(|n| {
-            if !n.visible {
-                return None;
-            }
-            buf.clear();
-            buf.extend(n.name.chars());
-            let score = pattern.score(
-                nucleo_matcher::Utf32Str::new(&n.name, &mut buf),
-                &mut matcher,
-            )?;
-            Some((score, *n))
-        })
-        .max_by_key(|(s, _)| *s)
-        .map(|(_, n)| n)
-}
-
-fn collect_visible_cache<'a>(root: &'a CacheNode, out: &mut Vec<&'a CacheNode>) {
-    if !root.visible {
-        return;
-    }
-    for c in &root.children {
-        out.push(c);
-        collect_visible_cache(c, out);
-    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -419,6 +233,7 @@ fn best_assignment(
     best_pick.map(|p| (best_score, p))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn recurse_assignment(
     candidates: &[Vec<TokenCandidate>],
     leaf_idx: usize,
@@ -511,52 +326,17 @@ mod tests {
     }
 
     #[test]
-    fn resolve_page_by_exact_name() {
-        let d = doc();
-        let p = resolve_page(&d, "About").unwrap();
-        assert_eq!(id(p), Some("2:0"));
-    }
-
-    #[test]
-    fn resolve_page_by_substring() {
-        let d = doc();
-        let p = resolve_page(&d, "hom").unwrap();
-        assert_eq!(id(p), Some("1:0"));
-    }
-
-    #[test]
-    fn resolve_frame_finds_top_level() {
-        let d = doc();
-        let page = resolve_page(&d, "Home").unwrap();
-        let f = resolve_frame(page, "Hero").unwrap();
-        assert_eq!(id(f), Some("1:1"));
-    }
-
-    #[test]
-    fn resolve_descendant_walks_subtree() {
-        let d = doc();
-        let page = resolve_page(&d, "Home").unwrap();
-        let n = resolve_descendant(page, "Primary").unwrap();
-        assert_eq!(id(n), Some("1:5"));
-    }
-
-    #[test]
-    fn invisible_frame_is_skipped() {
-        let d = doc();
-        let page = resolve_page(&d, "Home").unwrap();
-        // "Features" is invisible — substring match should not return it.
-        assert!(resolve_frame(page, "Features").is_none());
-    }
-
-    #[test]
     fn resolve_node_id_finds_deep_node() {
         let d = doc();
         let n = resolve_node_id(&d, "1:5").unwrap();
-        assert_eq!(name(n), Some("Primary Button"));
+        assert_eq!(
+            n.get("name").and_then(|v| v.as_str()),
+            Some("Primary Button")
+        );
     }
 
     // ─────────────────────────────────────────────────────────────────────
-    // CacheNode-typed API + multi_token_search
+    // multi_token_search
     // ─────────────────────────────────────────────────────────────────────
 
     fn cache_leaf(id: &str, name: &str, type_: &str) -> CacheNode {
@@ -778,12 +558,5 @@ mod tests {
                 .map(|h| (&h.node.id, h.score))
                 .collect::<Vec<_>>()
         );
-    }
-
-    #[test]
-    fn resolve_node_id_cache_finds_deep_node() {
-        let d = wallchart_doc();
-        let n = resolve_node_id_cache(&d, "1:4").expect("expected to find 1:4");
-        assert_eq!(n.name, "Button");
     }
 }

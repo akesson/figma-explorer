@@ -633,7 +633,7 @@ impl CacheDir {
 
 /// Write `bytes` to `path` atomically: tempfile in the same directory, then
 /// rename. Crashes leave the previous file intact.
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("path has no parent: {}", path.display()))?;
@@ -1172,7 +1172,7 @@ fn intern_comment_synths(cache: &CacheDir, file_synth: u32, comments: &[Associat
 ///    failure marker meta on error).
 /// 5. Rkyv corruption / version mismatch is treated as a cache miss: the
 ///    entry is deleted and we fall through to refetch.
-pub async fn load_file(cfg: &Configuration, file_key: &str) -> Result<CachedFile> {
+pub async fn load_file(cfg: &Configuration, file_key: &str) -> Result<(CachedFile, u32)> {
     let cache = CacheDir::new(default_dir());
     cache.ensure()?;
     let now = now_epoch();
@@ -1200,15 +1200,11 @@ pub async fn load_file(cfg: &Configuration, file_key: &str) -> Result<CachedFile
     }
 
     let payload_exists = cache.file_path(file_key).exists();
-    match decide_action(meta.as_ref(), payload_exists, now, DEFAULT_TTL_SECS) {
-        LoadAction::UseCache => {
-            return cache
-                .read_file(file_key)
-                .map_err(|e| anyhow::anyhow!("{e}"))?
-                .ok_or_else(|| {
-                    anyhow::anyhow!("cache: meta says Ok but payload vanished mid-read")
-                });
-        }
+    let payload = match decide_action(meta.as_ref(), payload_exists, now, DEFAULT_TTL_SECS) {
+        LoadAction::UseCache => cache
+            .read_file(file_key)
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+            .ok_or_else(|| anyhow::anyhow!("cache: meta says Ok but payload vanished mid-read"))?,
         LoadAction::NotExportableCached => {
             let err = meta
                 .as_ref()
@@ -1216,34 +1212,48 @@ pub async fn load_file(cfg: &Configuration, file_key: &str) -> Result<CachedFile
                 .unwrap_or_else(|| "file marked not exportable".to_owned());
             anyhow::bail!("{err}");
         }
-        LoadAction::Refresh => { /* fall through */ }
-    }
-
-    // Refresh path. Prefer a single-project listing when we have a project
-    // hint that matches the user's env — that's cheaper than a blind refetch
-    // and lets us preserve the cache entry when last_modified is unchanged.
-    let env_projects = parse_project_ids_env();
-    let project_hint = meta.as_ref().map(|m| m.project_id.as_str()).unwrap_or("");
-    if !project_hint.is_empty() && env_projects.iter().any(|p| p == project_hint) {
-        match try_refresh_single(cfg, &cache, file_key, project_hint, meta.as_ref(), now).await {
-            Ok(Some(payload)) => return Ok(payload),
-            Ok(None) => {
-                // No decision possible. Serve stale if we have an Ok payload.
-                if let Some(m) = &meta {
-                    if m.status == EntryStatus::Ok {
-                        if let Ok(Some(v)) = cache.read_file(file_key) {
-                            return Ok(v);
+        LoadAction::Refresh => {
+            // Prefer a single-project listing when we have a project hint that
+            // matches the user's env — cheaper than a blind refetch and lets
+            // us preserve the cache entry when `last_modified` is unchanged.
+            let env_projects = parse_project_ids_env();
+            let project_hint = meta.as_ref().map(|m| m.project_id.as_str()).unwrap_or("");
+            let mut refreshed: Option<CachedFile> = None;
+            if !project_hint.is_empty() && env_projects.iter().any(|p| p == project_hint) {
+                match try_refresh_single(cfg, &cache, file_key, project_hint, meta.as_ref(), now)
+                    .await
+                {
+                    Ok(Some(p)) => refreshed = Some(p),
+                    Ok(None) => {
+                        // No decision possible. Serve stale if we have an Ok payload.
+                        if let Some(m) = &meta {
+                            if m.status == EntryStatus::Ok {
+                                if let Ok(Some(v)) = cache.read_file(file_key) {
+                                    refreshed = Some(v);
+                                }
+                            }
                         }
                     }
+                    Err(e) => return Err(e),
                 }
-                // Otherwise fall through to live fetch.
             }
-            Err(e) => return Err(e),
+            match refreshed {
+                Some(p) => p,
+                // Final fallback: blind live fetch (cold load, or refresh fell through).
+                None => fetch_and_cache(cfg, &cache, file_key, None, now).await?,
+            }
         }
-    }
+    };
 
-    // Final fallback: blind live fetch (cold load, or refresh fell through).
-    fetch_and_cache(cfg, &cache, file_key, None, now).await
+    // Guarantee the caller gets a `file_synth` for the file_key in hand —
+    // `intern_file` is idempotent, so the UseCache path is essentially free
+    // and the refresh path's prior intern (inside `fetch_and_cache`) collapses
+    // to a no-op. Loading a file without a usable synth would force the only
+    // production caller (`resolver::resolve_url`) to reload synth.json from
+    // disk just to learn the value we already had in our `with_lock` window.
+    let file_synth = crate::synth::with_lock(&cache, |s| s.intern_file(file_key))
+        .with_context(|| format!("interning file synth for {file_key}"))?;
+    Ok((payload, file_synth))
 }
 
 #[cfg(test)]

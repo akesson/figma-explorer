@@ -207,7 +207,7 @@ fn render_root(
             })
             .cloned()
             .collect();
-        files.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        files.sort_by_key(|f| f.name.to_lowercase());
         let project_name = derive_project_name(&metas, project_id);
         groups.push((project_synth, project_id.clone(), project_name, files));
     }
@@ -390,6 +390,7 @@ fn format_rows(rows: &[Row]) -> String {
 /// Comment rows are spliced in immediately after their anchor node's row.
 /// Canvas-level (unanchored) comments are appended in a trailing block at
 /// `file_depth + 1`, so they appear as direct children of the FILE header.
+#[allow(clippy::too_many_arguments)]
 fn append_descent_rows(
     resolver: &Resolver,
     file_synth: u32,
@@ -573,7 +574,7 @@ fn build_file_json(
     let canvas_json: Vec<Value> = comment_rows
         .iter()
         .filter(|r| r.anchor_node_id.is_none())
-        .map(|r| comment_row_json(r))
+        .map(comment_row_json)
         .collect();
     if !canvas_json.is_empty() {
         obj.insert("canvas_comments".into(), Value::Array(canvas_json));
@@ -612,7 +613,7 @@ fn render_project(
         .filter(|m| m.status == EntryStatus::Ok && m.project_id == project_id)
         .filter_map(|m| synth.file_synth(&m.file_key).map(|s| (s, m.clone())))
         .collect();
-    files.sort_by(|(_, a), (_, b)| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    files.sort_by_key(|(_, m)| m.name.to_lowercase());
 
     let mut hidden: BTreeSet<&'static str> = BTreeSet::new();
 
@@ -684,6 +685,7 @@ fn render_project(
 /// File-level listing. We synthesize a fake root with the file's name and the
 /// DOCUMENT's children, so the user sees `file:N FILE "name"` at the top and
 /// the actual `0:0` DOCUMENT node stays hidden — in both YAML and JSON paths.
+#[allow(clippy::too_many_arguments)]
 fn render_file(
     resolver: &Resolver,
     file_synth: u32,
@@ -702,7 +704,7 @@ fn render_file(
             print_hidden_comment(&hidden);
             let lines =
                 render_flat_with_comments(&synthetic_root, file_synth, depth, &comment_rows);
-            print!("{}\n", lines.join("\n"));
+            println!("{}", lines.join("\n"));
             Ok(())
         }
         Output::Json => {
@@ -747,7 +749,7 @@ fn render_node_subtree(
     match format {
         Output::Yaml => {
             let lines = render_flat_with_comments(node, file_synth, depth, &comment_rows);
-            print!("{}\n", lines.join("\n"));
+            println!("{}", lines.join("\n"));
             Ok(())
         }
         Output::Json => print(
