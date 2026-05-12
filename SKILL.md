@@ -32,10 +32,11 @@ screenshot  ID     export PNG/JPG/SVG/PDF. --out, --scale, --img-format
 tokens      ID     design tokens. --as tokens|css|tailwind, --only colors,..., --scope
 assets      ID     bulk SVG/PNG export under a subtree. --out-dir
 context     ID     bundle: tree.txt + screenshot.png + styles/ + assets/. --out-dir
+                   tree.txt uses the same flat pipe-rail format as ls/find
 cache       prefetch | clear [--file-key K]
 ```
 
-Global flags that apply everywhere: `--json` (else compact YAML), `--cache-only` (no live fetches), `--in <ID>` (scope bare-id resolution; used by `ls` and `find`).
+Global flags that apply everywhere: `--json` (else compact text format), `--cache-only` (no live fetches), `--in <ID>` (scope; `find` searches inside it, `ls` uses it to qualify a bare native id like `0:0`).
 
 ## How to use it
 
