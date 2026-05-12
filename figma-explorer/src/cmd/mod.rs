@@ -8,7 +8,6 @@ pub mod cache;
 pub mod context;
 pub mod extract_assets;
 pub mod files;
-pub mod find;
 pub mod frames;
 pub mod pages;
 pub mod screenshot;
@@ -26,8 +25,6 @@ pub enum Command {
     Frames(frames::Args),
     /// Render a frame as a nested tree (skips invisible nodes).
     Tree(tree::Args),
-    /// Fuzzy-search for a node by name across the whole file.
-    Find(find::Args),
     /// Locate nodes by a multi-token ancestor-chain hint (e.g. "wallchart grid filter button").
     Search(search::Args),
     /// Export a node as PNG/JPG/SVG/PDF.
@@ -49,7 +46,6 @@ impl Command {
             Self::Pages(a) => a.run(cfg, format).await,
             Self::Frames(a) => a.run(cfg, format).await,
             Self::Tree(a) => a.run(cfg, format).await,
-            Self::Find(a) => a.run(cfg, format).await,
             Self::Search(a) => a.run(cfg, format).await,
             Self::Screenshot(a) => a.run(cfg, format).await,
             Self::ExtractAssets(a) => a.run(cfg, format).await,

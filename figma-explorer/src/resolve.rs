@@ -14,9 +14,9 @@
 //!   `styles`, `screenshot`, `extract_assets`) that need access to fields the
 //!   cache projection drops (fills, strokes, characters, …).
 //! - `_cache` suffixed functions over `&CacheNode` for the cached structural
-//!   consumers (`find`, `pages`, `frames`, `tree`, `search`). These are the
-//!   future direction; the Value-based path stays for now to avoid breaking
-//!   live commands during this migration.
+//!   consumers (`pages`, `frames`, `tree`, `search`). These are the future
+//!   direction; the Value-based path stays for now to avoid breaking live
+//!   commands during this migration.
 
 use nucleo_matcher::{
     pattern::{CaseMatching, Normalization, Pattern},
@@ -25,18 +25,7 @@ use nucleo_matcher::{
 use serde_json::Value;
 
 use crate::cache::CacheNode;
-use crate::node::{children, id, is_visible, name, type_str};
-
-/// A single fuzzy-search hit, with its path through page → frame → … for
-/// disambiguation.
-#[derive(Clone, Debug)]
-pub struct Hit<'a> {
-    pub node: &'a Value,
-    pub node_id: String,
-    pub name: String,
-    pub kind: String,
-    pub path: Vec<String>,
-}
+use crate::node::{children, id, is_visible, name};
 
 /// Top-level pages of the document (CANVAS nodes), in order.
 pub fn pages(doc: &Value) -> &[Value] {
@@ -75,41 +64,6 @@ pub fn resolve_node_id<'a>(doc: &'a Value, node_id: &str) -> Option<&'a Value> {
         None
     }
     find(doc, node_id)
-}
-
-/// Fuzzy search across the whole document. Up to `limit` hits, ranked by
-/// score (best first). Skips invisible nodes.
-pub fn fuzzy_search<'a>(doc: &'a Value, query: &str, limit: usize) -> Vec<Hit<'a>> {
-    let mut candidates: Vec<(&Value, Vec<String>)> = Vec::new();
-    collect_with_path(doc, &mut Vec::new(), &mut candidates);
-
-    let mut matcher = Matcher::new(nucleo_matcher::Config::DEFAULT);
-    let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
-
-    let mut buf: Vec<char> = Vec::new();
-    let mut scored: Vec<(u32, Hit<'a>)> = candidates
-        .into_iter()
-        .filter_map(|(node, path)| {
-            let n = name(node)?;
-            buf.clear();
-            buf.extend(n.chars());
-            let score =
-                pattern.score(nucleo_matcher::Utf32Str::new(n, &mut buf), &mut matcher)?;
-            Some((
-                score,
-                Hit {
-                    node,
-                    node_id: id(node).unwrap_or("").to_owned(),
-                    name: n.to_owned(),
-                    kind: type_str(node).unwrap_or("").to_owned(),
-                    path,
-                },
-            ))
-        })
-        .collect();
-    scored.sort_by_key(|h| std::cmp::Reverse(h.0));
-    scored.truncate(limit);
-    scored.into_iter().map(|(_, h)| h).collect()
 }
 
 /// Pick the best match from a slice of node references.
@@ -168,41 +122,9 @@ fn collect_visible<'a>(root: &'a Value, out: &mut Vec<&'a Value>) {
     }
 }
 
-fn collect_with_path<'a>(
-    node: &'a Value,
-    path: &mut Vec<String>,
-    out: &mut Vec<(&'a Value, Vec<String>)>,
-) {
-    if !is_visible(node) {
-        return;
-    }
-    if let Some(nm) = name(node) {
-        if !nm.is_empty() {
-            out.push((node, path.clone()));
-        }
-    }
-    let nm = name(node).unwrap_or("").to_owned();
-    path.push(nm);
-    for c in children(node) {
-        collect_with_path(c, path, out);
-    }
-    path.pop();
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // CacheNode-typed API (cache consumers)
 // ─────────────────────────────────────────────────────────────────────────────
-
-/// Single fuzzy-search hit over the typed cache, with its path through
-/// page → frame → … for disambiguation.
-#[derive(Clone, Debug)]
-pub struct HitCache<'a> {
-    pub node: &'a CacheNode,
-    pub node_id: String,
-    pub name: String,
-    pub kind: String,
-    pub path: Vec<String>,
-}
 
 /// Top-level pages of the document (CANVAS nodes), in order.
 pub fn pages_cache(doc: &CacheNode) -> &[CacheNode] {
@@ -241,40 +163,6 @@ pub fn resolve_node_id_cache<'a>(doc: &'a CacheNode, node_id: &str) -> Option<&'
         None
     }
     find(doc, node_id)
-}
-
-/// Fuzzy search across the whole document. Up to `limit` hits, ranked by
-/// score (best first). Skips invisible nodes.
-pub fn fuzzy_search_cache<'a>(doc: &'a CacheNode, query: &str, limit: usize) -> Vec<HitCache<'a>> {
-    let mut candidates: Vec<(&'a CacheNode, Vec<String>)> = Vec::new();
-    collect_with_path_cache(doc, &mut Vec::new(), &mut candidates);
-
-    let mut matcher = Matcher::new(nucleo_matcher::Config::DEFAULT);
-    let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
-
-    let mut buf: Vec<char> = Vec::new();
-    let mut scored: Vec<(u32, HitCache<'a>)> = candidates
-        .into_iter()
-        .filter_map(|(node, path)| {
-            buf.clear();
-            buf.extend(node.name.chars());
-            let score = pattern
-                .score(nucleo_matcher::Utf32Str::new(&node.name, &mut buf), &mut matcher)?;
-            Some((
-                score,
-                HitCache {
-                    node,
-                    node_id: node.id.clone(),
-                    name: node.name.clone(),
-                    kind: node.type_.clone(),
-                    path,
-                },
-            ))
-        })
-        .collect();
-    scored.sort_by_key(|h| std::cmp::Reverse(h.0));
-    scored.truncate(limit);
-    scored.into_iter().map(|(_, h)| h).collect()
 }
 
 fn pick_match_cache<'a>(candidates: &'a [CacheNode], query: &str) -> Option<&'a CacheNode> {
@@ -328,24 +216,6 @@ fn collect_visible_cache<'a>(root: &'a CacheNode, out: &mut Vec<&'a CacheNode>) 
         out.push(c);
         collect_visible_cache(c, out);
     }
-}
-
-fn collect_with_path_cache<'a>(
-    node: &'a CacheNode,
-    path: &mut Vec<String>,
-    out: &mut Vec<(&'a CacheNode, Vec<String>)>,
-) {
-    if !node.visible {
-        return;
-    }
-    if !node.name.is_empty() {
-        out.push((node, path.clone()));
-    }
-    path.push(node.name.clone());
-    for c in &node.children {
-        collect_with_path_cache(c, path, out);
-    }
-    path.pop();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -574,13 +444,6 @@ mod tests {
     }
 
     #[test]
-    fn fuzzy_search_finds_typoed_query() {
-        let d = doc();
-        let hits = fuzzy_search(&d, "buton", 5);
-        assert!(hits.iter().any(|h| h.name.contains("Button")));
-    }
-
-    #[test]
     fn invisible_frame_is_skipped() {
         let d = doc();
         let page = resolve_page(&d, "Home").unwrap();
@@ -734,12 +597,5 @@ mod tests {
         let d = wallchart_doc();
         let n = resolve_node_id_cache(&d, "1:4").expect("expected to find 1:4");
         assert_eq!(n.name, "Button");
-    }
-
-    #[test]
-    fn fuzzy_search_cache_finds_typoed_query() {
-        let d = wallchart_doc();
-        let hits = fuzzy_search_cache(&d, "buton", 5);
-        assert!(hits.iter().any(|h| h.name.contains("Button")));
     }
 }
