@@ -1,4 +1,6 @@
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Result;
@@ -11,8 +13,15 @@ use crate::cache::{
     self, build_cached_file, default_dir, fetch_comments_into_meta, CacheDir, EntryStatus,
     FileMeta, FileRef,
 };
-use crate::cmd::fetch_file_json;
+use crate::cmd::{fetch_file_json, fetch_local_variables, is_variables_forbidden_error};
+use crate::full_cache;
 use crate::{print, Globals, Output};
+
+/// After this many consecutive 403s on `/variables/local`, disable further
+/// variables fetches for the rest of the prefetch run. Non-Enterprise
+/// accounts get 403 on every file, so without this gate a single prefetch
+/// would burn one quota slot per file for no useful data.
+const VARIABLES_403_DISABLE_THRESHOLD: usize = 3;
 
 /// Cache maintenance commands.
 ///
@@ -38,7 +47,12 @@ pub enum CacheCommand {
 #[derive(ClapArgs, Debug)]
 pub struct PrefetchArgs {
     /// Comma-separated list of Figma project IDs. Falls back to FIGMA_PROJECTS_IDS.
-    #[arg(long, env = "FIGMA_PROJECTS_IDS", value_delimiter = ',', required = true)]
+    #[arg(
+        long,
+        env = "FIGMA_PROJECTS_IDS",
+        value_delimiter = ',',
+        required = true
+    )]
     pub project_ids: Vec<String>,
 
     /// Re-fetch every file, ignoring cached `last_modified`.
@@ -50,6 +64,18 @@ pub struct PrefetchArgs {
     /// at typical fetch latencies (5–30 s per file).
     #[arg(long, default_value_t = 3)]
     pub concurrency: usize,
+
+    /// Skip writing the `.full.json.gz` sidecar. Default: write it (needed by
+    /// `node-info`). Useful only when disk pressure outweighs offline support.
+    #[arg(long)]
+    pub no_full: bool,
+
+    /// Skip fetching `/variables/local`. Default: attempt the fetch with an
+    /// adaptive 403-disable safeguard. Also disabled by env
+    /// `FIGMA_EXPLORER_FETCH_VARIABLES=0`. Non-Enterprise accounts get 403 on
+    /// every file, so the adaptive guard kicks in after 3 strikes anyway.
+    #[arg(long)]
+    pub no_variables: bool,
 }
 
 #[derive(ClapArgs, Debug)]
@@ -178,9 +204,31 @@ impl PrefetchArgs {
             self.concurrency
         );
 
+        // Env opt-out: `FIGMA_EXPLORER_FETCH_VARIABLES=0` disables variables
+        // fetches without requiring the flag. Honors any value other than "0"
+        // as "enabled" — typical bool-y env conventions.
+        let env_no_variables = std::env::var("FIGMA_EXPLORER_FETCH_VARIABLES")
+            .map(|s| s.trim() == "0")
+            .unwrap_or(false);
+        let no_variables = self.no_variables || env_no_variables;
+        let no_full = self.no_full;
+
+        // Adaptive-disable state for variables: shared across the worker pool.
+        let variables_disabled = Arc::new(AtomicBool::new(no_variables));
+        let consecutive_403 = Arc::new(AtomicUsize::new(0));
+        // Tallies for the final summary.
+        let variables_ok = Arc::new(AtomicUsize::new(0));
+        let variables_403 = Arc::new(AtomicUsize::new(0));
+        let full_written = Arc::new(AtomicUsize::new(0));
+
         let cache_root = cache_dir.root.clone();
         let fetched_count = stream::iter(to_fetch.into_iter().map(|f| {
                 let cache_root = cache_root.clone();
+                let variables_disabled = Arc::clone(&variables_disabled);
+                let consecutive_403 = Arc::clone(&consecutive_403);
+                let variables_ok = Arc::clone(&variables_ok);
+                let variables_403 = Arc::clone(&variables_403);
+                let full_written = Arc::clone(&full_written);
                 async move {
                     let started = Instant::now();
                     let cache = CacheDir::new(&cache_root);
@@ -216,11 +264,84 @@ impl PrefetchArgs {
                                 comments_fingerprint: None,
                                 comments_error: None,
                                 comments_schema_version: None,
+                                full_fetched_at_epoch: None,
+                                full_bytes: None,
+                                full_schema_version: None,
+                                variables_fetched_at_epoch: None,
+                                variables_bytes: None,
+                                variables_error: None,
+                                variables_schema_version: None,
                             };
                             // Fetch comments alongside the document. Best-effort:
                             // failures flip `meta.comments_error` but don't fail
                             // the entry.
                             fetch_comments_into_meta(cfg, &cache, &f.file_key, now, &mut meta).await;
+
+                            // Full-JSON sidecar — keep the raw response so
+                            // `node-info` (and future migrations of tokens/
+                            // assets/context) can work offline.
+                            if !no_full {
+                                match full_cache::write_full(&cache, &f.file_key, &file) {
+                                    Ok(n) => {
+                                        meta.full_fetched_at_epoch = Some(now);
+                                        meta.full_bytes = Some(n);
+                                        meta.full_schema_version = Some(cache::FULL_SCHEMA_VERSION);
+                                        full_written.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                    Err(e) => eprintln!(
+                                        "cache: write_full failed for {}: {e:#}",
+                                        f.file_key
+                                    ),
+                                }
+                            }
+
+                            // Local-variables sidecar — paid-tier endpoint.
+                            // Skip when disabled (flag, env, or adaptive 403).
+                            if !variables_disabled.load(Ordering::Relaxed) {
+                                match fetch_local_variables(cfg, &f.file_key).await {
+                                    Ok(vars) => {
+                                        match full_cache::write_variables(&cache, &f.file_key, &vars) {
+                                            Ok(n) => {
+                                                meta.variables_fetched_at_epoch = Some(now);
+                                                meta.variables_bytes = Some(n);
+                                                meta.variables_schema_version =
+                                                    Some(cache::VARIABLES_SCHEMA_VERSION);
+                                                meta.variables_error = None;
+                                                variables_ok.fetch_add(1, Ordering::Relaxed);
+                                                // Reset the 403 streak on success.
+                                                consecutive_403.store(0, Ordering::Relaxed);
+                                            }
+                                            Err(e) => {
+                                                let msg = format!("write_variables: {e:#}");
+                                                eprintln!(
+                                                    "cache: {} variables: {msg}",
+                                                    f.file_key
+                                                );
+                                                meta.variables_error = Some(msg);
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        let msg = format!("{e:#}");
+                                        meta.variables_error = Some(msg.clone());
+                                        if is_variables_forbidden_error(&msg) {
+                                            variables_403.fetch_add(1, Ordering::Relaxed);
+                                            let n = consecutive_403
+                                                .fetch_add(1, Ordering::Relaxed)
+                                                + 1;
+                                            if n >= VARIABLES_403_DISABLE_THRESHOLD
+                                                && !variables_disabled
+                                                    .swap(true, Ordering::Relaxed)
+                                            {
+                                                eprintln!(
+                                                    "cache: {VARIABLES_403_DISABLE_THRESHOLD} consecutive 403s on /variables/local — disabling for the rest of this run (account likely lacks Variables REST API access)"
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
                             if let Err(e) = cache.write_meta(&meta) {
                                 eprintln!("cache: write_meta failed for {}: {e:#}", f.file_key);
                             }
@@ -254,8 +375,11 @@ impl PrefetchArgs {
                                 msg
                             );
                             // Record the failure marker so subsequent loads
-                            // don't keep retrying. Drop any stale payload.
+                            // don't keep retrying. Drop any stale payload
+                            // *and* sidecars: a fetch failure invalidates the
+                            // whole entry, full + variables included.
                             let _ = cache.delete_entry(&f.file_key);
+                            let _ = full_cache::delete_sidecars(&cache, &f.file_key);
                             let marker = FileMeta {
                                 file_key: f.file_key.clone(),
                                 name: f.name.clone(),
@@ -272,6 +396,13 @@ impl PrefetchArgs {
                                 comments_fingerprint: None,
                                 comments_error: None,
                                 comments_schema_version: None,
+                                full_fetched_at_epoch: None,
+                                full_bytes: None,
+                                full_schema_version: None,
+                                variables_fetched_at_epoch: None,
+                                variables_bytes: None,
+                                variables_error: None,
+                                variables_schema_version: None,
                             };
                             let _ = cache.write_meta(&marker);
                         }
@@ -287,7 +418,8 @@ impl PrefetchArgs {
         // step prefetch would never observe new comments on stable files.
         let n_comments_only = to_refresh_comments.len();
         let cache_root = cache_dir.root.clone();
-        let comments_refreshed = stream::iter(to_refresh_comments.into_iter().map(|(staged, _current)| {
+        let comments_refreshed =
+            stream::iter(to_refresh_comments.into_iter().map(|(staged, _current)| {
                 let cache_root = cache_root.clone();
                 async move {
                     let cache = CacheDir::new(&cache_root);
@@ -374,6 +506,16 @@ impl PrefetchArgs {
             .filter(|m| configured.contains(&m.project_id))
             .filter_map(|m| m.bytes)
             .sum();
+        let full_bytes_total: u64 = metas_after
+            .iter()
+            .filter(|m| configured.contains(&m.project_id))
+            .filter_map(|m| m.full_bytes)
+            .sum();
+        let variables_bytes_total: u64 = metas_after
+            .iter()
+            .filter(|m| configured.contains(&m.project_id))
+            .filter_map(|m| m.variables_bytes)
+            .sum();
         let total_nodes: usize = metas_after
             .iter()
             .filter(|m| configured.contains(&m.project_id))
@@ -393,6 +535,12 @@ impl PrefetchArgs {
             "not_exportable": not_exportable,
             "failed": failed,
             "cache_bytes": cache_bytes,
+            "full_bytes": full_bytes_total,
+            "variables_bytes": variables_bytes_total,
+            "full_written": full_written.load(Ordering::Relaxed),
+            "variables_ok": variables_ok.load(Ordering::Relaxed),
+            "variables_403": variables_403.load(Ordering::Relaxed),
+            "variables_disabled": variables_disabled.load(Ordering::Relaxed),
             "total_nodes": total_nodes,
             "comments_refreshed": comments_refreshed,
         });
@@ -443,7 +591,10 @@ impl ClearArgs {
                 files_dir.display()
             );
         } else {
-            eprintln!("cache: nothing to clear (no cache directory at {})", files_dir.display());
+            eprintln!(
+                "cache: nothing to clear (no cache directory at {})",
+                files_dir.display()
+            );
         }
 
         let summary = json!({

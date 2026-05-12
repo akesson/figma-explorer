@@ -59,6 +59,17 @@ pub const DEFAULT_TTL_SECS: u64 = 3600;
 /// (v0 / missing = legacy `Vec<Comment>` shape from before pre-association.)
 pub const COMMENTS_SCHEMA_VERSION: u32 = 1;
 
+/// Sidecar format version for `{file_key}.full.json.gz` — the raw
+/// `/v1/files/{key}` response body, gzip-compressed. v1 is the initial
+/// shape (untouched Figma JSON). A future bump signals "the wire format
+/// changed in a way our reader cares about; refetch."
+pub const FULL_SCHEMA_VERSION: u32 = 1;
+
+/// Sidecar format version for `{file_key}.variables.json` — the raw
+/// `/v1/files/{key}/variables/local` response body. v1 is the initial
+/// shape.
+pub const VARIABLES_SCHEMA_VERSION: u32 = 1;
+
 /// 4-byte magic prefix on every `.rkyv` cache file. Distinguishes a cache
 /// file from arbitrary bytes (truncated downloads, accidental replacement).
 pub const CACHE_MAGIC: [u8; 4] = *b"FXC\0";
@@ -95,7 +106,10 @@ impl std::fmt::Display for CacheError {
                 "cache schema version mismatch: file is v{found}, build supports v{expected}"
             ),
             Self::TooShort { len } => {
-                write!(f, "cache file too short: {len} bytes (need at least {CACHE_HEADER_LEN})")
+                write!(
+                    f,
+                    "cache file too short: {len} bytes (need at least {CACHE_HEADER_LEN})"
+                )
             }
             Self::Decode(s) => write!(f, "decoding cache: {s}"),
             Self::Io(e) => write!(f, "I/O error: {e}"),
@@ -177,9 +191,21 @@ pub struct CachedFile {
 /// to the previous `strip_node` Value → Value but materializes typed
 /// `CacheNode`s directly so the result is ready for rkyv serialization.
 pub fn project_to_cache(node: &Value) -> CacheNode {
-    let id = node.get("id").and_then(Value::as_str).unwrap_or("").to_owned();
-    let type_ = node.get("type").and_then(Value::as_str).unwrap_or("").to_owned();
-    let name = node.get("name").and_then(Value::as_str).unwrap_or("").to_owned();
+    let id = node
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    let type_ = node
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    let name = node
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
     // Figma omits `visible` when the node is visible; missing → true.
     let visible = !matches!(node.get("visible"), Some(Value::Bool(false)));
     let bounds = node.get("absoluteBoundingBox").and_then(parse_bounds);
@@ -188,7 +214,14 @@ pub fn project_to_cache(node: &Value) -> CacheNode {
         .and_then(Value::as_array)
         .map(|arr| arr.iter().map(project_to_cache).collect())
         .unwrap_or_default();
-    CacheNode { id, type_, name, visible, bounds, children }
+    CacheNode {
+        id,
+        type_,
+        name,
+        visible,
+        bounds,
+        children,
+    }
 }
 
 fn parse_bounds(v: &Value) -> Option<Bounds> {
@@ -324,15 +357,40 @@ pub struct FileMeta {
     /// [`COMMENTS_SCHEMA_VERSION`] after every successful sidecar write.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comments_schema_version: Option<u32>,
+    /// Epoch seconds when the full raw-JSON sidecar (`{file_key}.full.json.gz`)
+    /// was last written. `None` means it's never been written. Drives the
+    /// `node-info` cache-only path: a missing sidecar with `cache_only=true`
+    /// errors with a "run cache prefetch" hint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub full_fetched_at_epoch: Option<u64>,
+    /// Size of the (compressed) `.full.json.gz` sidecar in bytes. Surfaced in
+    /// `cache prefetch` summaries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub full_bytes: Option<u64>,
+    /// On-disk format version stamped on the `.full.json.gz` sidecar. See
+    /// [`FULL_SCHEMA_VERSION`]. Mismatched / missing → treat as stale.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub full_schema_version: Option<u32>,
+    /// Epoch seconds of the last successful local-variables fetch. `None`
+    /// when never fetched (cache predates the feature, or the account doesn't
+    /// have Variables REST API access).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variables_fetched_at_epoch: Option<u64>,
+    /// Size of the `.variables.json` sidecar in bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variables_bytes: Option<u64>,
+    /// Last error from the variables fetch, if any. Often "403 Forbidden" for
+    /// non-Enterprise accounts. Surfaced by `node-info` so the user knows why
+    /// the variables block is missing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variables_error: Option<String>,
+    /// Variables sidecar schema version. See [`VARIABLES_SCHEMA_VERSION`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variables_schema_version: Option<u32>,
 }
 
 impl FileMeta {
-    pub fn from_success(
-        file_ref: &FileRef,
-        payload: &CachedFile,
-        bytes: u64,
-        now: u64,
-    ) -> Self {
+    pub fn from_success(file_ref: &FileRef, payload: &CachedFile, bytes: u64, now: u64) -> Self {
         FileMeta {
             file_key: payload.file_key.clone(),
             name: payload.name.clone(),
@@ -349,6 +407,13 @@ impl FileMeta {
             comments_fingerprint: None,
             comments_error: None,
             comments_schema_version: None,
+            full_fetched_at_epoch: None,
+            full_bytes: None,
+            full_schema_version: None,
+            variables_fetched_at_epoch: None,
+            variables_bytes: None,
+            variables_error: None,
+            variables_schema_version: None,
         }
     }
 }
@@ -382,6 +447,20 @@ impl CacheDir {
 
     pub fn comments_path(&self, file_key: &str) -> PathBuf {
         self.files_dir().join(format!("{file_key}.comments.json"))
+    }
+
+    /// Path of the gzipped full-JSON sidecar (raw `/v1/files/{key}` body).
+    /// The structural cache (`.rkyv`) drops most fields; this sidecar keeps
+    /// them so `node-info` (and future migrations of tokens/assets/context)
+    /// can run offline.
+    pub fn full_path(&self, file_key: &str) -> PathBuf {
+        self.files_dir().join(format!("{file_key}.full.json.gz"))
+    }
+
+    /// Path of the variables sidecar (raw `/v1/files/{key}/variables/local`
+    /// body, plaintext JSON).
+    pub fn variables_path(&self, file_key: &str) -> PathBuf {
+        self.files_dir().join(format!("{file_key}.variables.json"))
     }
 
     /// Read the comments sidecar for `file_key`. `Ok(None)` when the sidecar
@@ -440,25 +519,33 @@ impl CacheDir {
         atomic_write(&path, &bytes)
     }
 
-    /// Delete `{file_key}.meta.json` first, then `{file_key}.rkyv` and the
-    /// `{file_key}.comments.json` sidecar. The meta-first ordering matters:
-    /// readers seeing no meta treat the entry as uncached, so a transient
-    /// "meta gone but other files linger" window is benign.
+    /// Delete `{file_key}.meta.json` first, then every sidecar paired with
+    /// the same file_key (rkyv payload, comments, full-JSON, variables). The
+    /// meta-first ordering matters: readers seeing no meta treat the entry as
+    /// uncached, so a transient "meta gone but other files linger" window is
+    /// benign.
     pub fn delete_entry(&self, file_key: &str) -> Result<()> {
         let meta = self.meta_path(file_key);
         let payload = self.file_path(file_key);
         let comments = self.comments_path(file_key);
+        let full = self.full_path(file_key);
+        let variables = self.variables_path(file_key);
         if meta.exists() {
-            fs::remove_file(&meta)
-                .with_context(|| format!("removing {}", meta.display()))?;
+            fs::remove_file(&meta).with_context(|| format!("removing {}", meta.display()))?;
         }
         if payload.exists() {
-            fs::remove_file(&payload)
-                .with_context(|| format!("removing {}", payload.display()))?;
+            fs::remove_file(&payload).with_context(|| format!("removing {}", payload.display()))?;
         }
         if comments.exists() {
             fs::remove_file(&comments)
                 .with_context(|| format!("removing {}", comments.display()))?;
+        }
+        if full.exists() {
+            fs::remove_file(&full).with_context(|| format!("removing {}", full.display()))?;
+        }
+        if variables.exists() {
+            fs::remove_file(&variables)
+                .with_context(|| format!("removing {}", variables.display()))?;
         }
         Ok(())
     }
@@ -550,8 +637,7 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("path has no parent: {}", path.display()))?;
-    fs::create_dir_all(parent)
-        .with_context(|| format!("creating {}", parent.display()))?;
+    fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
     let mut tmp = tempfile::NamedTempFile::new_in(parent)
         .with_context(|| format!("creating tempfile in {}", parent.display()))?;
     tmp.write_all(bytes)
@@ -775,7 +861,9 @@ async fn try_refresh_single(
 
     // Either last_modified changed, prior status was Failed, or payload is
     // unreadable — refetch.
-    Ok(Some(fetch_and_cache(cfg, cache, file_key, Some(&current), now).await?))
+    Ok(Some(
+        fetch_and_cache(cfg, cache, file_key, Some(&current), now).await?,
+    ))
 }
 
 /// Live fetch + write to cache. `file_ref` carries project context when we
@@ -878,6 +966,13 @@ async fn fetch_and_cache(
                 comments_fingerprint: None,
                 comments_error: None,
                 comments_schema_version: None,
+                full_fetched_at_epoch: None,
+                full_bytes: None,
+                full_schema_version: None,
+                variables_fetched_at_epoch: None,
+                variables_bytes: None,
+                variables_error: None,
+                variables_schema_version: None,
             };
             // Also drop any stale payload — meta-first ordering.
             let _ = cache.delete_entry(file_key);
@@ -961,9 +1056,8 @@ pub async fn fetch_comments_into_meta(
             let document = match cache.read_file(file_key) {
                 Ok(Some(payload)) => payload,
                 Ok(None) => {
-                    let msg = format!(
-                        "tree not cached for {file_key}; cannot pre-associate comments"
-                    );
+                    let msg =
+                        format!("tree not cached for {file_key}; cannot pre-associate comments");
                     eprintln!("comments: {msg}");
                     meta.comments_error = Some(msg);
                     return;
@@ -1027,10 +1121,7 @@ fn parse_comments_lenient(raw: &Value) -> Result<Vec<Comment>> {
             // Normalize null/missing client_meta → default Vector at origin.
             // Figma occasionally returns null for older threads where the
             // anchor was deleted along with its target.
-            let needs_default = matches!(
-                obj.get("client_meta"),
-                None | Some(Value::Null)
-            );
+            let needs_default = matches!(obj.get("client_meta"), None | Some(Value::Null));
             if needs_default {
                 obj.insert(
                     "client_meta".into(),
@@ -1046,10 +1137,7 @@ fn parse_comments_lenient(raw: &Value) -> Result<Vec<Comment>> {
         match serde_json::from_value::<Comment>(v) {
             Ok(c) => out.push(c),
             Err(e) => {
-                let id_hint = entry
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .unwrap_or("?");
+                let id_hint = entry.get("id").and_then(Value::as_str).unwrap_or("?");
                 eprintln!("comments: skipping malformed comment {id_hint}: {e}");
             }
         }
@@ -1069,9 +1157,7 @@ fn intern_comment_synths(cache: &CacheDir, file_synth: u32, comments: &[Associat
             s.intern_comment(file_synth, &c.comment_id);
         }
     }) {
-        eprintln!(
-            "cache: comment-synth intern failed for file_synth={file_synth}: {e:#}"
-        );
+        eprintln!("cache: comment-synth intern failed for file_synth={file_synth}: {e:#}");
     }
 }
 
@@ -1086,13 +1172,11 @@ pub async fn refresh_comments(
     let cache = CacheDir::new(default_dir());
     cache.ensure()?;
     let now = now_epoch();
-    let mut meta = cache
-        .read_meta(file_key)?
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "no cached metadata for {file_key}; run `cache prefetch` or pass a URL first"
-            )
-        })?;
+    let mut meta = cache.read_meta(file_key)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "no cached metadata for {file_key}; run `cache prefetch` or pass a URL first"
+        )
+    })?;
     fetch_comments_into_meta(cfg, &cache, file_key, now, &mut meta).await;
     cache.write_meta(&meta)?;
     if let Some(err) = &meta.comments_error {
@@ -1157,7 +1241,9 @@ pub async fn load_file(cfg: &Configuration, file_key: &str) -> Result<CachedFile
             return cache
                 .read_file(file_key)
                 .map_err(|e| anyhow::anyhow!("{e}"))?
-                .ok_or_else(|| anyhow::anyhow!("cache: meta says Ok but payload vanished mid-read"));
+                .ok_or_else(|| {
+                    anyhow::anyhow!("cache: meta says Ok but payload vanished mid-read")
+                });
         }
         LoadAction::NotExportableCached => {
             let err = meta
@@ -1173,10 +1259,7 @@ pub async fn load_file(cfg: &Configuration, file_key: &str) -> Result<CachedFile
     // hint that matches the user's env — that's cheaper than a blind refetch
     // and lets us preserve the cache entry when last_modified is unchanged.
     let env_projects = parse_project_ids_env();
-    let project_hint = meta
-        .as_ref()
-        .map(|m| m.project_id.as_str())
-        .unwrap_or("");
+    let project_hint = meta.as_ref().map(|m| m.project_id.as_str()).unwrap_or("");
     if !project_hint.is_empty() && env_projects.iter().any(|p| p == project_hint) {
         match try_refresh_single(cfg, &cache, file_key, project_hint, meta.as_ref(), now).await {
             Ok(Some(payload)) => return Ok(payload),
@@ -1296,6 +1379,13 @@ mod tests {
             comments_fingerprint: None,
             comments_error: None,
             comments_schema_version: None,
+            full_fetched_at_epoch: None,
+            full_bytes: None,
+            full_schema_version: None,
+            variables_fetched_at_epoch: None,
+            variables_bytes: None,
+            variables_error: None,
+            variables_schema_version: None,
         }
     }
 
@@ -1307,19 +1397,28 @@ mod tests {
     #[test]
     fn decide_action_within_ttl_uses_cache() {
         let m = ok_meta(0, 500);
-        assert_eq!(decide_action(Some(&m), true, 1000, 3600), LoadAction::UseCache);
+        assert_eq!(
+            decide_action(Some(&m), true, 1000, 3600),
+            LoadAction::UseCache
+        );
     }
 
     #[test]
     fn decide_action_ttl_expired_refreshes() {
         let m = ok_meta(0, 1000);
-        assert_eq!(decide_action(Some(&m), true, 6000, 3600), LoadAction::Refresh);
+        assert_eq!(
+            decide_action(Some(&m), true, 6000, 3600),
+            LoadAction::Refresh
+        );
     }
 
     #[test]
     fn decide_action_missing_payload_forces_refresh() {
         let m = ok_meta(0, 500);
-        assert_eq!(decide_action(Some(&m), false, 1000, 3600), LoadAction::Refresh);
+        assert_eq!(
+            decide_action(Some(&m), false, 1000, 3600),
+            LoadAction::Refresh
+        );
     }
 
     #[test]
@@ -1336,13 +1435,19 @@ mod tests {
     fn decide_action_failed_status_always_refreshes() {
         let mut m = ok_meta(0, 500);
         m.status = EntryStatus::Failed;
-        assert_eq!(decide_action(Some(&m), false, 1000, 3600), LoadAction::Refresh);
+        assert_eq!(
+            decide_action(Some(&m), false, 1000, 3600),
+            LoadAction::Refresh
+        );
     }
 
     #[test]
     fn decide_action_boundary_ttl_treated_as_expired() {
         let m = ok_meta(0, 0);
-        assert_eq!(decide_action(Some(&m), true, 3600, 3600), LoadAction::Refresh);
+        assert_eq!(
+            decide_action(Some(&m), true, 3600, 3600),
+            LoadAction::Refresh
+        );
     }
 
     fn leaf(id: &str, name: &str, type_: &str) -> CacheNode {
@@ -1456,6 +1561,13 @@ mod tests {
             comments_fetched_at_epoch: None,
             comments_fingerprint: None,
             comments_error: None,
+            full_fetched_at_epoch: None,
+            full_bytes: None,
+            full_schema_version: None,
+            variables_fetched_at_epoch: None,
+            variables_bytes: None,
+            variables_error: None,
+            variables_schema_version: None,
         }
     }
 
@@ -1550,7 +1662,10 @@ mod tests {
     fn default_dir_respects_env_override() {
         let prev = std::env::var("FIGMA_EXPLORER_CACHE_DIR").ok();
         std::env::set_var("FIGMA_EXPLORER_CACHE_DIR", "/tmp/figma-explorer-test-cache");
-        assert_eq!(default_dir(), PathBuf::from("/tmp/figma-explorer-test-cache"));
+        assert_eq!(
+            default_dir(),
+            PathBuf::from("/tmp/figma-explorer-test-cache")
+        );
         match prev {
             Some(v) => std::env::set_var("FIGMA_EXPLORER_CACHE_DIR", v),
             None => std::env::remove_var("FIGMA_EXPLORER_CACHE_DIR"),

@@ -56,12 +56,19 @@ impl Args {
 
         let (file_synth, file_key, focus_node_id): (u32, String, Option<String>) = match &target {
             ResolvedTarget::File { synth, meta, .. } => (*synth, meta.file_key.clone(), None),
-            ResolvedTarget::Node { file_synth, meta, node } => {
-                (*file_synth, meta.file_key.clone(), Some(node.id.clone()))
-            }
+            ResolvedTarget::Node {
+                file_synth,
+                meta,
+                node,
+            } => (*file_synth, meta.file_key.clone(), Some(node.id.clone())),
             ResolvedTarget::Project { .. } | ResolvedTarget::Root => {
                 anyhow::bail!(
                     "comments requires a file or node scope; got a project/root id ({id_str})"
+                );
+            }
+            ResolvedTarget::Comment { .. } => {
+                anyhow::bail!(
+                    "for a single comment thread use `node-info {id_str}`; the `comments` command lists comments at file/node scope"
                 );
             }
         };
@@ -82,11 +89,7 @@ impl Args {
         // simplicity we match on node_id; descendants are not included
         // (`ls` already does that on the tree side).
         if let Some(node_id) = &focus_node_id {
-            comments.retain(|c| {
-                c.node
-                    .as_ref()
-                    .is_some_and(|n| n.node_id == *node_id)
-            });
+            comments.retain(|c| c.node.as_ref().is_some_and(|n| n.node_id == *node_id));
         }
 
         // Resolution-state filter applies to top-level threads; replies follow
@@ -152,7 +155,12 @@ async fn load_or_refresh_comments(
     Ok(sidecar.unwrap_or_default())
 }
 
-fn render(file_synth: u32, file_key: &str, comments: &[AssociatedComment], format: Output) -> Result<()> {
+fn render(
+    file_synth: u32,
+    file_key: &str,
+    comments: &[AssociatedComment],
+    format: Output,
+) -> Result<()> {
     match format {
         Output::Yaml => render_yaml(file_synth, comments),
         Output::Json => render_json(file_synth, file_key, comments, format),
@@ -164,9 +172,17 @@ fn render_yaml(file_synth: u32, comments: &[AssociatedComment]) -> Result<()> {
         return Ok(());
     }
     // Pre-measure column widths so the pipe rail aligns across rows.
-    let rows: Vec<YamlRow> = comments.iter().map(|c| YamlRow::from(c, file_synth)).collect();
+    let rows: Vec<YamlRow> = comments
+        .iter()
+        .map(|c| YamlRow::from(c, file_synth))
+        .collect();
     let id_w = rows.iter().map(|r| r.id.len()).max().unwrap_or(1);
-    let b_w = rows.iter().map(|r| r.bounds.len()).max().unwrap_or(1).max(1);
+    let b_w = rows
+        .iter()
+        .map(|r| r.bounds.len())
+        .max()
+        .unwrap_or(1)
+        .max(1);
     let mut out = String::new();
     for r in &rows {
         out.push_str(&format!(
@@ -185,7 +201,12 @@ fn render_yaml(file_synth: u32, comments: &[AssociatedComment]) -> Result<()> {
     Ok(())
 }
 
-fn render_json(file_synth: u32, file_key: &str, comments: &[AssociatedComment], format: Output) -> Result<()> {
+fn render_json(
+    file_synth: u32,
+    file_key: &str,
+    comments: &[AssociatedComment],
+    format: Output,
+) -> Result<()> {
     let items: Vec<Value> = comments
         .iter()
         .map(|c| {

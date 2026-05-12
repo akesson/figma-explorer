@@ -11,6 +11,7 @@ use anyhow::Context;
 use figma_api::apis::configuration::Configuration;
 
 use crate::cache::{self, CacheDir, CacheNode, CachedFile, EntryStatus, FileMeta};
+use crate::comment_assoc::AssociatedComment;
 use crate::id::Id;
 use crate::node_index::NodeIndex;
 use crate::synth::SynthState;
@@ -36,6 +37,16 @@ pub enum ResolvedTarget {
         file_synth: u32,
         meta: FileMeta,
         node: CacheNode,
+    },
+    /// `file:N:comm:M` — a specific comment in a file, pre-associated with
+    /// its anchor node in the `.comments.json` sidecar. Carries the comm
+    /// synth so callers can render qualified ids and surface replies that
+    /// belong to the same thread.
+    Comment {
+        file_synth: u32,
+        comm_synth: u32,
+        meta: FileMeta,
+        comment: AssociatedComment,
     },
 }
 
@@ -118,8 +129,7 @@ impl Resolver {
         if let Some(idx) = self.node_index.get() {
             return Ok(idx);
         }
-        let idx = NodeIndex::build(&self.cache, &self.synth)
-            .map_err(ResolveError::internal)?;
+        let idx = NodeIndex::build(&self.cache, &self.synth).map_err(ResolveError::internal)?;
         Ok(self.node_index.get_or_init(|| idx))
     }
 
@@ -136,13 +146,7 @@ impl Resolver {
             Id::Project(n) => self.resolve_project(*n),
             Id::File(n) => self.resolve_file(*n),
             Id::Node { file, node } => self.resolve_node(*file, node),
-            Id::Comment { file, comm } => Err(ResolveError::NotResolvableYet {
-                id: format!("file:{file}:comm:{comm}"),
-                hint: "comment IDs are output-only for now; they will be wired \
-                       up via a future `info` command. Use `ls` to see threads \
-                       inline."
-                    .to_owned(),
-            }),
+            Id::Comment { file, comm } => self.resolve_comment(*file, *comm),
             Id::BareNode(node_id) => self.resolve_bare(node_id),
             Id::Url(parsed) => self.resolve_url(cfg, parsed).await,
         }
@@ -174,9 +178,77 @@ impl Resolver {
             .to_owned();
         let (meta, payload) = self.read_file(&file_key)?;
         let node = find_node(&payload.document, node_id).ok_or_else(|| {
-            ResolveError::NotCached(format!("file:{file_synth}:{node_id} (node id not found in file)"))
+            ResolveError::NotCached(format!(
+                "file:{file_synth}:{node_id} (node id not found in file)"
+            ))
         })?;
-        Ok(ResolvedTarget::Node { file_synth, meta, node })
+        Ok(ResolvedTarget::Node {
+            file_synth,
+            meta,
+            node,
+        })
+    }
+
+    /// Resolve `file:N:comm:M` by:
+    ///
+    /// 1. Looking up the file synth → file_key in [`SynthState`].
+    /// 2. Looking up `(file_synth, comm_synth)` → Figma comment id in
+    ///    [`SynthState`]'s comment table.
+    /// 3. Reading the `.comments.json` sidecar and locating the entry by id.
+    ///
+    /// All four "not found" outcomes (unknown file synth, unknown comm synth,
+    /// missing sidecar, comment id present in synth table but absent from
+    /// sidecar) collapse to [`ResolveError::NotCached`] with a hint pointing
+    /// at `cache prefetch`.
+    fn resolve_comment(
+        &self,
+        file_synth: u32,
+        comm_synth: u32,
+    ) -> Result<ResolvedTarget, ResolveError> {
+        let file_key = self
+            .synth
+            .file_key(file_synth)
+            .ok_or_else(|| ResolveError::NotCached(format!("file:{file_synth}")))?
+            .to_owned();
+        let meta = self
+            .cache
+            .read_meta(&file_key)
+            .map_err(ResolveError::internal)?
+            .ok_or_else(|| {
+                ResolveError::NotCached(format!("file:{file_synth} (no meta on disk)"))
+            })?;
+        let comment_id = self
+            .synth
+            .comment_id(file_synth, comm_synth)
+            .ok_or_else(|| {
+                ResolveError::NotCached(format!(
+                    "file:{file_synth}:comm:{comm_synth} (unknown comment synth — run `cache prefetch`)"
+                ))
+            })?
+            .to_owned();
+        let comments = self
+            .cache
+            .read_comments(&file_key)
+            .map_err(ResolveError::internal)?
+            .ok_or_else(|| {
+                ResolveError::NotCached(format!(
+                    "file:{file_synth} has no comments sidecar (run `cache prefetch`)"
+                ))
+            })?;
+        let comment = comments
+            .into_iter()
+            .find(|c| c.comment_id == comment_id)
+            .ok_or_else(|| {
+                ResolveError::NotCached(format!(
+                    "file:{file_synth}:comm:{comm_synth} (synth points at comment {comment_id} but the sidecar no longer contains it; run `cache prefetch`)"
+                ))
+            })?;
+        Ok(ResolvedTarget::Comment {
+            file_synth,
+            comm_synth,
+            meta,
+            comment,
+        })
     }
 
     fn resolve_bare(&self, node_id: &str) -> Result<ResolvedTarget, ResolveError> {
@@ -243,7 +315,11 @@ impl Resolver {
 
     fn load_file_target(&self, synth: u32, file_key: &str) -> Result<ResolvedTarget, ResolveError> {
         let (meta, payload) = self.read_file(file_key)?;
-        Ok(ResolvedTarget::File { synth, meta, document: payload })
+        Ok(ResolvedTarget::File {
+            synth,
+            meta,
+            document: payload,
+        })
     }
 
     /// Disk-only read of meta + payload. No TTL refresh, no live fetch — that
@@ -255,7 +331,9 @@ impl Resolver {
             .cache
             .read_meta(file_key)
             .map_err(ResolveError::internal)?
-            .ok_or_else(|| ResolveError::NotCached(format!("file_key {file_key} (no meta on disk)")))?;
+            .ok_or_else(|| {
+                ResolveError::NotCached(format!("file_key {file_key} (no meta on disk)"))
+            })?;
         if meta.status != EntryStatus::Ok {
             return Err(ResolveError::NotCached(format!(
                 "file_key {file_key} is cached with status {:?}; run `cache prefetch` to refresh",
@@ -266,7 +344,9 @@ impl Resolver {
             .cache
             .read_file(file_key)
             .map_err(ResolveError::internal)?
-            .ok_or_else(|| ResolveError::NotCached(format!("file_key {file_key} payload missing")))?;
+            .ok_or_else(|| {
+                ResolveError::NotCached(format!("file_key {file_key} payload missing"))
+            })?;
         Ok((meta, payload))
     }
 }
@@ -275,13 +355,25 @@ fn narrow_to_node_if_requested(
     target: ResolvedTarget,
     node_id: Option<&str>,
 ) -> Result<ResolvedTarget, ResolveError> {
-    let Some(node_id) = node_id else { return Ok(target) };
+    let Some(node_id) = node_id else {
+        return Ok(target);
+    };
     match target {
-        ResolvedTarget::File { synth, meta, document } => {
+        ResolvedTarget::File {
+            synth,
+            meta,
+            document,
+        } => {
             let node = find_node(&document.document, node_id).ok_or_else(|| {
-                ResolveError::NotCached(format!("file:{synth}:{node_id} (node id not found in file)"))
+                ResolveError::NotCached(format!(
+                    "file:{synth}:{node_id} (node id not found in file)"
+                ))
             })?;
-            Ok(ResolvedTarget::Node { file_synth: synth, meta, node })
+            Ok(ResolvedTarget::Node {
+                file_synth: synth,
+                meta,
+                node,
+            })
         }
         other => Ok(other),
     }
@@ -320,7 +412,11 @@ pub fn parse_id(input: &str) -> Result<Id, ResolveError> {
 /// the non-zero exit code.
 pub fn render_resolve_error(err: ResolveError, output: crate::Output) -> anyhow::Error {
     use serde_json::{json, Value};
-    if let ResolveError::Ambiguous { node_id, candidates } = &err {
+    if let ResolveError::Ambiguous {
+        node_id,
+        candidates,
+    } = &err
+    {
         match output {
             crate::Output::Json => {
                 let cands: Vec<Value> = candidates
@@ -463,7 +559,9 @@ mod tests {
         let id: Id = "file:1:1:2".parse().unwrap();
         let target = r.resolve(&dummy_cfg(), &id).await.unwrap();
         match target {
-            ResolvedTarget::Node { file_synth, node, .. } => {
+            ResolvedTarget::Node {
+                file_synth, node, ..
+            } => {
                 assert_eq!(file_synth, 1);
                 assert_eq!(node.id, "1:2");
                 assert_eq!(node.name, "Header");
@@ -478,7 +576,9 @@ mod tests {
         let id: Id = "1:2".parse().unwrap();
         let target = r.resolve(&dummy_cfg(), &id).await.unwrap();
         match target {
-            ResolvedTarget::Node { file_synth, node, .. } => {
+            ResolvedTarget::Node {
+                file_synth, node, ..
+            } => {
                 assert_eq!(file_synth, 1);
                 assert_eq!(node.id, "1:2");
             }
@@ -492,7 +592,10 @@ mod tests {
         let id: Id = "0:0".parse().unwrap();
         let err = r.resolve(&dummy_cfg(), &id).await.unwrap_err();
         match err {
-            ResolveError::Ambiguous { node_id, candidates } => {
+            ResolveError::Ambiguous {
+                node_id,
+                candidates,
+            } => {
                 assert_eq!(node_id, "0:0");
                 assert_eq!(candidates.len(), 2);
                 let synths: Vec<u32> = candidates.iter().map(|(s, _)| *s).collect();
@@ -521,8 +624,83 @@ mod tests {
     #[tokio::test]
     async fn url_to_uncached_in_cache_only_errors() {
         let (_g, r) = fixture_with_two_files();
-        let id: Id = "https://www.figma.com/design/UNCACHED-KEY/Foo".parse().unwrap();
+        let id: Id = "https://www.figma.com/design/UNCACHED-KEY/Foo"
+            .parse()
+            .unwrap();
         let err = r.resolve(&dummy_cfg(), &id).await.unwrap_err();
         assert!(matches!(err, ResolveError::CacheOnlyMiss(_)), "got {err:?}");
+    }
+
+    /// `file:N:comm:M` resolves to `ResolvedTarget::Comment` when the sidecar
+    /// has the corresponding entry. The previously-stubbed
+    /// `NotResolvableYet` path is exercised in the *failure* branches —
+    /// missing sidecar, missing synth — but the happy path is what callers
+    /// (the `node-info` command) depend on.
+    #[tokio::test]
+    async fn resolves_comment_by_synth() {
+        use crate::comment_assoc::{
+            Anchor, AnchorKind, AssociatedComment, AssociationMethod, NodeRef,
+        };
+        let (g, _) = fixture_with_two_files();
+
+        // Seed a comments sidecar + comment synth for file-a *before*
+        // constructing the resolver — the resolver loads SynthState once at
+        // construction and doesn't re-read it for comment lookups. This
+        // mirrors the real usage pattern (prefetch runs in one invocation,
+        // node-info runs in a later one with a fresh resolver).
+        let cache_dir = CacheDir::new(g.path());
+        let comment = AssociatedComment {
+            comment_id: "42".into(),
+            message: "Sample".into(),
+            author: "henrik@akesson.mobi".into(),
+            created_at: "2026-05-12T00:00:00Z".into(),
+            resolved_at: None,
+            parent_id: None,
+            order_id: Some("1".into()),
+            reactions: 0,
+            anchor: Anchor {
+                kind: AnchorKind::Vector,
+                explicit_node_id: None,
+                canvas_point: Some([0.0, 0.0]),
+                canvas_rect: None,
+            },
+            node: Some(NodeRef {
+                node_id: "1:2".into(),
+                type_: "FRAME".into(),
+                name: "Header".into(),
+                path: vec![],
+            }),
+            method: AssociationMethod::Explicit,
+            stale_node_id: None,
+        };
+        cache_dir.write_comments("file-a", &[comment]).unwrap();
+        crate::synth::with_lock(&cache_dir, |s| s.intern_comment(1, "42")).unwrap();
+
+        let r = Resolver::from_cache(CacheDir::new(g.path()), true).unwrap();
+        let id: Id = "file:1:comm:1".parse().unwrap();
+        let target = r.resolve(&dummy_cfg(), &id).await.unwrap();
+        match target {
+            ResolvedTarget::Comment {
+                file_synth,
+                comm_synth,
+                comment,
+                ..
+            } => {
+                assert_eq!(file_synth, 1);
+                assert_eq!(comm_synth, 1);
+                assert_eq!(comment.comment_id, "42");
+                assert_eq!(comment.message, "Sample");
+            }
+            other => panic!("expected Comment, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_comm_synth_errors() {
+        let (_g, r) = fixture_with_two_files();
+        // File exists but no comment synth has been interned for index 99.
+        let id: Id = "file:1:comm:99".parse().unwrap();
+        let err = r.resolve(&dummy_cfg(), &id).await.unwrap_err();
+        assert!(matches!(err, ResolveError::NotCached(_)), "got {err:?}");
     }
 }

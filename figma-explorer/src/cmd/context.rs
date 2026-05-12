@@ -38,16 +38,25 @@ impl Args {
             .map_err(|e| render_resolve_error(e, format))?;
 
         let (file_key, node_id, file_synth) = match target {
-            ResolvedTarget::Node { meta, node, file_synth } => {
-                (meta.file_key, Some(node.id), file_synth)
-            }
-            ResolvedTarget::File { meta, document, synth } => {
+            ResolvedTarget::Node {
+                meta,
+                node,
+                file_synth,
+            } => (meta.file_key, Some(node.id), file_synth),
+            ResolvedTarget::File {
+                meta,
+                document,
+                synth,
+            } => {
                 // For a bare file:N, bundle the whole document — use its root id.
                 (meta.file_key, Some(document.document.id.clone()), synth)
             }
             ResolvedTarget::Root | ResolvedTarget::Project { .. } => {
+                anyhow::bail!("context needs a file or node-level id; got {}", self.id);
+            }
+            ResolvedTarget::Comment { .. } => {
                 anyhow::bail!(
-                    "context needs a file or node-level id; got {}",
+                    "context does not accept comment ids ({}); use `node-info` for a comment",
                     self.id
                 );
             }
@@ -62,8 +71,15 @@ impl Args {
             None => doc,
         };
 
-        let summary =
-            ctx::build(cfg, &file_key, file_synth, &file, target_value, &self.out_dir).await?;
+        let summary = ctx::build(
+            cfg,
+            &file_key,
+            file_synth,
+            &file,
+            target_value,
+            &self.out_dir,
+        )
+        .await?;
         print(&summary, format)
     }
 }

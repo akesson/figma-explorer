@@ -1,0 +1,581 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>figma-explorer node-info — example outputs</title>
+<style>
+  :root {
+    --bg: #0e1116;
+    --panel: #161b22;
+    --panel-2: #1b2129;
+    --border: #2a313a;
+    --fg: #d6dde6;
+    --muted: #8b96a3;
+    --accent: #79c0ff;
+    --accent-2: #d2a8ff;
+    --green: #7ee787;
+    --yellow: #ffd479;
+    --pink: #ff7b72;
+    --comment: #8b96a3;
+    --code-bg: #0b0f14;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--fg);
+    font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; }
+  header { padding: 32px 40px 16px; border-bottom: 1px solid var(--border); }
+  header h1 { margin: 0 0 6px; font-size: 22px; letter-spacing: -0.01em; }
+  header .sub { color: var(--muted); font-size: 13px; }
+  nav { position: sticky; top: 0; background: var(--bg); border-bottom: 1px solid var(--border);
+    padding: 10px 40px; z-index: 10; font-size: 12.5px; }
+  nav a { color: var(--muted); text-decoration: none; margin-right: 16px; }
+  nav a:hover { color: var(--accent); }
+  main { padding: 28px 40px 80px; max-width: 1100px; }
+  section { margin-bottom: 44px; scroll-margin-top: 70px; }
+  section h2 { margin: 0 0 4px; font-size: 17px; letter-spacing: -0.005em; }
+  section .lede { color: var(--muted); margin: 0 0 14px; font-size: 13.5px; }
+  .cmd { background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px 14px; font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 13px; margin-bottom: 10px; color: var(--fg); overflow-x: auto; }
+  .cmd .prompt { color: var(--green); user-select: none; margin-right: 8px; }
+  .cmd .flag { color: var(--yellow); }
+  .cmd .arg { color: var(--accent); }
+  pre.out { background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px;
+    margin: 0; padding: 14px 16px; overflow-x: auto;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 12.5px;
+    line-height: 1.6; }
+  .yaml .k    { color: var(--accent); }
+  .yaml .s    { color: var(--green); }
+  .yaml .n    { color: var(--yellow); }
+  .yaml .b    { color: var(--pink); }
+  .yaml .c    { color: var(--comment); font-style: italic; }
+  .yaml .hex  { color: var(--accent-2); }
+  .yaml .id   { color: var(--accent-2); }
+  .note { color: var(--muted); font-size: 12.5px; margin-top: 8px; }
+  .twocol { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 900px) { .twocol { grid-template-columns: 1fr; } }
+  .badge { display: inline-block; padding: 1px 8px; border: 1px solid var(--border);
+    border-radius: 999px; font-size: 11px; color: var(--muted); margin-left: 8px;
+    vertical-align: 2px; }
+  footer { color: var(--muted); padding: 24px 40px 40px; border-top: 1px solid var(--border);
+    font-size: 12.5px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>figma-explorer <span style="color:var(--accent-2)">node-info</span></h1>
+  <div class="sub">Example outputs. Audience: a Claude Code agent implementing the design as application code.</div>
+</header>
+
+<nav>
+  <a href="#frame">FRAME (auto-layout)</a>
+  <a href="#text">TEXT</a>
+  <a href="#instance">INSTANCE</a>
+  <a href="#variants">COMPONENT_SET</a>
+  <a href="#comment">comment</a>
+  <a href="#file">file</a>
+  <a href="#truncated">truncated</a>
+  <a href="#raw">--raw</a>
+  <a href="#json">--json</a>
+</nav>
+
+<main>
+
+<!-- ====================================================================== -->
+<section id="frame">
+  <h2>FRAME with auto-layout, fills, bound variables, anchored comment <span class="badge">default flags</span></h2>
+  <p class="lede">A typical product-card frame. Shows layout, padding, item spacing, a solid fill bound to a color variable, an inset stroke, a drop-shadow effect, two children, and one comment anchored on the frame.</p>
+  <div class="cmd"><span class="prompt">$</span>figma-explorer <span class="arg">node-info</span> <span class="arg">file:1:1094:66591</span></div>
+  <pre class="out yaml"><span class="k">target</span>:
+  <span class="k">kind</span>: <span class="s">node</span>
+  <span class="k">id</span>: <span class="id">file:1:1094:66591</span>
+  <span class="k">path</span>:
+    - { <span class="k">id</span>: <span class="s">"0:1"</span>,    <span class="k">type</span>: <span class="s">CANVAS</span>, <span class="k">name</span>: <span class="s">"Marketing"</span> }
+    - { <span class="k">id</span>: <span class="s">"12:4"</span>,   <span class="k">type</span>: <span class="s">SECTION</span>, <span class="k">name</span>: <span class="s">"Cards"</span> }
+<span class="k">file</span>:
+  <span class="k">key</span>: <span class="s">aB7xQpL0mZQrYk2N</span>
+  <span class="k">name</span>: <span class="s">"Design System / Web"</span>
+  <span class="k">project_id</span>: <span class="s">"31415926"</span>
+  <span class="k">project_name</span>: <span class="s">"Akesson DS"</span>
+  <span class="k">synth</span>: <span class="n">1</span>
+  <span class="k">version</span>: <span class="s">"2841199283"</span>
+  <span class="k">last_modified</span>: <span class="s">"2026-05-09T14:22:01Z"</span>
+  <span class="k">role</span>: <span class="s">editor</span>
+  <span class="k">editor_type</span>: <span class="s">figma</span>
+  <span class="k">thumbnail_url</span>: <span class="s">"https://s3-figma-files.../thumb.png"</span>
+<span class="k">node</span>:
+  <span class="k">id</span>: <span class="s">"1094:66591"</span>
+  <span class="k">type</span>: <span class="s">FRAME</span>
+  <span class="k">name</span>: <span class="s">"ProductCard"</span>
+  <span class="k">bounds</span>: { <span class="k">x</span>: <span class="n">120</span>, <span class="k">y</span>: <span class="n">240</span>, <span class="k">width</span>: <span class="n">320</span>, <span class="k">height</span>: <span class="n">412</span> }
+  <span class="k">size</span>:   { <span class="k">x</span>: <span class="n">320</span>, <span class="k">y</span>: <span class="n">412</span> }
+  <span class="k">constraints</span>: { <span class="k">horizontal</span>: <span class="s">LEFT</span>, <span class="k">vertical</span>: <span class="s">TOP</span> }
+  <span class="k">corner</span>: { <span class="k">radius</span>: <span class="n">12</span> }
+  <span class="k">clips_content</span>: <span class="b">true</span>
+
+  <span class="k">fills</span>:
+    - <span class="k">type</span>: <span class="s">SOLID</span>
+      <span class="k">color</span>: { <span class="k">r</span>: <span class="n">1</span>, <span class="k">g</span>: <span class="n">1</span>, <span class="k">b</span>: <span class="n">1</span>, <span class="k">a</span>: <span class="n">1</span> }
+      <span class="k">hex</span>: <span class="hex">"#ffffff"</span>
+      <span class="k">bound_variable</span>: <span class="id">VariableID:42:9</span>     <span class="c"># surface/elevated</span>
+  <span class="k">strokes</span>:
+    - <span class="k">type</span>: <span class="s">SOLID</span>
+      <span class="k">color</span>: { <span class="k">r</span>: <span class="n">0.875</span>, <span class="k">g</span>: <span class="n">0.890</span>, <span class="k">b</span>: <span class="n">0.910</span>, <span class="k">a</span>: <span class="n">1</span> }
+      <span class="k">hex</span>: <span class="hex">"#dfe3e8"</span>
+  <span class="k">stroke</span>:
+    <span class="k">weight</span>: <span class="n">1</span>
+    <span class="k">align</span>: <span class="s">INSIDE</span>
+
+  <span class="k">effects</span>:
+    - <span class="k">type</span>: <span class="s">DROP_SHADOW</span>
+      <span class="k">color</span>: { <span class="k">r</span>: <span class="n">0</span>, <span class="k">g</span>: <span class="n">0</span>, <span class="k">b</span>: <span class="n">0</span>, <span class="k">a</span>: <span class="n">0.08</span> }
+      <span class="k">hex</span>: <span class="hex">"#00000014"</span>
+      <span class="k">offset</span>: { <span class="k">x</span>: <span class="n">0</span>, <span class="k">y</span>: <span class="n">2</span> }
+      <span class="k">radius</span>: <span class="n">8</span>
+      <span class="k">spread</span>: <span class="n">0</span>
+      <span class="k">blend_mode</span>: <span class="s">NORMAL</span>
+
+  <span class="k">layout</span>:
+    <span class="k">mode</span>: <span class="s">VERTICAL</span>
+    <span class="k">primary_axis</span>:  { <span class="k">sizing</span>: <span class="s">AUTO</span>,  <span class="k">align</span>: <span class="s">MIN</span> }
+    <span class="k">counter_axis</span>:  { <span class="k">sizing</span>: <span class="s">FIXED</span>, <span class="k">align</span>: <span class="s">MIN</span> }
+    <span class="k">item_spacing</span>: <span class="n">16</span>
+    <span class="k">padding</span>: { <span class="k">top</span>: <span class="n">20</span>, <span class="k">right</span>: <span class="n">20</span>, <span class="k">bottom</span>: <span class="n">20</span>, <span class="k">left</span>: <span class="n">20</span> }
+
+  <span class="k">styles</span>:
+    <span class="k">fill</span>:   <span class="id">"S:9f2a18..."</span>
+    <span class="k">effect</span>: <span class="id">"S:b6e3c7..."</span>
+  <span class="k">bound_variables</span>:
+    <span class="k">"fills[0].color"</span>: <span class="id">VariableID:42:9</span>
+    <span class="k">cornerRadius</span>:    <span class="id">VariableID:9:3</span>
+
+  <span class="k">comments</span>:
+    - <span class="k">comm_id</span>:    <span class="id">file:1:comm:7</span>
+      <span class="k">author</span>:     <span class="s">"henrik@akesson.mobi"</span>
+      <span class="k">created_at</span>: <span class="s">"2026-05-08T11:04:00Z"</span>
+      <span class="k">message</span>:    <span class="s">"Match the elevated surface from the iOS app — bump radius to 16?"</span>
+      <span class="k">method</span>:     <span class="s">Explicit</span>
+      <span class="k">reactions</span>:  [{ <span class="k">emoji</span>: <span class="s">"👍"</span>, <span class="k">count</span>: <span class="n">2</span> }]
+
+  <span class="k">children</span>:
+    - <span class="k">id</span>: <span class="s">"1094:66592"</span>
+      <span class="k">type</span>: <span class="s">TEXT</span>
+      <span class="k">name</span>: <span class="s">"Title"</span>
+      <span class="k">bounds</span>: { <span class="k">x</span>: <span class="n">140</span>, <span class="k">y</span>: <span class="n">260</span>, <span class="k">width</span>: <span class="n">280</span>, <span class="k">height</span>: <span class="n">28</span> }
+      <span class="k">layout_child</span>: { <span class="k">align</span>: <span class="s">STRETCH</span>, <span class="k">grow</span>: <span class="n">0</span> }
+      <span class="k">text</span>:
+        <span class="k">characters</span>: <span class="s">"Hand-blended espresso"</span>
+        <span class="k">style</span>:
+          <span class="k">font_family</span>: <span class="s">"Inter"</span>
+          <span class="k">font_weight</span>: <span class="n">600</span>
+          <span class="k">font_size</span>:   <span class="n">20</span>
+          <span class="k">line_height_px</span>: <span class="n">28</span>
+          <span class="k">letter_spacing</span>: <span class="n">-0.2</span>
+          <span class="k">text_align_horizontal</span>: <span class="s">LEFT</span>
+          <span class="k">fills</span>:
+            - { <span class="k">type</span>: <span class="s">SOLID</span>, <span class="k">hex</span>: <span class="hex">"#0f172a"</span> }
+      <span class="k">styles</span>: { <span class="k">text</span>: <span class="id">"S:1c4ae0..."</span> }
+
+    - <span class="k">id</span>: <span class="s">"1094:66600"</span>
+      <span class="k">type</span>: <span class="s">INSTANCE</span>
+      <span class="k">name</span>: <span class="s">"Button / Primary"</span>
+      <span class="k">bounds</span>: { <span class="k">x</span>: <span class="n">140</span>, <span class="k">y</span>: <span class="n">600</span>, <span class="k">width</span>: <span class="n">280</span>, <span class="k">height</span>: <span class="n">44</span> }
+      <span class="k">layout_child</span>: { <span class="k">align</span>: <span class="s">STRETCH</span>, <span class="k">grow</span>: <span class="n">0</span>, <span class="k">sizing_horizontal</span>: <span class="s">FILL</span> }
+      <span class="k">component</span>:
+        <span class="k">component_id</span>: <span class="s">"77:1200"</span>
+        <span class="k">component_set_id</span>: <span class="s">"77:1198"</span>
+        <span class="k">main_component</span>: { <span class="k">name</span>: <span class="s">"Button"</span>, <span class="k">remote</span>: <span class="b">false</span> }
+        <span class="k">variant_properties</span>: { <span class="k">Size</span>: <span class="s">Medium</span>, <span class="k">State</span>: <span class="s">Default</span>, <span class="k">Variant</span>: <span class="s">Primary</span> }
+        <span class="k">component_properties</span>:
+          <span class="k">"Label#1234:0"</span>: { <span class="k">type</span>: <span class="s">TEXT</span>,    <span class="k">value</span>: <span class="s">"Add to cart"</span> }
+          <span class="k">"Icon#1234:5"</span>:  { <span class="k">type</span>: <span class="s">BOOLEAN</span>, <span class="k">value</span>: <span class="b">false</span> }
+
+<span class="k">variables</span>:
+  <span class="id">VariableID:42:9</span>:
+    <span class="k">name</span>: <span class="s">"surface/elevated"</span>
+    <span class="k">collection</span>: { <span class="k">id</span>: <span class="s">"VariableCollectionId:42:0"</span>, <span class="k">name</span>: <span class="s">"Semantic"</span>, <span class="k">default_mode_id</span>: <span class="s">"42:0"</span>,
+                   <span class="k">modes</span>: [{ <span class="k">id</span>: <span class="s">"42:0"</span>, <span class="k">name</span>: <span class="s">Light</span> }, { <span class="k">id</span>: <span class="s">"42:1"</span>, <span class="k">name</span>: <span class="s">Dark</span> }] }
+    <span class="k">resolved_type</span>: <span class="s">COLOR</span>
+    <span class="k">values_by_mode</span>: { <span class="k">Light</span>: <span class="hex">"#ffffff"</span>, <span class="k">Dark</span>: <span class="hex">"#161b22"</span> }
+    <span class="k">scopes</span>: [<span class="s">FILL</span>]
+    <span class="k">code_syntax</span>: { <span class="k">WEB</span>: <span class="s">"var(--surface-elevated)"</span> }
+  <span class="id">VariableID:9:3</span>:
+    <span class="k">name</span>: <span class="s">"radius/lg"</span>
+    <span class="k">collection</span>: { <span class="k">id</span>: <span class="s">"VariableCollectionId:9:0"</span>, <span class="k">name</span>: <span class="s">"Primitive"</span>, <span class="k">default_mode_id</span>: <span class="s">"9:0"</span>,
+                   <span class="k">modes</span>: [{ <span class="k">id</span>: <span class="s">"9:0"</span>, <span class="k">name</span>: <span class="s">Default</span> }] }
+    <span class="k">resolved_type</span>: <span class="s">FLOAT</span>
+    <span class="k">values_by_mode</span>: { <span class="k">Default</span>: <span class="n">12</span> }
+    <span class="k">scopes</span>: [<span class="s">CORNER_RADIUS</span>]
+<span class="k">styles_index</span>:
+  <span class="id">"S:9f2a18..."</span>: { <span class="k">key</span>: <span class="s">"9f2a18..."</span>, <span class="k">name</span>: <span class="s">"surface/elevated"</span>, <span class="k">type</span>: <span class="s">PAINT</span> }
+  <span class="id">"S:b6e3c7..."</span>: { <span class="k">key</span>: <span class="s">"b6e3c7..."</span>, <span class="k">name</span>: <span class="s">"shadow/sm"</span>,         <span class="k">type</span>: <span class="s">EFFECT</span> }
+  <span class="id">"S:1c4ae0..."</span>: { <span class="k">key</span>: <span class="s">"1c4ae0..."</span>, <span class="k">name</span>: <span class="s">"text/heading/h4"</span>,    <span class="k">type</span>: <span class="s">TEXT</span> }</pre>
+  <div class="note">Children carry only load-bearing detail at depth ≥ 1 — <code>effects</code> / <code>prototype</code> / <code>export_settings</code> drop. The frame's bound variables appear only at the top level, referenced by id from every node that uses them.</div>
+</section>
+
+<!-- ====================================================================== -->
+<section id="text">
+  <h2>TEXT node <span class="badge">--rich-text auto-enabled</span></h2>
+  <p class="lede">Auto-enables overrides because the text contains an inline link with a different color.</p>
+  <div class="cmd"><span class="prompt">$</span>figma-explorer <span class="arg">node-info</span> <span class="arg">file:1:1094:66700</span></div>
+  <pre class="out yaml"><span class="k">target</span>:
+  <span class="k">kind</span>: <span class="s">node</span>
+  <span class="k">id</span>: <span class="id">file:1:1094:66700</span>
+  <span class="k">path</span>:
+    - { <span class="k">id</span>: <span class="s">"0:1"</span>,  <span class="k">type</span>: <span class="s">CANVAS</span>, <span class="k">name</span>: <span class="s">"Marketing"</span> }
+    - { <span class="k">id</span>: <span class="s">"12:4"</span>, <span class="k">type</span>: <span class="s">SECTION</span>, <span class="k">name</span>: <span class="s">"Cards"</span> }
+<span class="k">node</span>:
+  <span class="k">id</span>: <span class="s">"1094:66700"</span>
+  <span class="k">type</span>: <span class="s">TEXT</span>
+  <span class="k">name</span>: <span class="s">"Disclaimer"</span>
+  <span class="k">bounds</span>: { <span class="k">x</span>: <span class="n">140</span>, <span class="k">y</span>: <span class="n">560</span>, <span class="k">width</span>: <span class="n">280</span>, <span class="k">height</span>: <span class="n">32</span> }
+  <span class="k">constraints</span>: { <span class="k">horizontal</span>: <span class="s">LEFT</span>, <span class="k">vertical</span>: <span class="s">TOP</span> }
+
+  <span class="k">text</span>:
+    <span class="k">characters</span>: <span class="s">"By continuing you agree to the Terms of Service."</span>
+    <span class="k">style</span>:
+      <span class="k">font_family</span>: <span class="s">"Inter"</span>
+      <span class="k">font_weight</span>: <span class="n">400</span>
+      <span class="k">font_size</span>:   <span class="n">13</span>
+      <span class="k">line_height_px</span>:   <span class="n">16</span>
+      <span class="k">line_height_unit</span>: <span class="s">PIXELS</span>
+      <span class="k">letter_spacing</span>: <span class="n">0</span>
+      <span class="k">text_case</span>: <span class="s">ORIGINAL</span>
+      <span class="k">text_decoration</span>: <span class="s">NONE</span>
+      <span class="k">text_align_horizontal</span>: <span class="s">LEFT</span>
+      <span class="k">text_align_vertical</span>:   <span class="s">TOP</span>
+      <span class="k">text_auto_resize</span>: <span class="s">HEIGHT</span>
+      <span class="k">fills</span>:
+        - { <span class="k">type</span>: <span class="s">SOLID</span>, <span class="k">hex</span>: <span class="hex">"#64748b"</span> }
+    <span class="k">overrides</span>:
+      - <span class="k">range</span>: [<span class="n">33</span>, <span class="n">49</span>]                  <span class="c"># "Terms of Service."</span>
+        <span class="k">style</span>:
+          <span class="k">text_decoration</span>: <span class="s">UNDERLINE</span>
+          <span class="k">fills</span>: [{ <span class="k">type</span>: <span class="s">SOLID</span>, <span class="k">hex</span>: <span class="hex">"#2563eb"</span> }]
+          <span class="k">hyperlink</span>: { <span class="k">url</span>: <span class="s">"https://akesson.mobi/terms"</span> }
+  <span class="k">styles</span>: { <span class="k">text</span>: <span class="id">"S:5d710e..."</span> }
+<span class="k">styles_index</span>:
+  <span class="id">"S:5d710e..."</span>: { <span class="k">name</span>: <span class="s">"text/body/sm"</span>, <span class="k">type</span>: <span class="s">TEXT</span> }</pre>
+</section>
+
+<!-- ====================================================================== -->
+<section id="instance">
+  <h2>INSTANCE with variant + component properties <span class="badge">--prototype</span></h2>
+  <p class="lede">Standalone primary button instance with a text property bound to a variable, plus a click interaction.</p>
+  <div class="cmd"><span class="prompt">$</span>figma-explorer <span class="arg">node-info</span> <span class="flag">--prototype</span> <span class="arg">file:1:1094:66600</span></div>
+  <pre class="out yaml"><span class="k">target</span>:
+  <span class="k">kind</span>: <span class="s">node</span>
+  <span class="k">id</span>: <span class="id">file:1:1094:66600</span>
+  <span class="k">path</span>:
+    - { <span class="k">id</span>: <span class="s">"0:1"</span>,         <span class="k">type</span>: <span class="s">CANVAS</span>,   <span class="k">name</span>: <span class="s">"Marketing"</span> }
+    - { <span class="k">id</span>: <span class="s">"1094:66591"</span>, <span class="k">type</span>: <span class="s">FRAME</span>,    <span class="k">name</span>: <span class="s">"ProductCard"</span> }
+<span class="k">node</span>:
+  <span class="k">id</span>: <span class="s">"1094:66600"</span>
+  <span class="k">type</span>: <span class="s">INSTANCE</span>
+  <span class="k">name</span>: <span class="s">"Button / Primary"</span>
+  <span class="k">bounds</span>: { <span class="k">x</span>: <span class="n">140</span>, <span class="k">y</span>: <span class="n">600</span>, <span class="k">width</span>: <span class="n">280</span>, <span class="k">height</span>: <span class="n">44</span> }
+  <span class="k">corner</span>: { <span class="k">radius</span>: <span class="n">8</span> }
+  <span class="k">layout_child</span>: { <span class="k">align</span>: <span class="s">STRETCH</span>, <span class="k">grow</span>: <span class="n">0</span>, <span class="k">sizing_horizontal</span>: <span class="s">FILL</span> }
+
+  <span class="k">fills</span>:
+    - <span class="k">type</span>: <span class="s">SOLID</span>
+      <span class="k">color</span>: { <span class="k">r</span>: <span class="n">0.039</span>, <span class="k">g</span>: <span class="n">0.522</span>, <span class="k">b</span>: <span class="n">1</span>, <span class="k">a</span>: <span class="n">1</span> }
+      <span class="k">hex</span>: <span class="hex">"#0a84ff"</span>
+      <span class="k">bound_variable</span>: <span class="id">VariableID:42:1</span>
+
+  <span class="k">layout</span>:
+    <span class="k">mode</span>: <span class="s">HORIZONTAL</span>
+    <span class="k">primary_axis</span>: { <span class="k">sizing</span>: <span class="s">AUTO</span>,  <span class="k">align</span>: <span class="s">CENTER</span> }
+    <span class="k">counter_axis</span>: { <span class="k">sizing</span>: <span class="s">FIXED</span>, <span class="k">align</span>: <span class="s">CENTER</span> }
+    <span class="k">item_spacing</span>: <span class="n">8</span>
+    <span class="k">padding</span>: { <span class="k">top</span>: <span class="n">10</span>, <span class="k">right</span>: <span class="n">16</span>, <span class="k">bottom</span>: <span class="n">10</span>, <span class="k">left</span>: <span class="n">16</span> }
+
+  <span class="k">component</span>:
+    <span class="k">component_id</span>:     <span class="s">"77:1200"</span>
+    <span class="k">component_key</span>:    <span class="s">"a2d8cf61..."</span>
+    <span class="k">component_set_id</span>: <span class="s">"77:1198"</span>
+    <span class="k">main_component</span>:
+      <span class="k">name</span>: <span class="s">"Button"</span>
+      <span class="k">description</span>: <span class="s">"Primary action button. Use one per surface."</span>
+      <span class="k">remote</span>: <span class="b">false</span>
+      <span class="k">documentation_links</span>:
+        - { <span class="k">uri</span>: <span class="s">"https://design.akesson.mobi/components/button"</span> }
+    <span class="k">is_exposed_instance</span>: <span class="b">false</span>
+    <span class="k">variant_properties</span>:
+      <span class="k">Size</span>:    <span class="s">Medium</span>
+      <span class="k">State</span>:   <span class="s">Default</span>
+      <span class="k">Variant</span>: <span class="s">Primary</span>
+    <span class="k">component_properties</span>:
+      <span class="k">"Label#1234:0"</span>:
+        <span class="k">type</span>: <span class="s">TEXT</span>
+        <span class="k">value</span>: <span class="s">"Add to cart"</span>
+        <span class="k">bound_variables</span>: { <span class="k">value</span>: <span class="id">VariableID:88:2</span> }
+      <span class="k">"Icon#1234:5"</span>:
+        <span class="k">type</span>: <span class="s">BOOLEAN</span>
+        <span class="k">value</span>: <span class="b">false</span>
+      <span class="k">"IconSlot#1234:6"</span>:
+        <span class="k">type</span>: <span class="s">INSTANCE_SWAP</span>
+        <span class="k">value</span>: <span class="s">"83a1cc..."</span>
+        <span class="k">preferred_values</span>:
+          - { <span class="k">type</span>: <span class="s">COMPONENT</span>, <span class="k">key</span>: <span class="s">"83a1cc..."</span> }
+          - { <span class="k">type</span>: <span class="s">COMPONENT</span>, <span class="k">key</span>: <span class="s">"19fa20..."</span> }
+
+  <span class="k">prototype</span>:
+    <span class="k">is_flow_start</span>: <span class="b">false</span>
+    <span class="k">interactions</span>:
+      - <span class="k">trigger</span>: { <span class="k">type</span>: <span class="s">ON_CLICK</span> }
+        <span class="k">action</span>:
+          <span class="k">type</span>: <span class="s">NODE</span>
+          <span class="k">destination_id</span>: <span class="s">"402:512"</span>
+          <span class="k">preserve_scroll_position</span>: <span class="b">false</span>
+          <span class="k">transition</span>: { <span class="k">type</span>: <span class="s">SMART_ANIMATE</span>, <span class="k">duration_ms</span>: <span class="n">200</span>, <span class="k">easing</span>: <span class="s">EASE_IN_AND_OUT</span> }
+
+  <span class="k">property_refs</span>:
+    <span class="k">characters</span>: <span class="s">"Label#1234:0"</span>
+
+<span class="k">variables</span>:
+  <span class="id">VariableID:42:1</span>:
+    <span class="k">name</span>: <span class="s">"color/brand/primary"</span>
+    <span class="k">collection</span>: { <span class="k">name</span>: <span class="s">"Semantic"</span>, <span class="k">modes</span>: [{ <span class="k">id</span>: <span class="s">"42:0"</span>, <span class="k">name</span>: <span class="s">Light</span> }, { <span class="k">id</span>: <span class="s">"42:1"</span>, <span class="k">name</span>: <span class="s">Dark</span> }] }
+    <span class="k">resolved_type</span>: <span class="s">COLOR</span>
+    <span class="k">values_by_mode</span>: { <span class="k">Light</span>: <span class="hex">"#0a84ff"</span>, <span class="k">Dark</span>: <span class="hex">"#409cff"</span> }
+    <span class="k">scopes</span>: [<span class="s">FILL</span>]
+    <span class="k">code_syntax</span>: { <span class="k">WEB</span>: <span class="s">"var(--brand-primary)"</span>, <span class="k">iOS</span>: <span class="s">"Color.brand.primary"</span> }
+  <span class="id">VariableID:88:2</span>:
+    <span class="k">name</span>: <span class="s">"copy/cta/add_to_cart"</span>
+    <span class="k">collection</span>: { <span class="k">name</span>: <span class="s">"Copy"</span>, <span class="k">modes</span>: [{ <span class="k">id</span>: <span class="s">"88:0"</span>, <span class="k">name</span>: <span class="s">en</span> }, { <span class="k">id</span>: <span class="s">"88:1"</span>, <span class="k">name</span>: <span class="s">sv</span> }] }
+    <span class="k">resolved_type</span>: <span class="s">STRING</span>
+    <span class="k">values_by_mode</span>: { <span class="k">en</span>: <span class="s">"Add to cart"</span>, <span class="k">sv</span>: <span class="s">"Lägg i kundvagn"</span> }
+    <span class="k">scopes</span>: [<span class="s">TEXT_CONTENT</span>]</pre>
+  <div class="note"><code>property_refs.characters</code> tells the implementer the button's text comes from the <code>Label#1234:0</code> component property — bind it instead of hard-coding "Add to cart".</div>
+</section>
+
+<!-- ====================================================================== -->
+<section id="variants">
+  <h2>COMPONENT_SET — variant definition</h2>
+  <p class="lede">Target is the variant container itself, not an instance. Exposes the variant property axes so an implementer can enumerate React props.</p>
+  <div class="cmd"><span class="prompt">$</span>figma-explorer <span class="arg">node-info</span> <span class="flag">--no-children</span> <span class="arg">file:1:77:1198</span></div>
+  <pre class="out yaml"><span class="k">target</span>:
+  <span class="k">kind</span>: <span class="s">node</span>
+  <span class="k">id</span>: <span class="id">file:1:77:1198</span>
+  <span class="k">path</span>:
+    - { <span class="k">id</span>: <span class="s">"0:2"</span>, <span class="k">type</span>: <span class="s">CANVAS</span>, <span class="k">name</span>: <span class="s">"Components"</span> }
+<span class="k">node</span>:
+  <span class="k">id</span>: <span class="s">"77:1198"</span>
+  <span class="k">type</span>: <span class="s">COMPONENT_SET</span>
+  <span class="k">name</span>: <span class="s">"Button"</span>
+  <span class="k">bounds</span>: { <span class="k">x</span>: <span class="n">-1200</span>, <span class="k">y</span>: <span class="n">0</span>, <span class="k">width</span>: <span class="n">1080</span>, <span class="k">height</span>: <span class="n">720</span> }
+  <span class="k">component</span>:
+    <span class="k">main_component</span>:
+      <span class="k">name</span>: <span class="s">"Button"</span>
+      <span class="k">description</span>: <span class="s">"Primary action button. Use one per surface."</span>
+      <span class="k">remote</span>: <span class="b">false</span>
+    <span class="k">property_definitions</span>:
+      <span class="k">Size</span>:    { <span class="k">type</span>: <span class="s">VARIANT</span>,  <span class="k">options</span>: [<span class="s">Small</span>, <span class="s">Medium</span>, <span class="s">Large</span>], <span class="k">default</span>: <span class="s">Medium</span> }
+      <span class="k">State</span>:   { <span class="k">type</span>: <span class="s">VARIANT</span>,  <span class="k">options</span>: [<span class="s">Default</span>, <span class="s">Hover</span>, <span class="s">Pressed</span>, <span class="s">Disabled</span>], <span class="k">default</span>: <span class="s">Default</span> }
+      <span class="k">Variant</span>: { <span class="k">type</span>: <span class="s">VARIANT</span>,  <span class="k">options</span>: [<span class="s">Primary</span>, <span class="s">Secondary</span>, <span class="s">Ghost</span>], <span class="k">default</span>: <span class="s">Primary</span> }
+      <span class="k">"Label#1234:0"</span>: { <span class="k">type</span>: <span class="s">TEXT</span>,    <span class="k">default</span>: <span class="s">"Button"</span> }
+      <span class="k">"Icon#1234:5"</span>:  { <span class="k">type</span>: <span class="s">BOOLEAN</span>, <span class="k">default</span>: <span class="b">false</span> }
+      <span class="k">"IconSlot#1234:6"</span>:
+        <span class="k">type</span>: <span class="s">INSTANCE_SWAP</span>
+        <span class="k">default</span>: <span class="s">"83a1cc..."</span>
+        <span class="k">preferred_values</span>:
+          - { <span class="k">type</span>: <span class="s">COMPONENT</span>, <span class="k">key</span>: <span class="s">"83a1cc..."</span> }
+          - { <span class="k">type</span>: <span class="s">COMPONENT</span>, <span class="k">key</span>: <span class="s">"19fa20..."</span> }</pre>
+</section>
+
+<!-- ====================================================================== -->
+<section id="comment">
+  <h2>Comment target (<code>file:N:comm:M</code>)</h2>
+  <p class="lede">Resolves the comment, surfaces its anchor + the node it's attached to, and includes the reply thread.</p>
+  <div class="cmd"><span class="prompt">$</span>figma-explorer <span class="arg">node-info</span> <span class="arg">file:1:comm:7</span></div>
+  <pre class="out yaml"><span class="k">target</span>:
+  <span class="k">kind</span>: <span class="s">comment</span>
+  <span class="k">id</span>: <span class="id">file:1:comm:7</span>
+  <span class="k">path</span>: []
+<span class="k">file</span>:
+  <span class="k">key</span>: <span class="s">aB7xQpL0mZQrYk2N</span>
+  <span class="k">name</span>: <span class="s">"Design System / Web"</span>
+  <span class="k">synth</span>: <span class="n">1</span>
+  <span class="k">last_modified</span>: <span class="s">"2026-05-09T14:22:01Z"</span>
+<span class="k">comment</span>:
+  <span class="k">id</span>:         <span class="s">"49824031"</span>
+  <span class="k">comm_id</span>:    <span class="id">file:1:comm:7</span>
+  <span class="k">author</span>:     <span class="s">"henrik@akesson.mobi"</span>
+  <span class="k">created_at</span>: <span class="s">"2026-05-08T11:04:00Z"</span>
+  <span class="k">resolved_at</span>: <span class="b">null</span>
+  <span class="k">order_id</span>:   <span class="s">"7"</span>
+  <span class="k">message</span>:    <span class="s">"Match the elevated surface from the iOS app — bump radius to 16?"</span>
+  <span class="k">parent_id</span>:  <span class="b">null</span>
+  <span class="k">reactions</span>:
+    - { <span class="k">emoji</span>: <span class="s">"👍"</span>, <span class="k">count</span>: <span class="n">2</span>, <span class="k">users</span>: [<span class="s">"alex@..."</span>, <span class="s">"sam@..."</span>] }
+  <span class="k">anchor</span>:
+    <span class="k">kind</span>:     <span class="s">FrameOffset</span>
+    <span class="k">frame_id</span>: <span class="s">"1094:66591"</span>
+    <span class="k">x</span>: <span class="n">158</span>
+    <span class="k">y</span>: <span class="n">20</span>
+  <span class="k">method</span>: <span class="s">Explicit</span>
+  <span class="k">node</span>:
+    <span class="k">id</span>: <span class="s">"1094:66591"</span>
+    <span class="k">type</span>: <span class="s">FRAME</span>
+    <span class="k">name</span>: <span class="s">"ProductCard"</span>
+    <span class="k">path</span>:
+      - { <span class="k">id</span>: <span class="s">"0:1"</span>, <span class="k">type</span>: <span class="s">CANVAS</span>, <span class="k">name</span>: <span class="s">"Marketing"</span> }
+      - { <span class="k">id</span>: <span class="s">"12:4"</span>, <span class="k">type</span>: <span class="s">SECTION</span>, <span class="k">name</span>: <span class="s">"Cards"</span> }
+    <span class="k">bounds</span>: { <span class="k">x</span>: <span class="n">120</span>, <span class="k">y</span>: <span class="n">240</span>, <span class="k">width</span>: <span class="n">320</span>, <span class="k">height</span>: <span class="n">412</span> }
+  <span class="k">replies</span>:
+    - <span class="k">id</span>: <span class="s">"49824077"</span>
+      <span class="k">comm_id</span>: <span class="id">file:1:comm:8</span>
+      <span class="k">author</span>:  <span class="s">"alex@akesson.mobi"</span>
+      <span class="k">created_at</span>: <span class="s">"2026-05-08T11:31:22Z"</span>
+      <span class="k">message</span>: <span class="s">"+1 — and align the shadow too. I'll push a token update."</span>
+      <span class="k">reactions</span>: []</pre>
+</section>
+
+<!-- ====================================================================== -->
+<section id="file">
+  <h2>File target — counts, pages, components, variable collections</h2>
+  <p class="lede">Orientation view. Useful as a first call before navigating into a specific frame.</p>
+  <div class="cmd"><span class="prompt">$</span>figma-explorer <span class="arg">node-info</span> <span class="arg">file:1</span></div>
+  <pre class="out yaml"><span class="k">target</span>:
+  <span class="k">kind</span>: <span class="s">file</span>
+  <span class="k">id</span>:   <span class="id">file:1</span>
+  <span class="k">path</span>: []
+<span class="k">file</span>:
+  <span class="k">key</span>: <span class="s">aB7xQpL0mZQrYk2N</span>
+  <span class="k">name</span>: <span class="s">"Design System / Web"</span>
+  <span class="k">project_id</span>: <span class="s">"31415926"</span>
+  <span class="k">project_name</span>: <span class="s">"Akesson DS"</span>
+  <span class="k">synth</span>: <span class="n">1</span>
+  <span class="k">version</span>: <span class="s">"2841199283"</span>
+  <span class="k">last_modified</span>: <span class="s">"2026-05-09T14:22:01Z"</span>
+  <span class="k">role</span>: <span class="s">editor</span>
+  <span class="k">editor_type</span>: <span class="s">figma</span>
+<span class="k">file_summary</span>:
+  <span class="k">counts</span>:
+    <span class="k">nodes</span>: <span class="n">12847</span>
+    <span class="k">pages</span>: <span class="n">6</span>
+    <span class="k">components</span>: <span class="n">94</span>
+    <span class="k">component_sets</span>: <span class="n">18</span>
+    <span class="k">styles</span>: <span class="n">61</span>
+    <span class="k">variables</span>: <span class="n">128</span>
+    <span class="k">comments</span>: <span class="n">23</span>
+  <span class="k">pages</span>:
+    - { <span class="k">id</span>: <span class="s">"0:1"</span>, <span class="k">name</span>: <span class="s">"Marketing"</span>,   <span class="k">child_count</span>: <span class="n">142</span> }
+    - { <span class="k">id</span>: <span class="s">"0:2"</span>, <span class="k">name</span>: <span class="s">"Components"</span>,  <span class="k">child_count</span>: <span class="n">187</span> }
+    - { <span class="k">id</span>: <span class="s">"0:3"</span>, <span class="k">name</span>: <span class="s">"Foundations"</span>, <span class="k">child_count</span>: <span class="n">38</span>  }
+    - { <span class="k">id</span>: <span class="s">"0:4"</span>, <span class="k">name</span>: <span class="s">"Cover"</span>,        <span class="k">child_count</span>: <span class="n">1</span>   }
+    - { <span class="k">id</span>: <span class="s">"0:5"</span>, <span class="k">name</span>: <span class="s">"WIP"</span>,          <span class="k">child_count</span>: <span class="n">52</span>  }
+    - { <span class="k">id</span>: <span class="s">"0:6"</span>, <span class="k">name</span>: <span class="s">"Archive"</span>,      <span class="k">child_count</span>: <span class="n">9</span>   }
+  <span class="k">component_sets</span>:
+    - { <span class="k">id</span>: <span class="s">"77:1198"</span>, <span class="k">name</span>: <span class="s">"Button"</span>,
+        <span class="k">properties</span>: { <span class="k">Size</span>: [<span class="s">Small</span>, <span class="s">Medium</span>, <span class="s">Large</span>], <span class="k">State</span>: [<span class="s">Default</span>, <span class="s">Hover</span>, <span class="s">Pressed</span>, <span class="s">Disabled</span>],
+                      <span class="k">Variant</span>: [<span class="s">Primary</span>, <span class="s">Secondary</span>, <span class="s">Ghost</span>] } }
+    - { <span class="k">id</span>: <span class="s">"77:2014"</span>, <span class="k">name</span>: <span class="s">"Input"</span>, <span class="k">properties</span>: { <span class="k">Size</span>: [<span class="s">Sm</span>, <span class="s">Md</span>], <span class="k">State</span>: [<span class="s">Default</span>, <span class="s">Focus</span>, <span class="s">Error</span>] } }
+    <span class="c"># 16 more…</span>
+  <span class="k">variable_collections</span>:
+    - { <span class="k">id</span>: <span class="s">"VariableCollectionId:42:0"</span>, <span class="k">name</span>: <span class="s">"Semantic"</span>,
+        <span class="k">modes</span>: [{ <span class="k">id</span>: <span class="s">"42:0"</span>, <span class="k">name</span>: <span class="s">Light</span> }, { <span class="k">id</span>: <span class="s">"42:1"</span>, <span class="k">name</span>: <span class="s">Dark</span> }],
+        <span class="k">default_mode</span>: <span class="s">"Light"</span>, <span class="k">variable_count</span>: <span class="n">62</span> }
+    - { <span class="k">id</span>: <span class="s">"VariableCollectionId:9:0"</span>,  <span class="k">name</span>: <span class="s">"Primitive"</span>,
+        <span class="k">modes</span>: [{ <span class="k">id</span>: <span class="s">"9:0"</span>, <span class="k">name</span>: <span class="s">Default</span> }],
+        <span class="k">default_mode</span>: <span class="s">"Default"</span>, <span class="k">variable_count</span>: <span class="n">54</span> }
+    - { <span class="k">id</span>: <span class="s">"VariableCollectionId:88:0"</span>, <span class="k">name</span>: <span class="s">"Copy"</span>,
+        <span class="k">modes</span>: [{ <span class="k">id</span>: <span class="s">"88:0"</span>, <span class="k">name</span>: <span class="s">en</span> }, { <span class="k">id</span>: <span class="s">"88:1"</span>, <span class="k">name</span>: <span class="s">sv</span> }],
+        <span class="k">default_mode</span>: <span class="s">"en"</span>, <span class="k">variable_count</span>: <span class="n">12</span> }
+  <span class="k">recent_comments</span>:
+    - { <span class="k">comm_id</span>: <span class="id">file:1:comm:7</span>, <span class="k">author</span>: <span class="s">"henrik@..."</span>, <span class="k">created_at</span>: <span class="s">"2026-05-08T11:04:00Z"</span>,
+        <span class="k">message</span>: <span class="s">"Match the elevated surface from the iOS app …"</span> }
+    - { <span class="k">comm_id</span>: <span class="id">file:1:comm:6</span>, <span class="k">author</span>: <span class="s">"sam@..."</span>,    <span class="k">created_at</span>: <span class="s">"2026-05-07T16:18:42Z"</span>,
+        <span class="k">message</span>: <span class="s">"Spacing on Input/Md feels wrong at 4px."</span> }</pre>
+</section>
+
+<!-- ====================================================================== -->
+<section id="truncated">
+  <h2>Truncated subtree <span class="badge">--max-nodes 5</span></h2>
+  <p class="lede">Hard cap reached. The output includes a <code>truncated</code> block listing the omitted node ids so the consumer can decide what to fetch next.</p>
+  <div class="cmd"><span class="prompt">$</span>figma-explorer <span class="arg">node-info</span> <span class="flag">--max-nodes</span> <span class="arg">5</span> <span class="arg">file:1:1094:66591</span></div>
+  <pre class="out yaml"><span class="k">target</span>: { <span class="k">kind</span>: <span class="s">node</span>, <span class="k">id</span>: <span class="id">file:1:1094:66591</span>, <span class="k">path</span>: [...] }
+<span class="k">node</span>:
+  <span class="c"># …same FRAME as above, children list capped at the first 5…</span>
+  <span class="k">children</span>:
+    - { <span class="k">id</span>: <span class="s">"1094:66592"</span>, <span class="k">type</span>: <span class="s">TEXT</span>,     <span class="k">name</span>: <span class="s">"Title"</span> }
+    - { <span class="k">id</span>: <span class="s">"1094:66593"</span>, <span class="k">type</span>: <span class="s">TEXT</span>,     <span class="k">name</span>: <span class="s">"Subtitle"</span> }
+    - { <span class="k">id</span>: <span class="s">"1094:66594"</span>, <span class="k">type</span>: <span class="s">RECTANGLE</span>, <span class="k">name</span>: <span class="s">"Hero image"</span> }
+    - { <span class="k">id</span>: <span class="s">"1094:66595"</span>, <span class="k">type</span>: <span class="s">FRAME</span>,    <span class="k">name</span>: <span class="s">"Meta row"</span> }
+    - { <span class="k">id</span>: <span class="s">"1094:66600"</span>, <span class="k">type</span>: <span class="s">INSTANCE</span>, <span class="k">name</span>: <span class="s">"Button / Primary"</span> }
+<span class="k">truncated</span>:
+  <span class="k">reason</span>: <span class="s">"max_nodes (5) reached"</span>
+  <span class="k">omitted_count</span>: <span class="n">12</span>
+  <span class="k">omitted_node_ids</span>: [<span class="s">"1094:66595/..."</span>, <span class="s">"1094:66596"</span>, <span class="s">"1094:66597"</span>, <span class="s">"1094:66598"</span>, <span class="s">"1094:66599"</span>, ...]
+  <span class="k">hint</span>: <span class="s">"call node-info on an omitted id, or re-run with --max-nodes N"</span></pre>
+</section>
+
+<!-- ====================================================================== -->
+<section id="raw">
+  <h2>Raw escape hatch <span class="badge">--raw</span></h2>
+  <p class="lede">Raw Figma JSON (camelCase, untouched). Use when the curated view drops something you need.</p>
+  <div class="cmd"><span class="prompt">$</span>figma-explorer <span class="arg">node-info</span> <span class="flag">--raw</span> <span class="arg">file:1:1094:66591</span></div>
+  <pre class="out yaml"><span class="k">id</span>: <span class="s">"1094:66591"</span>
+<span class="k">name</span>: <span class="s">"ProductCard"</span>
+<span class="k">type</span>: <span class="s">"FRAME"</span>
+<span class="k">scrollBehavior</span>: <span class="s">"SCROLLS"</span>
+<span class="k">blendMode</span>: <span class="s">"PASS_THROUGH"</span>
+<span class="k">layoutAlign</span>: <span class="s">"INHERIT"</span>
+<span class="k">layoutGrow</span>: <span class="n">0</span>
+<span class="k">layoutSizingHorizontal</span>: <span class="s">"FIXED"</span>
+<span class="k">layoutSizingVertical</span>: <span class="s">"HUG"</span>
+<span class="k">opacity</span>: <span class="n">1</span>
+<span class="k">absoluteBoundingBox</span>: { <span class="k">x</span>: <span class="n">120</span>, <span class="k">y</span>: <span class="n">240</span>, <span class="k">width</span>: <span class="n">320</span>, <span class="k">height</span>: <span class="n">412</span> }
+<span class="k">absoluteRenderBounds</span>: { <span class="k">x</span>: <span class="n">119.5</span>, <span class="k">y</span>: <span class="n">239.5</span>, <span class="k">width</span>: <span class="n">321</span>, <span class="k">height</span>: <span class="n">418</span> }
+<span class="k">constraints</span>: { <span class="k">vertical</span>: <span class="s">"TOP"</span>, <span class="k">horizontal</span>: <span class="s">"LEFT"</span> }
+<span class="k">fills</span>:
+  - <span class="k">blendMode</span>: <span class="s">"NORMAL"</span>
+    <span class="k">type</span>: <span class="s">"SOLID"</span>
+    <span class="k">color</span>: { <span class="k">r</span>: <span class="n">1</span>, <span class="k">g</span>: <span class="n">1</span>, <span class="k">b</span>: <span class="n">1</span>, <span class="k">a</span>: <span class="n">1</span> }
+    <span class="k">boundVariables</span>: { <span class="k">color</span>: { <span class="k">type</span>: <span class="s">"VARIABLE_ALIAS"</span>, <span class="k">id</span>: <span class="s">"VariableID:42:9"</span> } }
+<span class="k">strokes</span>: [...]
+<span class="k">strokeWeight</span>: <span class="n">1</span>
+<span class="k">strokeAlign</span>: <span class="s">"INSIDE"</span>
+<span class="k">cornerRadius</span>: <span class="n">12</span>
+<span class="k">effects</span>: [...]
+<span class="k">layoutMode</span>: <span class="s">"VERTICAL"</span>
+<span class="k">primaryAxisSizingMode</span>: <span class="s">"AUTO"</span>
+<span class="k">counterAxisSizingMode</span>: <span class="s">"FIXED"</span>
+<span class="k">primaryAxisAlignItems</span>: <span class="s">"MIN"</span>
+<span class="k">counterAxisAlignItems</span>: <span class="s">"MIN"</span>
+<span class="k">paddingLeft</span>: <span class="n">20</span>
+<span class="k">paddingRight</span>: <span class="n">20</span>
+<span class="k">paddingTop</span>: <span class="n">20</span>
+<span class="k">paddingBottom</span>: <span class="n">20</span>
+<span class="k">itemSpacing</span>: <span class="n">16</span>
+<span class="k">styles</span>: { <span class="k">fill</span>: <span class="s">"S:9f2a18..."</span>, <span class="k">effect</span>: <span class="s">"S:b6e3c7..."</span> }
+<span class="k">boundVariables</span>:
+  <span class="k">cornerRadius</span>: { <span class="k">type</span>: <span class="s">"VARIABLE_ALIAS"</span>, <span class="k">id</span>: <span class="s">"VariableID:9:3"</span> }
+  <span class="k">fills</span>: [{ <span class="k">type</span>: <span class="s">"VARIABLE_ALIAS"</span>, <span class="k">id</span>: <span class="s">"VariableID:42:9"</span> }]
+<span class="k">children</span>: [ <span class="c"># …raw, recursive…</span> ]</pre>
+</section>
+
+<!-- ====================================================================== -->
+<section id="json">
+  <h2>JSON output <span class="badge">--json</span></h2>
+  <p class="lede">Same data as the FRAME example above, in JSON. Useful for piping through <code>jq</code>.</p>
+  <div class="cmd"><span class="prompt">$</span>figma-explorer <span class="flag">--json</span> <span class="arg">node-info</span> <span class="arg">file:1:1094:66591</span> | jq <span class="s">'.node.layout'</span></div>
+  <pre class="out yaml">{
+  <span class="s">"mode"</span>: <span class="s">"VERTICAL"</span>,
+  <span class="s">"primary_axis"</span>: { <span class="s">"sizing"</span>: <span class="s">"AUTO"</span>,  <span class="s">"align"</span>: <span class="s">"MIN"</span> },
+  <span class="s">"counter_axis"</span>: { <span class="s">"sizing"</span>: <span class="s">"FIXED"</span>, <span class="s">"align"</span>: <span class="s">"MIN"</span> },
+  <span class="s">"item_spacing"</span>: <span class="n">16</span>,
+  <span class="s">"padding"</span>: { <span class="s">"top"</span>: <span class="n">20</span>, <span class="s">"right"</span>: <span class="n">20</span>, <span class="s">"bottom"</span>: <span class="n">20</span>, <span class="s">"left"</span>: <span class="n">20</span> }
+}</pre>
+</section>
+
+</main>
+
+<footer>
+  Examples are illustrative — actual values come from the cached <code>.full.json.gz</code> sidecar (see plan at
+  <code>~/.claude/plans/there-is-a-command-structured-dream.md</code>). All ids are fabricated.
+</footer>
+
+</body>
+</html>

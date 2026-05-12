@@ -55,7 +55,11 @@ impl Args {
         }
 
         let type_refs: Vec<&str> = self.r#type.iter().map(String::as_str).collect();
-        let type_filter = if type_refs.is_empty() { None } else { Some(type_refs.as_slice()) };
+        let type_filter = if type_refs.is_empty() {
+            None
+        } else {
+            Some(type_refs.as_slice())
+        };
 
         // Collect hits across the requested scope. For each cached file we
         // run multi_token_search inside, tagging hits with the file's synth
@@ -75,7 +79,9 @@ impl Args {
                     .await
                     .map_err(|e| render_resolve_error(e, format))?;
                 match target {
-                    ResolvedTarget::File { synth, document, .. } => {
+                    ResolvedTarget::File {
+                        synth, document, ..
+                    } => {
                         let hits = multi_token_search(
                             &document.document,
                             &tokens,
@@ -86,7 +92,9 @@ impl Args {
                             all_hits.push(scoped_from_hit(synth, &h));
                         }
                     }
-                    ResolvedTarget::Node { file_synth, node, .. } => {
+                    ResolvedTarget::Node {
+                        file_synth, node, ..
+                    } => {
                         let hits = multi_token_search(&node, &tokens, type_filter, usize::MAX);
                         for h in hits {
                             all_hits.push(scoped_from_hit(file_synth, &h));
@@ -95,6 +103,11 @@ impl Args {
                     ResolvedTarget::Project { .. } | ResolvedTarget::Root => {
                         anyhow::bail!(
                             "--in must be a file or node scope (got {scope_str}); use no --in for cross-file search"
+                        );
+                    }
+                    ResolvedTarget::Comment { .. } => {
+                        anyhow::bail!(
+                            "--in cannot scope to a comment ({scope_str}); use a file or node id"
                         );
                     }
                 }
@@ -106,17 +119,15 @@ impl Args {
                 let synth = resolver.synth();
                 let metas = resolver.cache().list_metas()?;
                 for m in metas.iter().filter(|m| m.status == EntryStatus::Ok) {
-                    let Some(file_synth) = synth.file_synth(&m.file_key) else { continue };
+                    let Some(file_synth) = synth.file_synth(&m.file_key) else {
+                        continue;
+                    };
                     let payload = match resolver.cache().read_file(&m.file_key) {
                         Ok(Some(p)) => p,
                         _ => continue,
                     };
-                    let hits = multi_token_search(
-                        &payload.document,
-                        &tokens,
-                        type_filter,
-                        usize::MAX,
-                    );
+                    let hits =
+                        multi_token_search(&payload.document, &tokens, type_filter, usize::MAX);
                     for h in hits {
                         all_hits.push(scoped_from_hit(file_synth, &h));
                     }
@@ -129,7 +140,9 @@ impl Args {
         // ranking. The dedup pass rolls the suppressed counts onto the
         // surviving anchors so `[+N hits]` can be displayed.
         all_hits.sort_by(|a, b| {
-            b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal)
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
         all_hits = dedupe_descendants(all_hits);
 
@@ -247,7 +260,10 @@ struct ScopedHit {
 fn scoped_from_hit(file_synth: u32, hit: &SearchHit<'_>) -> ScopedHit {
     let node = hit.node;
     let id = format!("file:{file_synth}:{}", node.id);
-    let bounds = node.bounds.map(|b| b.compact()).unwrap_or_else(|| "-".to_owned());
+    let bounds = node
+        .bounds
+        .map(|b| b.compact())
+        .unwrap_or_else(|| "-".to_owned());
     // Trim the path for display: the trailing element is the matched node
     // itself (already in the "name" column), and the leading DOCUMENT node
     // is the same on every line. The canvas name and below are what carry
@@ -281,7 +297,11 @@ fn scoped_from_hit(file_synth: u32, hit: &SearchHit<'_>) -> ScopedHit {
     ScopedHit {
         id,
         bounds,
-        kind: if node.type_.is_empty() { "?".to_owned() } else { node.type_.clone() },
+        kind: if node.type_.is_empty() {
+            "?".to_owned()
+        } else {
+            node.type_.clone()
+        },
         score: round_one(hit.score),
         name: node.name.clone(),
         path_components,
@@ -368,10 +388,10 @@ mod tests {
     #[test]
     fn dedupe_suppresses_descendants_and_counts_them() {
         let hits = vec![
-            hit(1, "1:1", &["0:0"], 100.0),                  // anchor
-            hit(1, "2:1", &["0:0", "1:1"], 50.0),            // child
-            hit(1, "3:1", &["0:0", "1:1", "2:1"], 40.0),     // grandchild
-            hit(1, "3:2", &["0:0", "1:1", "2:1"], 30.0),     // grandchild
+            hit(1, "1:1", &["0:0"], 100.0),              // anchor
+            hit(1, "2:1", &["0:0", "1:1"], 50.0),        // child
+            hit(1, "3:1", &["0:0", "1:1", "2:1"], 40.0), // grandchild
+            hit(1, "3:2", &["0:0", "1:1", "2:1"], 30.0), // grandchild
         ];
         let kept = dedupe_descendants(hits);
         assert_eq!(kept.len(), 1);
@@ -387,8 +407,8 @@ mod tests {
         // A is an ancestor of B; both retained. Then C is a descendant of B
         // (and transitively of A). C must bump B's count, not A's.
         let hits = vec![
-            hit(1, "A", &["0:0"], 100.0),                    // retained
-            hit(1, "B", &["0:0", "A"], 99.0),                // retained (B not a descendant of A in the score order? — it IS, so it'll be suppressed under A)
+            hit(1, "A", &["0:0"], 100.0),     // retained
+            hit(1, "B", &["0:0", "A"], 99.0), // retained (B not a descendant of A in the score order? — it IS, so it'll be suppressed under A)
             hit(1, "C", &["0:0", "A", "B"], 50.0),
         ];
         // With our rules, B is a descendant of A in the same file, so B is
@@ -406,9 +426,9 @@ mod tests {
     #[test]
     fn dedupe_rolls_up_to_correct_anchor_among_siblings() {
         let hits = vec![
-            hit(1, "A", &["0:0"], 100.0),         // retained, branch 1
-            hit(1, "B", &["0:0"], 90.0),          // retained, branch 2 (sibling of A)
-            hit(1, "C", &["0:0", "B"], 50.0),     // descendant of B only
+            hit(1, "A", &["0:0"], 100.0),     // retained, branch 1
+            hit(1, "B", &["0:0"], 90.0),      // retained, branch 2 (sibling of A)
+            hit(1, "C", &["0:0", "B"], 50.0), // descendant of B only
         ];
         let kept = dedupe_descendants(hits);
         assert_eq!(kept.len(), 2);

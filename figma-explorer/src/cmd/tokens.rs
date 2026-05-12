@@ -53,8 +53,11 @@ impl Args {
             ResolvedTarget::Node { meta, node, .. } => (meta.file_key, Some(node.id)),
             ResolvedTarget::File { meta, .. } => (meta.file_key, None),
             ResolvedTarget::Root | ResolvedTarget::Project { .. } => {
+                anyhow::bail!("tokens needs a file or node-level id; got {}", self.id);
+            }
+            ResolvedTarget::Comment { .. } => {
                 anyhow::bail!(
-                    "tokens needs a file or node-level id; got {}",
+                    "tokens does not accept comment ids ({}); use `node-info` for a comment",
                     self.id
                 );
             }

@@ -48,10 +48,7 @@ impl NodeIndex {
                 Ok(Some(p)) => p,
                 Ok(None) => continue,
                 Err(e) => {
-                    eprintln!(
-                        "node_index: skipping {} ({}): {e}",
-                        m.file_key, m.name
-                    );
+                    eprintln!("node_index: skipping {} ({}): {e}", m.file_key, m.name);
                     continue;
                 }
             };
@@ -62,7 +59,10 @@ impl NodeIndex {
 
     /// Look up which cached files contain a given native node id.
     pub fn lookup(&self, node_id: &str) -> &[u32] {
-        self.by_node_id.get(node_id).map(Vec::as_slice).unwrap_or(&[])
+        self.by_node_id
+            .get(node_id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 
     /// Total number of distinct node IDs in the index.
@@ -119,7 +119,9 @@ mod tests {
         };
         let payload_a = build_cached_file(&ref_a, &doc_a, 0);
         cache.write_file("file-a", &payload_a).unwrap();
-        cache.write_meta(&FileMeta::from_success(&ref_a, &payload_a, 0, 0)).unwrap();
+        cache
+            .write_meta(&FileMeta::from_success(&ref_a, &payload_a, 0, 0))
+            .unwrap();
 
         // File B: DOCUMENT 0:0, page 0:1 "Sheet" (id collision with A's 0:1!),
         // unique frame 9:9 "Banner".
@@ -141,7 +143,9 @@ mod tests {
         };
         let payload_b = build_cached_file(&ref_b, &doc_b, 0);
         cache.write_file("file-b", &payload_b).unwrap();
-        cache.write_meta(&FileMeta::from_success(&ref_b, &payload_b, 0, 0)).unwrap();
+        cache
+            .write_meta(&FileMeta::from_success(&ref_b, &payload_b, 0, 0))
+            .unwrap();
 
         let mut synth = SynthState::default();
         let a = synth.intern_file("file-a");
@@ -211,6 +215,13 @@ mod tests {
             comments_fingerprint: None,
             comments_error: None,
             comments_schema_version: None,
+            full_fetched_at_epoch: None,
+            full_bytes: None,
+            full_schema_version: None,
+            variables_fetched_at_epoch: None,
+            variables_bytes: None,
+            variables_error: None,
+            variables_schema_version: None,
         };
         cache.write_meta(&meta).unwrap();
 

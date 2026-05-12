@@ -169,6 +169,11 @@ impl Args {
                             &resolver, file_synth, &meta, &node, depth, format, resolved,
                         )
                     }
+                    ResolvedTarget::Comment { .. } => {
+                        anyhow::bail!(
+                            "ls does not accept comment ids; use `node-info` for a comment"
+                        );
+                    }
                 }
             }
         }

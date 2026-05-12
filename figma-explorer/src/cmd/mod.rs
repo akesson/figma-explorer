@@ -10,6 +10,7 @@ pub mod comments;
 pub mod context;
 pub mod find;
 pub mod ls;
+pub mod node_info;
 pub mod screenshot;
 pub mod tokens;
 
@@ -29,6 +30,11 @@ pub enum Command {
     Assets(assets::Args),
     /// Aggregate: dump tree + screenshot + tokens + assets for a node.
     Context(context::Args),
+    /// Comprehensive single-target view: node properties, layout, fills,
+    /// effects, component metadata, bound variables, comments. Designed for
+    /// Claude Code agents implementing designs in application code. Accepts
+    /// node, comment, file, project, and root targets.
+    NodeInfo(node_info::Args),
     /// Maintain the local file cache (prefetch / clear).
     Cache(cache::Args),
 }
@@ -43,6 +49,7 @@ impl Command {
             Self::Tokens(a) => a.run(cfg, globals).await,
             Self::Assets(a) => a.run(cfg, globals).await,
             Self::Context(a) => a.run(cfg, globals).await,
+            Self::NodeInfo(a) => a.run(cfg, globals).await,
             Self::Cache(a) => a.run(cfg, globals).await,
         }
     }
@@ -68,6 +75,29 @@ pub async fn fetch_file_json(
         url.push_str(&format!("?depth={}", d));
     }
     get_json(cfg, &url).await
+}
+
+/// Fetch the local-variables document for a file. Wraps the
+/// `/v1/files/{key}/variables/local` endpoint and returns the raw JSON.
+///
+/// Non-Enterprise accounts get HTTP 403 ("This endpoint is only available to
+/// users on plans with Variables REST API access"). Callers (currently
+/// `cache prefetch`) treat that as a soft failure: record the error in
+/// `FileMeta::variables_error`, optionally disable further variables fetches
+/// for the run, but never abort the rest of the work.
+pub async fn fetch_local_variables(
+    cfg: &Configuration,
+    file_key: &str,
+) -> Result<serde_json::Value> {
+    let url = format!("{}/v1/files/{}/variables/local", cfg.base_path, file_key);
+    get_json(cfg, &url).await
+}
+
+/// Heuristic: does this error string look like a Variables-API 403?
+/// Used by `cache prefetch` to decide whether to disable further variables
+/// fetches for the rest of the run after a few consecutive 403s.
+pub fn is_variables_forbidden_error(err: &str) -> bool {
+    err.contains("403")
 }
 
 /// Issue a GET against the Figma REST API with the configuration's auth and
@@ -97,4 +127,3 @@ pub async fn get_json(cfg: &Configuration, url: &str) -> Result<serde_json::Valu
     }
     serde_json::from_str(&body).with_context(|| format!("parsing response from {url}"))
 }
-

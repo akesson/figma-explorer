@@ -45,7 +45,11 @@ impl Args {
         // targets fall back to the file's DOCUMENT id; ResolvedTarget::Root /
         // ::Project are rejected — there's nothing to render at that level.
         let (file_key, node_id, display_id) = match target {
-            ResolvedTarget::Node { file_synth, meta, node } => {
+            ResolvedTarget::Node {
+                file_synth,
+                meta,
+                node,
+            } => {
                 let node_id = node.id.clone();
                 let display_id = if node.id.is_empty() {
                     format!("file:{file_synth}")
@@ -54,14 +58,20 @@ impl Args {
                 };
                 (meta.file_key, node_id, display_id)
             }
-            ResolvedTarget::File { synth, meta, document } => (
-                meta.file_key,
-                document.document.id,
-                format!("file:{synth}"),
-            ),
+            ResolvedTarget::File {
+                synth,
+                meta,
+                document,
+            } => (meta.file_key, document.document.id, format!("file:{synth}")),
             ResolvedTarget::Root | ResolvedTarget::Project { .. } => {
                 anyhow::bail!(
                     "screenshot needs a node-level id (file:N:x:y, a bare x:y, or a Figma URL); got {}",
+                    self.id
+                );
+            }
+            ResolvedTarget::Comment { .. } => {
+                anyhow::bail!(
+                    "screenshot does not accept comment ids ({}); use `node-info` for a comment, or pass the comment's anchored node",
                     self.id
                 );
             }
@@ -107,4 +117,3 @@ impl Args {
         }
     }
 }
-
