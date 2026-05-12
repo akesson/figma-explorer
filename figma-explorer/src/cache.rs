@@ -1023,8 +1023,8 @@ pub fn fingerprint_comments(comments: &[Comment]) -> String {
 /// Pre-association reads the cached tree document so it can resolve each
 /// comment's anchor up front. The tree **must already be on disk** before
 /// this runs — callers in `fetch_and_cache` write the tree first; the
-/// `try_refresh_single` and `refresh_comments` paths only run when the meta
-/// already exists (which implies the tree exists).
+/// `try_refresh_single` path only runs when the meta already exists (which
+/// implies the tree exists).
 ///
 /// Best-effort: returns `()` even on API failure. The error is reflected
 /// in `meta.comments_error` so the caller can write the updated meta and
@@ -1159,42 +1159,6 @@ fn intern_comment_synths(cache: &CacheDir, file_synth: u32, comments: &[Associat
     }) {
         eprintln!("cache: comment-synth intern failed for file_synth={file_synth}: {e:#}");
     }
-}
-
-/// Public entry point used by the `comments` subcommand's `--max-age-secs 0`
-/// path: force-refresh comments for a file that already has a cached tree.
-/// Returns the freshly-fetched, pre-associated comments on success, or an
-/// error explaining why a refresh couldn't happen (e.g. no cached file yet).
-pub async fn refresh_comments(
-    cfg: &Configuration,
-    file_key: &str,
-) -> Result<Vec<AssociatedComment>> {
-    let cache = CacheDir::new(default_dir());
-    cache.ensure()?;
-    let now = now_epoch();
-    let mut meta = cache.read_meta(file_key)?.ok_or_else(|| {
-        anyhow::anyhow!(
-            "no cached metadata for {file_key}; run `cache prefetch` or pass a URL first"
-        )
-    })?;
-    fetch_comments_into_meta(cfg, &cache, file_key, now, &mut meta).await;
-    cache.write_meta(&meta)?;
-    if let Some(err) = &meta.comments_error {
-        anyhow::bail!("comments fetch failed: {err}");
-    }
-    let associated = cache
-        .read_comments(file_key)?
-        .ok_or_else(|| anyhow::anyhow!("comments fetch reported success but no sidecar on disk"))?;
-
-    // Best-effort: register comm synths so paste-ready `file:N:comm:M` IDs
-    // referring to these comments work in subsequent runs.
-    if let Ok(state) = crate::synth::SynthState::load(&cache) {
-        if let Some(file_synth) = state.file_synth(file_key) {
-            intern_comment_synths(&cache, file_synth, &associated);
-        }
-    }
-
-    Ok(associated)
 }
 
 /// Cache-first loader for the structural commands.

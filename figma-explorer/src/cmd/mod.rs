@@ -6,7 +6,6 @@ use crate::Globals;
 
 pub mod assets;
 pub mod cache;
-pub mod comments;
 pub mod context;
 pub mod find;
 pub mod ls;
@@ -20,8 +19,6 @@ pub enum Command {
     Ls(ls::Args),
     /// Locate nodes by a multi-token ancestor-chain query.
     Find(find::Args),
-    /// List comments for a file (or node), each associated with the node it pins to.
-    Comments(comments::Args),
     /// Export a node as PNG/JPG/SVG/PDF.
     Screenshot(screenshot::Args),
     /// Extract design tokens (colors, fonts, sizes, spacing, …).
@@ -44,7 +41,6 @@ impl Command {
         match self {
             Self::Ls(a) => a.run(cfg, globals).await,
             Self::Find(a) => a.run(cfg, globals).await,
-            Self::Comments(a) => a.run(cfg, globals).await,
             Self::Screenshot(a) => a.run(cfg, globals).await,
             Self::Tokens(a) => a.run(cfg, globals).await,
             Self::Assets(a) => a.run(cfg, globals).await,
