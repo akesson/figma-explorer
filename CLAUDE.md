@@ -21,7 +21,7 @@ cargo fmt
 cargo run -p figma-explorer -- <subcommand>  # run the CLI locally
 ```
 
-The repo auto-loads `.env` from the cwd via `dotenvy`. Required: `FIGMA_TOKEN`. Cache prefetch needs `FIGMA_PROJECTS_IDS` (comma-separated project IDs). Cache location override: `FIGMA_EXPLORER_CACHE_DIR` (else `dirs::cache_dir()`).
+The repo auto-loads `.env` via `dotenvy`, walking from cwd up to the filesystem root. The closest `.env` wins; ancestors fill in keys it didn't define. Required: `FIGMA_TOKEN`. Cache prefetch needs `FIGMA_PROJECTS_IDS` (comma-separated project IDs). Cache location override: `FIGMA_EXPLORER_CACHE_DIR` (else `dirs::cache_dir()`).
 
 ## Architecture — figma-explorer
 
