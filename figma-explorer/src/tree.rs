@@ -262,32 +262,105 @@ pub(crate) fn collect_visible<'a>(
 /// computes truncation markers); second pass measures id/bounds widths and
 /// formats. Returns owned `String`s ready to be joined with `\n`.
 pub fn render_flat(root: &CacheNode, file_synth: u32, max_depth: usize) -> Vec<String> {
+    render_flat_with_comments(root, file_synth, max_depth, &[])
+}
+
+/// Synthetic row for a comment thread head, injected into [`render_flat_with_comments`]
+/// output. Bounds stay `-` and the kind column is always `COMMENT`; everything
+/// after the kind is assembled by the caller into `display`.
+#[derive(Debug, Clone)]
+pub struct CommentRow {
+    /// Pre-formatted id column, e.g. `"file:2:comm:34"`.
+    pub id: String,
+    /// Anchor node id (matches a `CacheNode::id` in the tree). `None` for
+    /// canvas-level or stale-reference comments — those float to the trailing
+    /// block under the file root.
+    pub anchor_node_id: Option<String>,
+    /// Trailing payload after the kind label. The caller controls
+    /// truncation, quoting, suffixes (`(+N replies)`), etc.
+    pub display: String,
+}
+
+/// Like [`render_flat`] but interleaves comment rows under their anchor
+/// nodes. Canvas-level (`anchor_node_id == None`) rows emit as a trailing
+/// block at depth 1, after every node row. The column-alignment pass
+/// considers both row kinds so the pipe rail stays at a fixed column.
+pub fn render_flat_with_comments(
+    root: &CacheNode,
+    file_synth: u32,
+    max_depth: usize,
+    comment_rows: &[CommentRow],
+) -> Vec<String> {
     let mut items: Vec<(&CacheNode, usize, Option<usize>)> = Vec::new();
     collect_visible(root, 0, max_depth, &mut items);
     if items.is_empty() {
         return Vec::new();
     }
-    let max_id_width = items
+
+    // Group comments by anchor node id for O(1) lookup at render time.
+    let mut by_node: std::collections::HashMap<&str, Vec<&CommentRow>> =
+        std::collections::HashMap::new();
+    let mut canvas: Vec<&CommentRow> = Vec::new();
+    for row in comment_rows {
+        match row.anchor_node_id.as_deref() {
+            Some(nid) => by_node.entry(nid).or_default().push(row),
+            None => canvas.push(row),
+        }
+    }
+
+    // Width pass — id and bounds widths span node + comment rows.
+    let node_id_widths = items.iter().map(|(n, _, _)| {
+        if n.id.is_empty() {
+            format!("file:{}", file_synth).len()
+        } else {
+            format!("file:{}:{}", file_synth, n.id).len()
+        }
+    });
+    let comment_id_widths = comment_rows.iter().map(|r| r.id.len());
+    let max_id_width = node_id_widths.chain(comment_id_widths).max().unwrap_or(0);
+
+    let node_bounds_widths = items
         .iter()
-        .map(|(n, _, _)| {
-            if n.id.is_empty() {
-                format!("file:{}", file_synth).len()
-            } else {
-                format!("file:{}:{}", file_synth, n.id).len()
-            }
-        })
-        .max()
-        .unwrap_or(0);
-    let max_bounds_width = items
-        .iter()
-        .map(|(n, _, _)| n.bounds.map(|b| b.compact().len()).unwrap_or(1))
+        .map(|(n, _, _)| n.bounds.map(|b| b.compact().len()).unwrap_or(1));
+    // Comment rows always render bounds as "-" (1 char). Including 1 here
+    // is a no-op for the max() but keeps the intent visible.
+    let max_bounds_width = node_bounds_widths
+        .chain(comment_rows.iter().map(|_| 1usize))
         .max()
         .unwrap_or(1);
+
     let ctx = FormatCtx { file_synth, max_id_width, max_bounds_width };
-    items
-        .into_iter()
-        .map(|(n, d, trunc)| format_cache_line(n, d, &ctx, trunc))
-        .collect()
+    let mut out: Vec<String> = Vec::with_capacity(items.len() + comment_rows.len());
+    for (n, depth, trunc) in &items {
+        out.push(format_cache_line(n, *depth, &ctx, *trunc));
+        if let Some(rows) = by_node.get(n.id.as_str()) {
+            for row in rows {
+                out.push(format_comment_line(row, depth + 1, &ctx));
+            }
+        }
+    }
+    // Canvas-level threads: render after every anchored row. Depth 1 makes
+    // them appear as direct children of the file root.
+    for row in &canvas {
+        out.push(format_comment_line(row, 1, &ctx));
+    }
+    out
+}
+
+/// Render one [`CommentRow`] as a flat line matching the node-row layout.
+/// Bounds column is always `-`; the kind column is `COMMENT` followed by the
+/// caller-assembled `display` payload.
+pub fn format_comment_line(row: &CommentRow, depth: usize, ctx: &FormatCtx) -> String {
+    let indent = "  ".repeat(depth);
+    format!(
+        "{id:<id_w$}  {b:<b_w$}  | {indent}COMMENT  {display}",
+        id = row.id,
+        b = "-",
+        indent = indent,
+        display = row.display,
+        id_w = ctx.max_id_width,
+        b_w = ctx.max_bounds_width,
+    )
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -644,6 +717,71 @@ mod tests {
         let pipe = line.find('|').unwrap();
         let head = &line[..pipe];
         assert!(head.contains(" -  "), "expected '-' bounds marker, got: {line}");
+    }
+
+    #[test]
+    fn flat_format_with_comments_splices_anchored_rows() {
+        let tree = sample_tree();
+        let rows = vec![
+            CommentRow {
+                id: "file:2:comm:1".into(),
+                anchor_node_id: Some("1094:66601".into()), // Title
+                display: "\"looks great\"  by @alice".into(),
+            },
+            CommentRow {
+                id: "file:2:comm:2".into(),
+                anchor_node_id: Some("1094:66602".into()), // Search
+                display: "\"missing icon\"  by @bob  +2".into(),
+            },
+        ];
+        let lines = render_flat_with_comments(&tree, 2, 3, &rows);
+        // Find the Title row's index, then assert the next line is comm:1.
+        let title_i = lines.iter().position(|l| l.contains("\"Title\"")).unwrap();
+        assert!(lines[title_i + 1].contains("file:2:comm:1"));
+        assert!(lines[title_i + 1].contains("COMMENT"));
+        assert!(lines[title_i + 1].contains("looks great"));
+
+        // Same for Search → comm:2.
+        let search_i = lines.iter().position(|l| l.contains("\"Search\"")).unwrap();
+        assert!(lines[search_i + 1].contains("file:2:comm:2"));
+        assert!(lines[search_i + 1].contains("+2"));
+    }
+
+    #[test]
+    fn flat_format_with_comments_canvas_rows_trail_at_depth_one() {
+        let tree = sample_tree();
+        let rows = vec![CommentRow {
+            id: "file:2:comm:7".into(),
+            anchor_node_id: None,
+            display: "\"unanchored thought\"  by @carol".into(),
+        }];
+        let lines = render_flat_with_comments(&tree, 2, 3, &rows);
+        // Canvas-level rows appear at the end.
+        let last = lines.last().unwrap();
+        assert!(last.contains("file:2:comm:7"));
+        assert!(last.contains("COMMENT"));
+        // Their indent (depth 1, 2 spaces after the pipe) lines up with
+        // direct children of the root.
+        let pipe = last.find('|').unwrap();
+        let after = &last[pipe + 2..];
+        assert!(after.starts_with("  COMMENT"), "expected depth-1 indent, got: {after}");
+    }
+
+    #[test]
+    fn flat_format_with_comments_keeps_pipe_aligned() {
+        let tree = sample_tree();
+        let rows = vec![CommentRow {
+            id: "file:2:comm:1000".into(), // Wider than any node id in sample_tree
+            anchor_node_id: Some("1094:66600".into()),
+            display: "x".into(),
+        }];
+        let lines = render_flat_with_comments(&tree, 2, 3, &rows);
+        let pipe_cols: Vec<usize> = lines.iter().map(|l| l.find('|').unwrap()).collect();
+        let first = pipe_cols[0];
+        assert!(
+            pipe_cols.iter().all(|c| *c == first),
+            "comment row broke pipe alignment: {pipe_cols:?}"
+        );
     }
 
     #[test]

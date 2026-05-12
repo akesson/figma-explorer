@@ -36,7 +36,6 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
-use figma_api::apis::comments_api;
 use figma_api::apis::configuration::Configuration;
 use figma_api::apis::projects_api as api;
 use figma_api::models::Comment;
@@ -45,10 +44,20 @@ use rkyv::rancor;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::comment_assoc::{self, associate, AssociatedComment};
 use crate::into_anyhow;
 use crate::node::Bounds;
 
 pub const DEFAULT_TTL_SECS: u64 = 3600;
+
+/// Sidecar format version. Bumped when the on-disk shape of
+/// `{file_key}.comments.json` changes. Sidecars older than the current
+/// version are treated as stale → refetched on next access. Stored on
+/// [`FileMeta::comments_schema_version`].
+///
+/// v1 = `Vec<AssociatedComment>` (pre-computed node associations).
+/// (v0 / missing = legacy `Vec<Comment>` shape from before pre-association.)
+pub const COMMENTS_SCHEMA_VERSION: u32 = 1;
 
 /// 4-byte magic prefix on every `.rkyv` cache file. Distinguishes a cache
 /// file from arbitrary bytes (truncated downloads, accidental replacement).
@@ -308,6 +317,13 @@ pub struct FileMeta {
     /// succeeded. Persists until a subsequent fetch clears it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comments_error: Option<String>,
+    /// On-disk format of the `.comments.json` sidecar. `None` (or `< 1`) means
+    /// either no sidecar has ever been written or the existing sidecar is in a
+    /// pre-pre-association shape; callers treat such metas as needing a
+    /// refetch the next time comments are requested. Set to
+    /// [`COMMENTS_SCHEMA_VERSION`] after every successful sidecar write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comments_schema_version: Option<u32>,
 }
 
 impl FileMeta {
@@ -332,6 +348,7 @@ impl FileMeta {
             comments_fetched_at_epoch: None,
             comments_fingerprint: None,
             comments_error: None,
+            comments_schema_version: None,
         }
     }
 }
@@ -368,18 +385,32 @@ impl CacheDir {
     }
 
     /// Read the comments sidecar for `file_key`. `Ok(None)` when the sidecar
-    /// doesn't exist (file never polled for comments).
-    pub fn read_comments(&self, file_key: &str) -> Result<Option<Vec<Comment>>> {
+    /// doesn't exist (file never polled for comments) *or* when its on-disk
+    /// shape doesn't match the current `AssociatedComment` format — pre-
+    /// pre-association sidecars (raw `Comment` arrays) fail this deserialize
+    /// and are surfaced as "not cached," which steers the caller into the
+    /// refetch path. Migration is automatic on the next fetch.
+    pub fn read_comments(&self, file_key: &str) -> Result<Option<Vec<AssociatedComment>>> {
         let p = self.comments_path(file_key);
         if !p.exists() {
             return Ok(None);
         }
         let s = fs::read_to_string(&p).with_context(|| format!("reading {}", p.display()))?;
-        let v = serde_json::from_str(&s).with_context(|| format!("parsing {}", p.display()))?;
-        Ok(Some(v))
+        match serde_json::from_str::<Vec<AssociatedComment>>(&s) {
+            Ok(v) => Ok(Some(v)),
+            Err(e) => {
+                // Legacy raw-Comment array, or actual corruption — same
+                // treatment either way: treat as "no usable sidecar" and let
+                // the caller refresh.
+                eprintln!(
+                    "cache: comments sidecar for {file_key} not in current format ({e}); will refetch on next access"
+                );
+                Ok(None)
+            }
+        }
     }
 
-    pub fn write_comments(&self, file_key: &str, comments: &[Comment]) -> Result<()> {
+    pub fn write_comments(&self, file_key: &str, comments: &[AssociatedComment]) -> Result<()> {
         let path = self.comments_path(file_key);
         let bytes = serde_json::to_vec_pretty(comments)?;
         atomic_write(&path, &bytes)
@@ -715,6 +746,16 @@ async fn try_refresh_single(
             updated.name = current.name.clone();
             fetch_comments_into_meta(cfg, cache, file_key, now, &mut updated).await;
             let _ = cache.write_meta(&updated);
+            // Register comm synths for any newly-arrived comments — the
+            // file synth was already interned on the previous fetch path,
+            // so it's safe to look up directly here.
+            if let Ok(state) = crate::synth::SynthState::load(cache) {
+                if let Some(file_synth) = state.file_synth(file_key) {
+                    if let Ok(Some(comments)) = cache.read_comments(file_key) {
+                        intern_comment_synths(cache, file_synth, &comments);
+                    }
+                }
+            }
         }
         return cache
             .read_file(file_key)
@@ -774,19 +815,31 @@ async fn fetch_and_cache(
             let mut meta = FileMeta::from_success(&synthetic_ref, &payload, bytes, now);
             // Fetch comments alongside the structural payload — same cadence,
             // best-effort. A failure flips `meta.comments_error` but does not
-            // poison the tree refresh.
+            // poison the tree refresh. Comments are pre-associated against
+            // the just-written tree at line 805 above.
             fetch_comments_into_meta(cfg, cache, file_key, now, &mut meta).await;
             cache.write_meta(&meta)?;
             // Intern synth IDs so downstream commands (`ls`, etc.) can render
-            // qualified `file:N:x:y` lines for this freshly cached file.
+            // qualified `file:N:x:y` / `file:N:comm:M` lines. File synth is
+            // assigned (or retrieved) here; comment synths are interned
+            // immediately after using that synth as their scope.
             // Best-effort: a synth save failure logs and continues.
-            if let Err(e) = crate::synth::with_lock(cache, |s| {
+            let file_synth = match crate::synth::with_lock(cache, |s| {
                 if !meta.project_id.is_empty() {
                     s.intern_project(&meta.project_id);
                 }
-                s.intern_file(&meta.file_key);
+                s.intern_file(&meta.file_key)
             }) {
-                eprintln!("cache: synth intern failed for {file_key}: {e:#}");
+                Ok(synth) => Some(synth),
+                Err(e) => {
+                    eprintln!("cache: synth intern failed for {file_key}: {e:#}");
+                    None
+                }
+            };
+            if let Some(synth) = file_synth {
+                if let Ok(Some(comments)) = cache.read_comments(file_key) {
+                    intern_comment_synths(cache, synth, &comments);
+                }
             }
             Ok(payload)
         }
@@ -824,6 +877,7 @@ async fn fetch_and_cache(
                 comments_fetched_at_epoch: None,
                 comments_fingerprint: None,
                 comments_error: None,
+                comments_schema_version: None,
             };
             // Also drop any stale payload — meta-first ordering.
             let _ = cache.delete_entry(file_key);
@@ -865,12 +919,19 @@ pub fn fingerprint_comments(comments: &[Comment]) -> String {
     format!("{:016x}", h.finish())
 }
 
-/// Fetch comments for `file_key` and update `meta` in place. On success:
-/// writes the `.comments.json` sidecar, sets `comments_fetched_at_epoch` +
-/// `comments_fingerprint`, clears `comments_error`. On failure: leaves any
-/// prior sidecar untouched, sets `comments_error`, logs to stderr.
+/// Fetch comments for `file_key`, pre-associate each one with its anchor
+/// node, and update `meta` in place. On success: writes the `.comments.json`
+/// sidecar as a `Vec<AssociatedComment>`, stamps the epoch, fingerprint, and
+/// schema version, clears `comments_error`. On failure: leaves any prior
+/// sidecar untouched, sets `comments_error`, logs to stderr.
 ///
-/// Best-effort: returns `Ok(())` even on API failure. The error is reflected
+/// Pre-association reads the cached tree document so it can resolve each
+/// comment's anchor up front. The tree **must already be on disk** before
+/// this runs — callers in `fetch_and_cache` write the tree first; the
+/// `try_refresh_single` and `refresh_comments` paths only run when the meta
+/// already exists (which implies the tree exists).
+///
+/// Best-effort: returns `()` even on API failure. The error is reflected
 /// in `meta.comments_error` so the caller can write the updated meta and
 /// downstream tooling can surface staleness.
 pub async fn fetch_comments_into_meta(
@@ -880,18 +941,51 @@ pub async fn fetch_comments_into_meta(
     now: u64,
     meta: &mut FileMeta,
 ) {
-    let params = comments_api::GetCommentsParams {
-        file_key: file_key.to_owned(),
-        as_md: None,
+    let url = format!("{}/v1/files/{}/comments", cfg.base_path, file_key);
+    let raw_json = match crate::cmd::get_json(cfg, &url).await {
+        Ok(v) => v,
+        Err(e) => {
+            let msg = format!("{e:#}");
+            eprintln!("comments: fetch failed for {file_key}: {msg}");
+            meta.comments_error = Some(msg);
+            return;
+        }
     };
-    match comments_api::get_comments(cfg, params).await {
-        Ok(resp) => {
-            let comments = resp.comments;
-            let fp = fingerprint_comments(&comments);
-            match cache.write_comments(file_key, &comments) {
+    match parse_comments_lenient(&raw_json) {
+        Ok(raw) => {
+            // Fingerprint over raw API state so it's invariant under future
+            // threshold / association changes.
+            let fp = fingerprint_comments(&raw);
+
+            // Pre-compute node associations. Requires the cached tree.
+            let document = match cache.read_file(file_key) {
+                Ok(Some(payload)) => payload,
+                Ok(None) => {
+                    let msg = format!(
+                        "tree not cached for {file_key}; cannot pre-associate comments"
+                    );
+                    eprintln!("comments: {msg}");
+                    meta.comments_error = Some(msg);
+                    return;
+                }
+                Err(e) => {
+                    let msg = format!("reading tree for association: {e}");
+                    eprintln!("comments: {file_key}: {msg}");
+                    meta.comments_error = Some(msg);
+                    return;
+                }
+            };
+            let associated = associate(
+                &document.document,
+                &raw,
+                comment_assoc::DEFAULT_ASSOC_THRESHOLD_PX,
+            );
+
+            match cache.write_comments(file_key, &associated) {
                 Ok(()) => {
                     meta.comments_fetched_at_epoch = Some(now);
                     meta.comments_fingerprint = Some(fp);
+                    meta.comments_schema_version = Some(COMMENTS_SCHEMA_VERSION);
                     meta.comments_error = None;
                 }
                 Err(e) => {
@@ -902,18 +996,93 @@ pub async fn fetch_comments_into_meta(
             }
         }
         Err(e) => {
-            let msg = format!("{:?}", e);
-            eprintln!("comments: fetch failed for {file_key}: {msg}");
+            let msg = format!("parsing comments response: {e:#}");
+            eprintln!("comments: {file_key}: {msg}");
             meta.comments_error = Some(msg);
         }
     }
 }
 
+/// Pull a `Vec<Comment>` out of the raw `/v1/files/{key}/comments` JSON,
+/// tolerating real-world spec drift. Specifically:
+///
+/// - `client_meta: null` (some deleted/orphan threads) → substituted with a
+///   `Vector` at origin so the untagged enum can deserialize. The comment
+///   then falls into the canvas-level bucket at association time.
+/// - `parent_id: ""` (Figma's wire format for top-level threads — the spec
+///   models it as `Option<String>` so empty-string ≠ "no parent") →
+///   rewritten to `null` so downstream "is this a head?" checks work.
+/// - Comments that fail to deserialize for any other reason are logged and
+///   skipped rather than aborting the whole batch — one weird comment must
+///   not poison an entire file's sidecar.
+fn parse_comments_lenient(raw: &Value) -> Result<Vec<Comment>> {
+    let arr = raw
+        .get("comments")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow::anyhow!("response missing `comments` array"))?;
+    let mut out = Vec::with_capacity(arr.len());
+    for entry in arr {
+        let mut v = entry.clone();
+        if let Some(obj) = v.as_object_mut() {
+            // Normalize null/missing client_meta → default Vector at origin.
+            // Figma occasionally returns null for older threads where the
+            // anchor was deleted along with its target.
+            let needs_default = matches!(
+                obj.get("client_meta"),
+                None | Some(Value::Null)
+            );
+            if needs_default {
+                obj.insert(
+                    "client_meta".into(),
+                    serde_json::json!({ "x": 0.0, "y": 0.0 }),
+                );
+            }
+            // Normalize empty-string parent_id → null so `Option<String>`
+            // round-trips to `None` for thread heads.
+            if matches!(obj.get("parent_id"), Some(Value::String(s)) if s.is_empty()) {
+                obj.insert("parent_id".into(), Value::Null);
+            }
+        }
+        match serde_json::from_value::<Comment>(v) {
+            Ok(c) => out.push(c),
+            Err(e) => {
+                let id_hint = entry
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("?");
+                eprintln!("comments: skipping malformed comment {id_hint}: {e}");
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Intern every comment id from `comments` under `file_synth`. Best-effort —
+/// errors logged but never propagated, since the sidecar is the source of
+/// truth and synth IDs are recovered on the next prefetch otherwise.
+fn intern_comment_synths(cache: &CacheDir, file_synth: u32, comments: &[AssociatedComment]) {
+    if comments.is_empty() {
+        return;
+    }
+    if let Err(e) = crate::synth::with_lock(cache, |s| {
+        for c in comments {
+            s.intern_comment(file_synth, &c.comment_id);
+        }
+    }) {
+        eprintln!(
+            "cache: comment-synth intern failed for file_synth={file_synth}: {e:#}"
+        );
+    }
+}
+
 /// Public entry point used by the `comments` subcommand's `--max-age-secs 0`
 /// path: force-refresh comments for a file that already has a cached tree.
-/// Returns the freshly-fetched comments on success, or an error explaining
-/// why a refresh couldn't happen (e.g. no cached file yet).
-pub async fn refresh_comments(cfg: &Configuration, file_key: &str) -> Result<Vec<Comment>> {
+/// Returns the freshly-fetched, pre-associated comments on success, or an
+/// error explaining why a refresh couldn't happen (e.g. no cached file yet).
+pub async fn refresh_comments(
+    cfg: &Configuration,
+    file_key: &str,
+) -> Result<Vec<AssociatedComment>> {
     let cache = CacheDir::new(default_dir());
     cache.ensure()?;
     let now = now_epoch();
@@ -929,9 +1098,19 @@ pub async fn refresh_comments(cfg: &Configuration, file_key: &str) -> Result<Vec
     if let Some(err) = &meta.comments_error {
         anyhow::bail!("comments fetch failed: {err}");
     }
-    cache
+    let associated = cache
         .read_comments(file_key)?
-        .ok_or_else(|| anyhow::anyhow!("comments fetch reported success but no sidecar on disk"))
+        .ok_or_else(|| anyhow::anyhow!("comments fetch reported success but no sidecar on disk"))?;
+
+    // Best-effort: register comm synths so paste-ready `file:N:comm:M` IDs
+    // referring to these comments work in subsequent runs.
+    if let Ok(state) = crate::synth::SynthState::load(&cache) {
+        if let Some(file_synth) = state.file_synth(file_key) {
+            intern_comment_synths(&cache, file_synth, &associated);
+        }
+    }
+
+    Ok(associated)
 }
 
 /// Cache-first loader for the structural commands.
@@ -1116,6 +1295,7 @@ mod tests {
             comments_fetched_at_epoch: None,
             comments_fingerprint: None,
             comments_error: None,
+            comments_schema_version: None,
         }
     }
 
@@ -1272,6 +1452,7 @@ mod tests {
             error: None,
             node_count: Some(1),
             bytes: Some(1),
+            comments_schema_version: None,
             comments_fetched_at_epoch: None,
             comments_fingerprint: None,
             comments_error: None,

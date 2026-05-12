@@ -54,6 +54,11 @@ pub enum ResolveError {
     },
     #[error("--cache-only set but {0} is not in the local cache; remove --cache-only or run `figma-explorer cache prefetch`")]
     CacheOnlyMiss(String),
+    /// The id was syntactically valid and namespaced to a real entity, but no
+    /// command currently knows what to do with it. Today only `file:N:comm:M`
+    /// hits this — comment ids are output-only until the future `info` command.
+    #[error("{id} cannot be resolved yet: {hint}")]
+    NotResolvableYet { id: String, hint: String },
     #[error("internal: {0}")]
     Internal(String),
 }
@@ -131,6 +136,13 @@ impl Resolver {
             Id::Project(n) => self.resolve_project(*n),
             Id::File(n) => self.resolve_file(*n),
             Id::Node { file, node } => self.resolve_node(*file, node),
+            Id::Comment { file, comm } => Err(ResolveError::NotResolvableYet {
+                id: format!("file:{file}:comm:{comm}"),
+                hint: "comment IDs are output-only for now; they will be wired \
+                       up via a future `info` command. Use `ls` to see threads \
+                       inline."
+                    .to_owned(),
+            }),
             Id::BareNode(node_id) => self.resolve_bare(node_id),
             Id::Url(parsed) => self.resolve_url(cfg, parsed).await,
         }

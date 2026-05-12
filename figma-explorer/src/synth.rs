@@ -48,6 +48,13 @@ pub struct SynthState {
     pub projects: BTreeMap<String, u32>,
     /// `file_key` → synth integer.
     pub files: BTreeMap<String, u32>,
+    /// Per-file comment-id interning: `file_synth → (figma comment id → comm synth)`.
+    /// Comment synths are scoped under their file so every file's comments
+    /// start at 1 — gives short `file:N:comm:M` IDs even across many files.
+    /// `#[serde(default)]` so older `synth.json` files (written before this
+    /// table existed) load cleanly without forcing a destructive reset.
+    #[serde(default)]
+    pub comments: BTreeMap<u32, BTreeMap<String, u32>>,
 }
 
 fn default_version() -> u32 {
@@ -60,6 +67,7 @@ impl Default for SynthState {
             version: SYNTH_SCHEMA_VERSION,
             projects: BTreeMap::new(),
             files: BTreeMap::new(),
+            comments: BTreeMap::new(),
         }
     }
 }
@@ -71,11 +79,7 @@ impl SynthState {
     pub fn load(cache_dir: &CacheDir) -> Result<Self> {
         let path = synth_path(cache_dir);
         if !path.exists() {
-            return Ok(Self {
-                version: SYNTH_SCHEMA_VERSION,
-                projects: BTreeMap::new(),
-                files: BTreeMap::new(),
-            });
+            return Ok(Self::default());
         }
         let s = fs::read_to_string(&path)
             .with_context(|| format!("reading {}", path.display()))?;
@@ -153,6 +157,34 @@ impl SynthState {
         self.projects
             .iter()
             .find_map(|(k, v)| (*v == synth).then_some(k.as_str()))
+    }
+
+    /// Return the comm synth for `(file_synth, comment_id)`, minting if needed.
+    /// New numbers are `max(existing per file) + 1` so deleted comments leave
+    /// gaps rather than recycling.
+    pub fn intern_comment(&mut self, file_synth: u32, comment_id: &str) -> u32 {
+        let table = self.comments.entry(file_synth).or_default();
+        if let Some(&n) = table.get(comment_id) {
+            return n;
+        }
+        let next = table.values().copied().max().map(|m| m + 1).unwrap_or(1);
+        table.insert(comment_id.to_owned(), next);
+        next
+    }
+
+    pub fn comment_synth(&self, file_synth: u32, comment_id: &str) -> Option<u32> {
+        self.comments
+            .get(&file_synth)
+            .and_then(|t| t.get(comment_id).copied())
+    }
+
+    /// Reverse lookup: `(file_synth, comm_synth) → comment_id`. O(N) over the
+    /// file's comment table; N is bounded by the comment count per file.
+    pub fn comment_id(&self, file_synth: u32, comm_synth: u32) -> Option<&str> {
+        self.comments
+            .get(&file_synth)?
+            .iter()
+            .find_map(|(k, v)| (*v == comm_synth).then_some(k.as_str()))
     }
 }
 
@@ -286,6 +318,78 @@ mod tests {
         assert_eq!(s.file_key(a), Some("file-a"));
         assert_eq!(s.project_id(b), Some("proj-1"));
         assert_eq!(s.file_key(999), None);
+    }
+
+    #[test]
+    fn intern_comment_is_idempotent_and_file_scoped() {
+        let mut s = SynthState::default();
+        let a1 = s.intern_comment(1, "cid-A");
+        let a1_again = s.intern_comment(1, "cid-A");
+        let b1 = s.intern_comment(1, "cid-B");
+        // Same comment id under a different file is a different namespace —
+        // numbering restarts.
+        let a2 = s.intern_comment(2, "cid-A");
+        assert_eq!(a1, a1_again);
+        assert_ne!(a1, b1);
+        assert_eq!(a1, 1);
+        assert_eq!(b1, 2);
+        assert_eq!(a2, 1);
+    }
+
+    #[test]
+    fn comment_intern_preserves_gaps_after_deletion() {
+        let mut s = SynthState::default();
+        s.intern_comment(1, "a"); // 1
+        s.intern_comment(1, "b"); // 2
+        s.intern_comment(1, "c"); // 3
+        // Simulate deletion of comment b under file 1.
+        s.comments.get_mut(&1).unwrap().remove("b");
+        assert_eq!(s.intern_comment(1, "d"), 4);
+    }
+
+    #[test]
+    fn comment_reverse_lookup_works() {
+        let mut s = SynthState::default();
+        let a = s.intern_comment(5, "cid-A");
+        let b = s.intern_comment(5, "cid-B");
+        assert_eq!(s.comment_id(5, a), Some("cid-A"));
+        assert_eq!(s.comment_id(5, b), Some("cid-B"));
+        assert_eq!(s.comment_id(5, 999), None);
+        assert_eq!(s.comment_id(99, a), None);
+        assert_eq!(s.comment_synth(5, "cid-A"), Some(a));
+        assert_eq!(s.comment_synth(5, "missing"), None);
+    }
+
+    #[test]
+    fn comments_table_round_trips() {
+        let (_g, cache) = tmp_cache_dir();
+        let mut s = SynthState::default();
+        s.intern_file("F");
+        s.intern_comment(1, "cid-A");
+        s.intern_comment(1, "cid-B");
+        s.intern_comment(2, "cid-A");
+        s.save(&cache).unwrap();
+
+        let loaded = SynthState::load(&cache).unwrap();
+        assert_eq!(loaded, s);
+    }
+
+    #[test]
+    fn pre_comments_synth_json_loads_via_serde_default() {
+        // Older synth.json (written before the comments table existed) has no
+        // `comments` field. `#[serde(default)]` must absorb the absence
+        // cleanly — no schema mismatch, no panic.
+        let (_g, cache) = tmp_cache_dir();
+        let path = synth_path(&cache);
+        fs::write(
+            &path,
+            r#"{"version": 1, "projects": {"p":1}, "files": {"f":1}}"#,
+        )
+        .unwrap();
+        let state = SynthState::load(&cache).unwrap();
+        assert_eq!(state.project_synth("p"), Some(1));
+        assert_eq!(state.file_synth("f"), Some(1));
+        assert!(state.comments.is_empty());
     }
 
     #[test]

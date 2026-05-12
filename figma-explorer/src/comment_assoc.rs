@@ -16,7 +16,7 @@
 use std::collections::HashMap;
 
 use figma_api::models::{Comment, CommentClientMeta};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::cache::CacheNode;
 use crate::geometry::{area, contains_point, dist_to_rect, iou};
@@ -26,7 +26,12 @@ use crate::node::Bounds;
 /// "didn't really overlap anything" and fall back to centroid lookup.
 const REGION_IOU_FLOOR: f64 = 0.05;
 
-#[derive(Debug, Clone, Serialize)]
+/// Default nearest-neighbor threshold (canvas units) for Vector / Region
+/// centroid pins. Baked at cache-write time — associations are precomputed in
+/// the sidecar so no query-time tuning happens.
+pub const DEFAULT_ASSOC_THRESHOLD_PX: f64 = 50.0;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssociatedComment {
     pub comment_id: String,
     pub message: String,
@@ -49,7 +54,7 @@ pub struct AssociatedComment {
     pub stale_node_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Anchor {
     pub kind: AnchorKind,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -60,7 +65,7 @@ pub struct Anchor {
     pub canvas_rect: Option<[f64; 4]>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AnchorKind {
     Vector,
@@ -69,7 +74,7 @@ pub enum AnchorKind {
     FrameOffsetRegion,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeRef {
     pub node_id: String,
     #[serde(rename = "type")]
@@ -78,7 +83,7 @@ pub struct NodeRef {
     pub path: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AssociationMethod {
     Explicit,

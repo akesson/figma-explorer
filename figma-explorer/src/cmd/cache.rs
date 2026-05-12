@@ -132,7 +132,11 @@ impl PrefetchArgs {
                     staged.name = current.name.clone();
                     // Defer the write until after the comments fetch so we
                     // capture comments_fetched_at_epoch + fingerprint in a
-                    // single meta update.
+                    // single meta update. This branch also serves as the
+                    // sidecar-migration path: any meta with no
+                    // comments_schema_version (or an older one) gets its
+                    // comments refetched on this pass, which rewrites the
+                    // sidecar in the current shape and stamps the version.
                     to_refresh_comments.push((staged, current.clone()));
                 }
                 Some(_) if unchanged && m.status == EntryStatus::NotExportable => {
@@ -211,6 +215,7 @@ impl PrefetchArgs {
                                 comments_fetched_at_epoch: None,
                                 comments_fingerprint: None,
                                 comments_error: None,
+                                comments_schema_version: None,
                             };
                             // Fetch comments alongside the document. Best-effort:
                             // failures flip `meta.comments_error` but don't fail
@@ -266,6 +271,7 @@ impl PrefetchArgs {
                                 comments_fetched_at_epoch: None,
                                 comments_fingerprint: None,
                                 comments_error: None,
+                                comments_schema_version: None,
                             };
                             let _ = cache.write_meta(&marker);
                         }
@@ -304,9 +310,24 @@ impl PrefetchArgs {
         }
 
         // (4a) Intern synth IDs for every project + every successfully-cached
-        //      file. One lock-protected pass at the end so prefetch's worker
-        //      loop doesn't contend on the synth mutex.
+        //      file, plus every comment id under each file. One lock-protected
+        //      pass at the end so prefetch's worker loop doesn't contend on
+        //      the synth mutex.
         let metas_after = cache_dir.list_metas()?;
+        // Pre-load sidecars for every Ok file under jurisdiction so the
+        // synth-intern closure stays I/O-free while holding the lock.
+        let comments_by_file: Vec<(String, Vec<crate::comment_assoc::AssociatedComment>)> =
+            metas_after
+                .iter()
+                .filter(|m| m.status == EntryStatus::Ok && configured.contains(&m.project_id))
+                .filter_map(|m| {
+                    cache_dir
+                        .read_comments(&m.file_key)
+                        .ok()
+                        .flatten()
+                        .map(|c| (m.file_key.clone(), c))
+                })
+                .collect();
         if let Err(e) = crate::synth::with_lock(&cache_dir, |state| {
             for pid in &self.project_ids {
                 state.intern_project(pid);
@@ -317,6 +338,15 @@ impl PrefetchArgs {
                         state.intern_project(&m.project_id);
                     }
                     state.intern_file(&m.file_key);
+                }
+            }
+            // Comments: scoped under their file synth. Run after the file
+            // intern above so every `intern_comment` call has a valid synth.
+            for (file_key, comments) in &comments_by_file {
+                if let Some(file_synth) = state.file_synth(file_key) {
+                    for c in comments {
+                        state.intern_comment(file_synth, &c.comment_id);
+                    }
                 }
             }
         }) {

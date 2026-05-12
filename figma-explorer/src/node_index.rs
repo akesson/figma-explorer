@@ -210,6 +210,7 @@ mod tests {
             comments_fetched_at_epoch: None,
             comments_fingerprint: None,
             comments_error: None,
+            comments_schema_version: None,
         };
         cache.write_meta(&meta).unwrap();
 

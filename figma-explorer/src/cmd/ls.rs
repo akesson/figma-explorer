@@ -21,9 +21,12 @@ use serde_json::{json, Value};
 use std::collections::BTreeSet;
 
 use crate::cache::{CacheNode, EntryStatus, FileMeta};
+use crate::comment_assoc::AssociatedComment;
 use crate::id::Id;
 use crate::resolver::{parse_id, render_resolve_error, ResolvedTarget, Resolver};
-use crate::tree::{collect_visible, render_flat, truncate_display, NAME_DISPLAY_MAX};
+use crate::tree::{
+    collect_visible, render_flat_with_comments, truncate_display, CommentRow, NAME_DISPLAY_MAX,
+};
 use crate::{print, Globals, Output};
 
 /// Default descent depth. Depth counts levels below "self" (the same
@@ -61,7 +64,11 @@ fn print_hidden_comment(hidden: &BTreeSet<&'static str>) {
         return;
     }
     let names = hidden.iter().copied().collect::<Vec<_>>().join(", ");
-    let label = if hidden.len() == 1 { "canvas" } else { "canvases" };
+    let label = if hidden.len() == 1 {
+        "canvas"
+    } else {
+        "canvases"
+    };
     println!("# hidden {label}: {names} — use --no-ignore to show");
 }
 
@@ -72,8 +79,14 @@ fn ignored_json(hidden: &BTreeSet<&'static str>) -> Value {
     json!({ "canvases": canvases })
 }
 
+/// Max characters of a comment's head message rendered in `ls` output.
+/// Long-form discussion gets truncated to keep rows scannable; the full
+/// thread is paste-ready behind the `file:N:comm:M` id for future tooling.
+const COMMENT_MSG_DISPLAY_MAX: usize = 120;
+
 /// List a node and its descendants. Honors `--depth` (default 3) at every
-/// level — root, project, file, and node alike.
+/// level — root, project, file, and node alike. Comments anchored to nodes
+/// in the rendered tree always appear inline; there's no `--comments` flag.
 #[derive(ClapArgs, Debug)]
 pub struct Args {
     /// Tagged or native ID, or a Figma URL. Omit to list cached projects.
@@ -88,6 +101,12 @@ pub struct Args {
     /// this flag only affects display.
     #[arg(long)]
     pub no_ignore: bool,
+
+    /// Only show resolved (`true`) or unresolved (`false`) comment threads.
+    /// Filter applies to thread heads; replies aren't rendered as separate
+    /// rows in `ls` regardless. Default: show every thread.
+    #[arg(long)]
+    pub resolved: Option<bool>,
 }
 
 impl Args {
@@ -97,8 +116,9 @@ impl Args {
         let depth = self.depth.unwrap_or(DEFAULT_DEPTH);
 
         let show_all = self.no_ignore;
+        let resolved = self.resolved;
         match self.id.as_deref() {
-            None => render_root(&resolver, depth, format, show_all),
+            None => render_root(&resolver, depth, format, show_all, resolved),
             Some(s) => {
                 let id = parse_id(s).map_err(|e| anyhow::anyhow!("{e}"))?;
                 // Promote a bare native id to a qualified one when --in
@@ -111,18 +131,43 @@ impl Args {
                     .await
                     .map_err(|e| render_resolve_error(e, format))?;
                 match target {
-                    ResolvedTarget::Root => render_root(&resolver, depth, format, show_all),
-                    ResolvedTarget::Project { synth, project_id } => {
-                        render_project(&resolver, synth, &project_id, depth, format, show_all)
+                    ResolvedTarget::Root => {
+                        render_root(&resolver, depth, format, show_all, resolved)
                     }
-                    ResolvedTarget::File { synth, meta, document } => {
-                        render_file(synth, &meta, &document.document, depth, format, show_all)
-                    }
-                    ResolvedTarget::Node { file_synth, meta, node } => {
+                    ResolvedTarget::Project { synth, project_id } => render_project(
+                        &resolver,
+                        synth,
+                        &project_id,
+                        depth,
+                        format,
+                        show_all,
+                        resolved,
+                    ),
+                    ResolvedTarget::File {
+                        synth,
+                        meta,
+                        document,
+                    } => render_file(
+                        &resolver,
+                        synth,
+                        &meta,
+                        &document.document,
+                        depth,
+                        format,
+                        show_all,
+                        resolved,
+                    ),
+                    ResolvedTarget::Node {
+                        file_synth,
+                        meta,
+                        node,
+                    } => {
                         // Filter intentionally does not apply when the user has
                         // already drilled into a specific node — drilling in is
                         // explicit, the filter is for browsing.
-                        render_node_subtree(file_synth, &meta, &node, depth, format)
+                        render_node_subtree(
+                            &resolver, file_synth, &meta, &node, depth, format, resolved,
+                        )
                     }
                 }
             }
@@ -135,7 +180,13 @@ impl Args {
 /// the cache; files whose payload is missing or fails to decode are emitted
 /// as a file row only (no descent), so a partially populated cache still
 /// produces useful output.
-fn render_root(resolver: &Resolver, depth: usize, format: Output, show_all: bool) -> Result<()> {
+fn render_root(
+    resolver: &Resolver,
+    depth: usize,
+    format: Output,
+    show_all: bool,
+    resolved_filter: Option<bool>,
+) -> Result<()> {
     let synth = resolver.synth();
     let metas = resolver.cache().list_metas()?;
 
@@ -188,6 +239,7 @@ fn render_root(resolver: &Resolver, depth: usize, format: Output, show_all: bool
                                 &mut rows,
                                 show_all,
                                 &mut hidden,
+                                resolved_filter,
                             );
                         }
                     }
@@ -207,7 +259,13 @@ fn render_root(resolver: &Resolver, depth: usize, format: Output, show_all: bool
                             .map(|fm| {
                                 let fs = synth.file_synth(&fm.file_key).expect("filtered above");
                                 build_file_json(
-                                    resolver, fs, fm, depth, show_all, &mut hidden,
+                                    resolver,
+                                    fs,
+                                    fm,
+                                    depth,
+                                    show_all,
+                                    &mut hidden,
+                                    resolved_filter,
                                 )
                             })
                             .collect()
@@ -240,6 +298,10 @@ struct Row {
     kind: String,
     name: String,
     truncated: Option<usize>,
+    /// When `Some`, replaces the quoted-name portion in `format_rows` with
+    /// this payload verbatim. Used by comment rows whose trailing data
+    /// (author, reply count) doesn't fit the standard `TYPE "name"` shape.
+    raw_payload: Option<String>,
 }
 
 impl Row {
@@ -254,6 +316,23 @@ impl Row {
             kind: kind.to_owned(),
             name,
             truncated: None,
+            raw_payload: None,
+        }
+    }
+
+    /// Comment thread-head row. Spliced under its anchor node in
+    /// `append_descent_rows`. `display` is a pre-formatted payload (quoted
+    /// message + author + reply count); the standard `"{name}"` slot is
+    /// bypassed via `raw_payload`.
+    fn comment(id: String, depth: usize, display: String) -> Self {
+        Self {
+            id,
+            bounds: "-".to_owned(),
+            depth,
+            kind: "COMMENT".to_owned(),
+            name: String::new(),
+            truncated: None,
+            raw_payload: Some(display),
         }
     }
 }
@@ -266,16 +345,25 @@ fn format_rows(rows: &[Row]) -> String {
         return String::new();
     }
     let max_id = rows.iter().map(|r| r.id.len()).max().unwrap_or(0);
-    let max_bounds = rows.iter().map(|r| r.bounds.len()).max().unwrap_or(1).max(1);
+    let max_bounds = rows
+        .iter()
+        .map(|r| r.bounds.len())
+        .max()
+        .unwrap_or(1)
+        .max(1);
     let mut out = String::new();
     for r in rows {
         let indent = "  ".repeat(r.depth);
+        let payload = match &r.raw_payload {
+            Some(p) => p.clone(),
+            None => format!("\"{}\"", r.name),
+        };
         out.push_str(&format!(
-            "{id:<id_w$}  {b:<b_w$}  | {indent}{kind}  \"{name}\"",
+            "{id:<id_w$}  {b:<b_w$}  | {indent}{kind}  {payload}",
             id = r.id,
             b = r.bounds,
             kind = r.kind,
-            name = r.name,
+            payload = payload,
             id_w = max_id,
             b_w = max_bounds,
             indent = indent,
@@ -293,6 +381,10 @@ fn format_rows(rows: &[Row]) -> String {
 /// sits in the surrounding listing (1 under both root and project headers).
 /// Silent no-op when the payload is missing or fails to decode — callers
 /// have already emitted the file row.
+///
+/// Comment rows are spliced in immediately after their anchor node's row.
+/// Canvas-level (unanchored) comments are appended in a trailing block at
+/// `file_depth + 1`, so they appear as direct children of the FILE header.
 fn append_descent_rows(
     resolver: &Resolver,
     file_synth: u32,
@@ -302,12 +394,24 @@ fn append_descent_rows(
     rows: &mut Vec<Row>,
     show_all: bool,
     hidden: &mut BTreeSet<&'static str>,
+    resolved_filter: Option<bool>,
 ) {
     let cached = match resolver.cache().read_file(&fm.file_key) {
         Ok(Some(c)) => c,
         _ => return,
     };
     let synthetic = synthesize_file_root(fm, &cached.document, show_all, hidden);
+    let comment_rows = load_comment_rows(resolver, &fm.file_key, file_synth, resolved_filter);
+    let mut by_node: std::collections::HashMap<&str, Vec<&CommentRow>> =
+        std::collections::HashMap::new();
+    let mut canvas: Vec<&CommentRow> = Vec::new();
+    for row in &comment_rows {
+        match row.anchor_node_id.as_deref() {
+            Some(nid) => by_node.entry(nid).or_default().push(row),
+            None => canvas.push(row),
+        }
+    }
+
     // The synthesized root itself represents the FILE row, already emitted
     // by the caller; descend its children up to `depth - file_depth` levels.
     let max_sub_depth = depth.saturating_sub(file_depth);
@@ -319,20 +423,117 @@ fn append_descent_rows(
         } else {
             node.type_.clone()
         };
+        let row_depth = file_depth + sub_depth;
         rows.push(Row {
             id: format!("file:{}:{}", file_synth, node.id),
-            bounds: node.bounds.map(|b| b.compact()).unwrap_or_else(|| "-".to_owned()),
-            depth: file_depth + sub_depth,
+            bounds: node
+                .bounds
+                .map(|b| b.compact())
+                .unwrap_or_else(|| "-".to_owned()),
+            depth: row_depth,
             kind,
             name: truncate_display(&node.name, NAME_DISPLAY_MAX).into_owned(),
             truncated,
+            raw_payload: None,
+        });
+        if let Some(anchored) = by_node.get(node.id.as_str()) {
+            for cr in anchored {
+                rows.push(Row::comment(
+                    cr.id.clone(),
+                    row_depth + 1,
+                    cr.display.clone(),
+                ));
+            }
+        }
+    }
+    // Canvas-level threads fall under the FILE row at file_depth + 1.
+    for cr in canvas {
+        rows.push(Row::comment(
+            cr.id.clone(),
+            file_depth + 1,
+            cr.display.clone(),
+        ));
+    }
+}
+
+/// Load the pre-associated comments sidecar for `file_key` and convert each
+/// thread head into a [`CommentRow`] ready for splicing. Returns an empty
+/// vector when the sidecar is absent, when reading it fails, or when no
+/// thread heads survive the `--resolved` filter — callers don't have to
+/// distinguish "no comments" from "couldn't read."
+fn load_comment_rows(
+    resolver: &Resolver,
+    file_key: &str,
+    file_synth: u32,
+    resolved_filter: Option<bool>,
+) -> Vec<CommentRow> {
+    let comments = match resolver.cache().read_comments(file_key) {
+        Ok(Some(c)) if !c.is_empty() => c,
+        _ => return Vec::new(),
+    };
+    build_comment_rows(&comments, resolver, file_synth, resolved_filter)
+}
+
+/// Build `CommentRow`s from a slice of already-loaded `AssociatedComment`s.
+/// Factored out so tests can drive it without a populated cache directory.
+fn build_comment_rows(
+    comments: &[AssociatedComment],
+    resolver: &Resolver,
+    file_synth: u32,
+    resolved_filter: Option<bool>,
+) -> Vec<CommentRow> {
+    let synth = resolver.synth();
+
+    // Reply count per parent thread head id.
+    let mut reply_counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for c in comments {
+        if let Some(pid) = c.parent_id.as_deref() {
+            *reply_counts.entry(pid).or_insert(0) += 1;
+        }
+    }
+
+    let mut out: Vec<CommentRow> = Vec::new();
+    for c in comments {
+        if c.parent_id.is_some() {
+            // Replies collapse into their parent's `(+N replies)` suffix —
+            // they don't get their own row in `ls` output.
+            continue;
+        }
+        if let Some(want_resolved) = resolved_filter {
+            if c.resolved_at.is_some() != want_resolved {
+                continue;
+            }
+        }
+        let id = match synth.comment_synth(file_synth, &c.comment_id) {
+            Some(n) => format!("file:{file_synth}:comm:{n}"),
+            // Fallback: synth not yet interned (sidecar exists, prefetch
+            // not yet run). Surfaces the raw API id so the row is still
+            // grep-friendly. Next `cache prefetch` mints a proper synth.
+            None => format!("file:{file_synth}:comm:?({})", c.comment_id),
+        };
+        let single_line = c.message.replace(['\n', '\r'], " ");
+        let truncated = truncate_display(&single_line, COMMENT_MSG_DISPLAY_MAX);
+        let reply_count = reply_counts
+            .get(c.comment_id.as_str())
+            .copied()
+            .unwrap_or(0);
+        let mut display = format!("\"{}\"  by @{}", truncated, c.author);
+        if reply_count > 0 {
+            display.push_str(&format!("  +{reply_count}"));
+        }
+        out.push(CommentRow {
+            id,
+            anchor_node_id: c.node.as_ref().map(|n| n.node_id.clone()),
+            display,
         });
     }
+    out
 }
 
 /// Build the JSON object for one file row, attaching a recursive `children`
 /// array (or `truncated` marker) when `depth >= 2`. Mirrors the YAML descent
-/// in `append_descent_rows`.
+/// in `append_descent_rows`. Pre-associated comments are attached on each
+/// node parallel to `children`; canvas-level threads sit on the file root.
 fn build_file_json(
     resolver: &Resolver,
     file_synth: u32,
@@ -340,16 +541,19 @@ fn build_file_json(
     depth: usize,
     show_all: bool,
     hidden: &mut BTreeSet<&'static str>,
+    resolved_filter: Option<bool>,
 ) -> Value {
     let mut obj = serde_json::Map::new();
     obj.insert("id".into(), json!(format!("file:{file_synth}")));
     obj.insert("file_key".into(), json!(fm.file_key));
     obj.insert("name".into(), json!(fm.name));
     obj.insert("last_modified".into(), json!(fm.last_modified));
+    let comment_rows = load_comment_rows(resolver, &fm.file_key, file_synth, resolved_filter);
     if depth >= 2 {
         if let Ok(Some(cached)) = resolver.cache().read_file(&fm.file_key) {
             let synthetic = synthesize_file_root(fm, &cached.document, show_all, hidden);
-            let rendered = render_subtree_json(file_synth, &synthetic, depth - 1);
+            let rendered =
+                render_subtree_json_with_comments(file_synth, &synthetic, depth - 1, &comment_rows);
             if let Value::Object(rendered_obj) = rendered {
                 if let Some(kids) = rendered_obj.get("children") {
                     obj.insert("children".into(), kids.clone());
@@ -359,6 +563,15 @@ fn build_file_json(
                 }
             }
         }
+    }
+    // Canvas-level threads attach to the file root regardless of depth.
+    let canvas_json: Vec<Value> = comment_rows
+        .iter()
+        .filter(|r| r.anchor_node_id.is_none())
+        .map(|r| comment_row_json(r))
+        .collect();
+    if !canvas_json.is_empty() {
+        obj.insert("canvas_comments".into(), Value::Array(canvas_json));
     }
     Value::Object(obj)
 }
@@ -384,6 +597,7 @@ fn render_project(
     depth: usize,
     format: Output,
     show_all: bool,
+    resolved_filter: Option<bool>,
 ) -> Result<()> {
     let synth = resolver.synth();
     let metas = resolver.cache().list_metas()?;
@@ -424,6 +638,7 @@ fn render_project(
                             &mut rows,
                             show_all,
                             &mut hidden,
+                            resolved_filter,
                         );
                     }
                 }
@@ -443,6 +658,7 @@ fn render_project(
                         depth,
                         show_all,
                         &mut hidden,
+                        resolved_filter,
                     ));
                 }
             }
@@ -464,46 +680,68 @@ fn render_project(
 /// DOCUMENT's children, so the user sees `file:N FILE "name"` at the top and
 /// the actual `0:0` DOCUMENT node stays hidden — in both YAML and JSON paths.
 fn render_file(
+    resolver: &Resolver,
     file_synth: u32,
     meta: &FileMeta,
     document: &CacheNode,
     depth: usize,
     format: Output,
     show_all: bool,
+    resolved_filter: Option<bool>,
 ) -> Result<()> {
     let mut hidden: BTreeSet<&'static str> = BTreeSet::new();
     let synthetic_root = synthesize_file_root(meta, document, show_all, &mut hidden);
+    let comment_rows = load_comment_rows(resolver, &meta.file_key, file_synth, resolved_filter);
     match format {
         Output::Yaml => {
             print_hidden_comment(&hidden);
-            let lines = render_flat(&synthetic_root, file_synth, depth);
+            let lines =
+                render_flat_with_comments(&synthetic_root, file_synth, depth, &comment_rows);
             print!("{}\n", lines.join("\n"));
             Ok(())
         }
-        Output::Json => print(
-            &json!({
-                "id": format!("file:{file_synth}"),
-                "file_key": meta.file_key,
-                "name": meta.name,
-                "ignored": ignored_json(&hidden),
-                "items": render_subtree_json(file_synth, &synthetic_root, depth),
-            }),
-            format,
-        ),
+        Output::Json => {
+            let items = render_subtree_json_with_comments(
+                file_synth,
+                &synthetic_root,
+                depth,
+                &comment_rows,
+            );
+            let canvas_json: Vec<Value> = comment_rows
+                .iter()
+                .filter(|r| r.anchor_node_id.is_none())
+                .map(comment_row_json)
+                .collect();
+            let mut payload = serde_json::Map::new();
+            payload.insert("id".into(), json!(format!("file:{file_synth}")));
+            payload.insert("file_key".into(), json!(meta.file_key));
+            payload.insert("name".into(), json!(meta.name));
+            payload.insert("ignored".into(), ignored_json(&hidden));
+            payload.insert("items".into(), items);
+            if !canvas_json.is_empty() {
+                payload.insert("canvas_comments".into(), Value::Array(canvas_json));
+            }
+            print(&Value::Object(payload), format)
+        }
     }
 }
 
-/// Node-subtree listing — straightforward delegation to `render_flat`.
+/// Node-subtree listing — straightforward delegation to `render_flat_with_comments`.
+/// Anchor matching still considers the full set of comments for the file: a
+/// comment whose anchor lives outside the subtree just won't render here.
 fn render_node_subtree(
+    resolver: &Resolver,
     file_synth: u32,
     meta: &FileMeta,
     node: &CacheNode,
     depth: usize,
     format: Output,
+    resolved_filter: Option<bool>,
 ) -> Result<()> {
+    let comment_rows = load_comment_rows(resolver, &meta.file_key, file_synth, resolved_filter);
     match format {
         Output::Yaml => {
-            let lines = render_flat(node, file_synth, depth);
+            let lines = render_flat_with_comments(node, file_synth, depth, &comment_rows);
             print!("{}\n", lines.join("\n"));
             Ok(())
         }
@@ -511,7 +749,7 @@ fn render_node_subtree(
             &json!({
                 "id": format!("file:{file_synth}:{}", node.id),
                 "file_key": meta.file_key,
-                "items": render_subtree_json(file_synth, node, depth),
+                "items": render_subtree_json_with_comments(file_synth, node, depth, &comment_rows),
             }),
             format,
         ),
@@ -560,8 +798,32 @@ pub fn synthesize_file_root(
     }
 }
 
-fn render_subtree_json(file_synth: u32, node: &CacheNode, max_depth: usize) -> Value {
-    fn build(node: &CacheNode, file_synth: u32, depth: usize, max_depth: usize) -> Value {
+/// JSON tree builder. Attaches a `comments` array per node from the
+/// pre-associated `comment_rows` slice; canvas-level threads are handled by
+/// the caller and not emitted on individual nodes.
+fn render_subtree_json_with_comments(
+    file_synth: u32,
+    node: &CacheNode,
+    max_depth: usize,
+    comment_rows: &[CommentRow],
+) -> Value {
+    let by_node: std::collections::HashMap<&str, Vec<&CommentRow>> = {
+        let mut m: std::collections::HashMap<&str, Vec<&CommentRow>> =
+            std::collections::HashMap::new();
+        for row in comment_rows {
+            if let Some(nid) = row.anchor_node_id.as_deref() {
+                m.entry(nid).or_default().push(row);
+            }
+        }
+        m
+    };
+    fn build(
+        node: &CacheNode,
+        file_synth: u32,
+        depth: usize,
+        max_depth: usize,
+        by_node: &std::collections::HashMap<&str, Vec<&CommentRow>>,
+    ) -> Value {
         let mut obj = serde_json::Map::new();
         let id_str = if node.id.is_empty() {
             format!("file:{file_synth}")
@@ -574,6 +836,10 @@ fn render_subtree_json(file_synth: u32, node: &CacheNode, max_depth: usize) -> V
         if let Some(b) = node.bounds {
             obj.insert("bounds".into(), json!(b.compact()));
         }
+        if let Some(rows) = by_node.get(node.id.as_str()) {
+            let comments: Vec<Value> = rows.iter().map(|r| comment_row_json(r)).collect();
+            obj.insert("comments".into(), Value::Array(comments));
+        }
         let kids: Vec<&CacheNode> = node.children.iter().filter(|c| c.visible).collect();
         if !kids.is_empty() {
             if depth >= max_depth {
@@ -581,14 +847,24 @@ fn render_subtree_json(file_synth: u32, node: &CacheNode, max_depth: usize) -> V
             } else {
                 let rendered: Vec<Value> = kids
                     .iter()
-                    .map(|c| build(c, file_synth, depth + 1, max_depth))
+                    .map(|c| build(c, file_synth, depth + 1, max_depth, by_node))
                     .collect();
                 obj.insert("children".into(), Value::Array(rendered));
             }
         }
         Value::Object(obj)
     }
-    build(node, file_synth, 0, max_depth)
+    build(node, file_synth, 0, max_depth, &by_node)
+}
+
+/// Serialize a `CommentRow` for the JSON output. Currently includes id and
+/// display; the row's `anchor_node_id` is implied by its position in the
+/// parent node's `comments` array (or `canvas_comments` at the file root).
+fn comment_row_json(row: &CommentRow) -> Value {
+    json!({
+        "id": row.id,
+        "display": row.display,
+    })
 }
 
 /// If `--in <ID>` named a file scope and the user passed a bare native id,
@@ -596,14 +872,19 @@ fn render_subtree_json(file_synth: u32, node: &CacheNode, max_depth: usize) -> V
 /// through unchanged (an explicit qualifier wins over `--in`).
 fn apply_scope(id: Id, scope: Option<&str>) -> Result<Id> {
     let Some(scope) = scope else { return Ok(id) };
-    let Id::BareNode(node) = &id else { return Ok(id) };
+    let Id::BareNode(node) = &id else {
+        return Ok(id);
+    };
     let scope_id = parse_id(scope).map_err(|e| anyhow::anyhow!("--in: {e}"))?;
     let file_synth = match scope_id {
         Id::File(n) => n,
         Id::Node { file, .. } => file,
         _ => anyhow::bail!("--in must name a file or node scope (e.g. file:2); got {scope}"),
     };
-    Ok(Id::Node { file: file_synth, node: node.clone() })
+    Ok(Id::Node {
+        file: file_synth,
+        node: node.clone(),
+    })
 }
 
 #[cfg(test)]
@@ -661,7 +942,11 @@ mod tests {
             .unwrap();
 
         let (synth, meta, document) = match target {
-            ResolvedTarget::File { synth, meta, document } => (synth, meta, document),
+            ResolvedTarget::File {
+                synth,
+                meta,
+                document,
+            } => (synth, meta, document),
             other => panic!("expected File target, got {other:?}"),
         };
         let mut hidden = BTreeSet::new();
@@ -675,13 +960,25 @@ mod tests {
             first.contains("file:1") && !first.contains("file:1:0:0"),
             "expected synthesized file:1 header, got: {first}"
         );
-        assert!(first.contains("FILE"), "expected FILE type in header: {first}");
-        assert!(first.contains("\"Demo File\""), "expected file name: {first}");
+        assert!(
+            first.contains("FILE"),
+            "expected FILE type in header: {first}"
+        );
+        assert!(
+            first.contains("\"Demo File\""),
+            "expected file name: {first}"
+        );
 
         // CANVAS children should appear with their qualified IDs.
         let joined = lines.join("\n");
-        assert!(joined.contains("file:1:0:1"), "Home canvas missing: {joined}");
-        assert!(joined.contains("file:1:0:2"), "Employees canvas missing: {joined}");
+        assert!(
+            joined.contains("file:1:0:1"),
+            "Home canvas missing: {joined}"
+        );
+        assert!(
+            joined.contains("file:1:0:2"),
+            "Employees canvas missing: {joined}"
+        );
         // No row references `file:1:0:0` — the DOCUMENT node id is suppressed.
         assert!(
             !joined.contains("file:1:0:0"),
@@ -695,7 +992,10 @@ mod tests {
         let promoted = apply_scope(id, Some("file:7")).unwrap();
         assert_eq!(
             promoted,
-            Id::Node { file: 7, node: "1094:66591".into() }
+            Id::Node {
+                file: 7,
+                node: "1094:66591".into()
+            }
         );
     }
 
@@ -796,10 +1096,8 @@ mod tests {
     #[test]
     fn synthesize_file_root_only_filters_canvas_type() {
         // A FRAME named "Cover" must survive — the filter is CANVAS-only.
-        let (meta, doc) = document_with_canvases(vec![
-            ("0:1", "FRAME", "Cover"),
-            ("0:2", "CANVAS", "Cover"),
-        ]);
+        let (meta, doc) =
+            document_with_canvases(vec![("0:1", "FRAME", "Cover"), ("0:2", "CANVAS", "Cover")]);
         let mut hidden = BTreeSet::new();
         let root = synthesize_file_root(&meta, &doc, false, &mut hidden);
         let kept: Vec<(&str, &str)> = root
@@ -843,4 +1141,3 @@ mod tests {
         assert_eq!(ignored_canvas_label(&n), Some("Cover"));
     }
 }
-

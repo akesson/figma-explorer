@@ -5,10 +5,11 @@
 //! ```text
 //! ID    ::= TAG ":" REST | NUM ":" NUM | URL
 //! TAG   ::= "proj" | "file"                   // active
-//!         | "comm" | "user" | "var"           // reserved (future)
+//!         | "user" | "var"                    // reserved (future)
 //!         | "style" | "comp"
 //! REST  ::= NUM                               // e.g. file:2          → a file
 //!         | NUM ":" NUM ":" NUM               // e.g. file:2:1094:66591 → a node in a file
+//!         | NUM ":" "comm" ":" NUM            // e.g. file:2:comm:34   → a comment in a file
 //! NUM   ::= [0-9]+
 //! URL   ::= "https://" .* figma.com .*
 //! ```
@@ -31,6 +32,11 @@ pub enum Id {
     File(u32),
     /// `file:N:x:y` — a node inside a file, both parts known.
     Node { file: u32, node: String },
+    /// `file:N:comm:M` — a comment in a file, both synth indexes known. The
+    /// parser accepts this form so paste-ready IDs round-trip; the resolver
+    /// currently bails ("not resolvable yet") because no command consumes
+    /// comment scope yet.
+    Comment { file: u32, comm: u32 },
     /// `x:y` — a native Figma node id with no file scope. Caller (Resolver)
     /// must look it up against the cache's node index. Multiple matches → error.
     BareNode(String),
@@ -41,7 +47,7 @@ pub enum Id {
 /// Tags we accept but haven't implemented. Parsing returns
 /// [`IdParseError::ReservedTag`] so the user gets a clear error rather than a
 /// silent "not found".
-const RESERVED_TAGS: &[&str] = &["comm", "user", "var", "style", "comp"];
+const RESERVED_TAGS: &[&str] = &["user", "var", "style", "comp"];
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum IdParseError {
@@ -114,20 +120,42 @@ fn parse_num(s: &str, full: &str) -> Result<u32, IdParseError> {
     })
 }
 
-/// Parse what comes after `file:`. Either `<N>` (file alone) or `<N>:x:y`
-/// (node-in-file, where x:y is the native two-part node id).
+/// Parse what comes after `file:`. Three accepted shapes:
+/// - `<N>` (file alone) → `Id::File`
+/// - `<N>:x:y` (node-in-file, where x:y is the native two-part node id)
+/// - `<N>:comm:<M>` (comment-in-file, both synth indexes)
 fn parse_file_rest(rest: &str, full: &str) -> Result<Id, IdParseError> {
     // file:N — no inner colon.
     if !rest.contains(':') {
         return parse_num(rest, full).map(Id::File);
     }
 
-    // file:N:x:y — split off the leading file synth, the remainder must be
-    // a native NUM:NUM node id.
-    let (file_part, node_part) = rest.split_once(':').expect("contains ':' just checked");
+    let (file_part, tail) = rest.split_once(':').expect("contains ':' just checked");
     let file = parse_num(file_part, full)?;
 
-    let (x, y) = node_part.split_once(':').ok_or_else(|| IdParseError::Malformed {
+    // file:N:comm:M — comment scope. Recognized before the node path so the
+    // literal `comm` segment isn't misparsed as a node-id digit.
+    if let Some(comm_rest) = tail.strip_prefix("comm:") {
+        if comm_rest.is_empty() || !comm_rest.chars().all(|c| c.is_ascii_digit()) {
+            return Err(IdParseError::Malformed {
+                input: full.to_owned(),
+                reason: format!("comment synth must be a positive integer, got {comm_rest:?}"),
+            });
+        }
+        let comm = parse_num(comm_rest, full)?;
+        return Ok(Id::Comment { file, comm });
+    }
+    // Reject ambiguous half-formed comment ids like `file:2:comm` (no `:M`).
+    if tail == "comm" {
+        return Err(IdParseError::Malformed {
+            input: full.to_owned(),
+            reason: "comment id must be file:N:comm:M".into(),
+        });
+    }
+
+    // file:N:x:y — split off the leading file synth, the remainder must be
+    // a native NUM:NUM node id.
+    let (x, y) = tail.split_once(':').ok_or_else(|| IdParseError::Malformed {
         input: full.to_owned(),
         reason: "qualified node id must be file:N:x:y".into(),
     })?;
@@ -137,11 +165,11 @@ fn parse_file_rest(rest: &str, full: &str) -> Result<Id, IdParseError> {
     {
         return Err(IdParseError::Malformed {
             input: full.to_owned(),
-            reason: format!("node part {node_part:?} is not NUM:NUM"),
+            reason: format!("node part {tail:?} is not NUM:NUM"),
         });
     }
 
-    Ok(Id::Node { file, node: node_part.to_owned() })
+    Ok(Id::Node { file, node: tail.to_owned() })
 }
 
 impl fmt::Display for Id {
@@ -150,6 +178,7 @@ impl fmt::Display for Id {
             Id::Project(n) => write!(f, "proj:{n}"),
             Id::File(n) => write!(f, "file:{n}"),
             Id::Node { file, node } => write!(f, "file:{file}:{node}"),
+            Id::Comment { file, comm } => write!(f, "file:{file}:comm:{comm}"),
             Id::BareNode(s) => write!(f, "{s}"),
             Id::Url(p) => {
                 // Display URLs as their canonical tagged form when we can —
@@ -201,6 +230,27 @@ mod tests {
     }
 
     #[test]
+    fn parses_comment() {
+        assert_eq!(
+            parse("file:2:comm:34").unwrap(),
+            Id::Comment { file: 2, comm: 34 }
+        );
+        assert_eq!(
+            parse("file:99:comm:1").unwrap(),
+            Id::Comment { file: 99, comm: 1 }
+        );
+    }
+
+    #[test]
+    fn malformed_comment_ids_error() {
+        // No comm synth at all.
+        assert!(matches!(parse("file:2:comm"), Err(IdParseError::Malformed { .. })));
+        // Empty / non-numeric synth.
+        assert!(matches!(parse("file:2:comm:"), Err(IdParseError::Malformed { .. })));
+        assert!(matches!(parse("file:2:comm:abc"), Err(IdParseError::Malformed { .. })));
+    }
+
+    #[test]
     fn parses_url() {
         let parsed = parse("https://www.figma.com/design/AbCdEf123/Foo?node-id=5-12").unwrap();
         match parsed {
@@ -214,7 +264,10 @@ mod tests {
 
     #[test]
     fn reserved_tags_error_with_clear_message() {
-        for tag in ["comm", "user", "var", "style", "comp"] {
+        // Note: `comm` is no longer reserved — it's a real variant under
+        // `file:N:comm:M`. Bare `comm:N` (without a file scope) hits the
+        // unknown-tag path instead.
+        for tag in ["user", "var", "style", "comp"] {
             let s = format!("{tag}:1");
             match parse(&s) {
                 Err(IdParseError::ReservedTag { tag: got }) => assert_eq!(got, tag),
@@ -250,7 +303,14 @@ mod tests {
 
     #[test]
     fn display_roundtrips_tagged_forms() {
-        for input in ["proj:1", "file:2", "file:2:1094:66591", "1094:66591", "0:0"] {
+        for input in [
+            "proj:1",
+            "file:2",
+            "file:2:1094:66591",
+            "file:2:comm:34",
+            "1094:66591",
+            "0:0",
+        ] {
             let parsed: Id = input.parse().unwrap();
             assert_eq!(parsed.to_string(), input, "roundtrip failed for {input}");
         }

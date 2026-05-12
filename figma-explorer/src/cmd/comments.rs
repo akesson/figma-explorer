@@ -1,22 +1,19 @@
-//! `comments` — list every comment on a file, each associated with the node
-//! it's anchored to. Comments that arrive with an explicit `node_id` are
-//! linked directly; absolute-canvas `Vector` / `Region` pins are resolved by
-//! bounding-box geometry (deepest containing → nearest within threshold →
-//! canvas-level).
+//! `comments` — list every comment on a file (or filter to one node), each
+//! already associated with the node it pins to. Associations are pre-computed
+//! at cache-write time and stored in the `.comments.json` sidecar, so this
+//! command is just "load + filter + render."
 //!
-//! Reads the `.comments.json` sidecar maintained by the cache layer. The
-//! sidecar is refreshed on every `cache prefetch` and on every URL-driven
-//! cache refresh; tagged-id reads serve whatever's on disk unless
-//! `--max-age-secs` forces a refresh.
+//! Reads the sidecar maintained by the cache layer. The sidecar is refreshed
+//! on every `cache prefetch` and on every URL-driven cache refresh; tagged-id
+//! reads serve whatever's on disk unless `--max-age-secs` forces a refresh.
 
 use anyhow::{anyhow, Result};
 use clap::Args as ClapArgs;
 use figma_api::apis::configuration::Configuration;
-use figma_api::models::Comment;
 use serde_json::{json, Value};
 
 use crate::cache;
-use crate::comment_assoc::{associate, AssociatedComment, AssociationMethod};
+use crate::comment_assoc::{AssociatedComment, AssociationMethod};
 use crate::resolver::{parse_id, render_resolve_error, ResolvedTarget, Resolver};
 use crate::{print, Globals, Output};
 
@@ -35,10 +32,6 @@ pub struct Args {
     /// top-level comments; their replies follow the thread.
     #[arg(long)]
     pub resolved: Option<bool>,
-
-    /// Nearest-neighbor threshold (canvas units) for Vector/Region pins.
-    #[arg(long, default_value_t = 50.0)]
-    pub nearest_threshold_px: f64,
 
     /// Force a comments refresh regardless of cache age. Pass `0` to always
     /// refetch; values greater than 0 only refresh if the sidecar is older.
@@ -61,21 +54,11 @@ impl Args {
             .await
             .map_err(|e| render_resolve_error(e, format))?;
 
-        let (file_synth, document, file_key, focus_node_id): (
-            u32,
-            &crate::cache::CacheNode,
-            String,
-            Option<String>,
-        ) = match &target {
-            ResolvedTarget::File { synth, document, meta } => {
-                (*synth, &document.document, meta.file_key.clone(), None)
+        let (file_synth, file_key, focus_node_id): (u32, String, Option<String>) = match &target {
+            ResolvedTarget::File { synth, meta, .. } => (*synth, meta.file_key.clone(), None),
+            ResolvedTarget::Node { file_synth, meta, node } => {
+                (*file_synth, meta.file_key.clone(), Some(node.id.clone()))
             }
-            ResolvedTarget::Node { file_synth, node, meta } => (
-                *file_synth,
-                &meta_document(&resolver, &meta.file_key)?,
-                meta.file_key.clone(),
-                Some(node.id.clone()),
-            ),
             ResolvedTarget::Project { .. } | ResolvedTarget::Root => {
                 anyhow::bail!(
                     "comments requires a file or node scope; got a project/root id ({id_str})"
@@ -83,7 +66,7 @@ impl Args {
             }
         };
 
-        let comments = load_or_refresh_comments(
+        let mut comments = load_or_refresh_comments(
             cfg,
             &resolver,
             &file_key,
@@ -95,13 +78,11 @@ impl Args {
             return print(&json!({ "id": id_str, "comments": [] }), format);
         }
 
-        let mut assoc = associate(document, &comments, self.nearest_threshold_px);
-
         // Node-level filter: keep comments anchored to the target node. For
         // simplicity we match on node_id; descendants are not included
         // (`ls` already does that on the tree side).
         if let Some(node_id) = &focus_node_id {
-            assoc.retain(|c| {
+            comments.retain(|c| {
                 c.node
                     .as_ref()
                     .is_some_and(|n| n.node_id == *node_id)
@@ -111,59 +92,54 @@ impl Args {
         // Resolution-state filter applies to top-level threads; replies follow
         // the thread state of their parent.
         if let Some(want_resolved) = self.resolved {
-            let parents_in: std::collections::HashSet<String> = assoc
+            let parents_in: std::collections::HashSet<String> = comments
                 .iter()
                 .filter(|c| c.parent_id.is_none())
                 .filter(|c| c.resolved_at.is_some() == want_resolved)
                 .map(|c| c.comment_id.clone())
                 .collect();
-            assoc.retain(|c| match c.parent_id.as_deref() {
+            comments.retain(|c| match c.parent_id.as_deref() {
                 None => parents_in.contains(c.comment_id.as_str()),
                 Some(parent) => parents_in.contains(parent),
             });
         }
 
-        render(file_synth, &file_key, &assoc, format)
+        render(file_synth, &file_key, &comments, format)
     }
 }
 
 // ─── helpers ──────────────────────────────────────────────────────────────
 
-/// Re-read the file payload via the resolver so we can hand the document tree
-/// to `associate`. The `Node` resolved target only gives us the subtree, not
-/// the document root needed for cross-tree geometric search.
-fn meta_document(resolver: &Resolver, file_key: &str) -> Result<crate::cache::CacheNode> {
-    let payload = resolver
-        .cache()
-        .read_file(file_key)
-        .map_err(|e| anyhow!("reading cached payload for {file_key}: {e}"))?
-        .ok_or_else(|| anyhow!("cached payload missing for {file_key}"))?;
-    Ok(payload.document)
-}
-
+/// Decide whether to serve the on-disk sidecar or force a refetch. The
+/// sidecar is treated as stale when `--max-age-secs` exceeds the recorded
+/// fetch age, when no fetch has ever happened, or when the on-disk format
+/// predates pre-association (no schema version stamped).
 async fn load_or_refresh_comments(
     cfg: &Configuration,
     resolver: &Resolver,
     file_key: &str,
     max_age_secs: Option<u64>,
     cache_only: bool,
-) -> Result<Vec<Comment>> {
+) -> Result<Vec<AssociatedComment>> {
     let cache = resolver.cache();
     let meta = cache
         .read_meta(file_key)?
         .ok_or_else(|| anyhow!("no cached metadata for file_key {file_key}"))?;
     let now = cache::now_epoch();
 
-    let stale = match max_age_secs {
+    let stale_age = match max_age_secs {
         None => false,
         Some(max) => match meta.comments_fetched_at_epoch {
             Some(fetched_at) => now.saturating_sub(fetched_at) >= max,
             None => true,
         },
     };
+    let stale_schema = meta
+        .comments_schema_version
+        .map_or(true, |v| v < cache::COMMENTS_SCHEMA_VERSION);
 
     let sidecar = cache.read_comments(file_key)?;
-    let need_refresh = stale || sidecar.is_none();
+    let need_refresh = stale_age || stale_schema || sidecar.is_none();
 
     if need_refresh && !cache_only {
         return cache::refresh_comments(cfg, file_key).await;
@@ -251,8 +227,6 @@ impl YamlRow {
         let (bounds, tail) = match c.node.as_ref() {
             Some(node) => {
                 let qualified = format!("file:{file_synth}:{}", node.node_id);
-                let bounds = "-".to_owned();
-                let _ = bounds;
                 (
                     "-".to_owned(),
                     format!("({qualified} \"{}\")", truncate_inline(&node.name, 30)),
