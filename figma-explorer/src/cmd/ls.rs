@@ -1,12 +1,15 @@
 //! `ls` — list anything at any level. Replaces `files`/`pages`/`frames`/`tree`.
 //!
 //! Behavior depends on what the ID resolves to:
-//! - No ID → list every cached project, with its files grouped underneath.
-//! - `proj:N` → header + files in that project.
-//! - `file:N` → synthesized `file:N FILE "name"` header + pages (default
-//!   depth 1; the DOCUMENT node at `0:0` is hidden to keep ambiguity at bay).
-//! - `file:N:x:y` or `URL` or bare `x:y` → that node + descendants at the
-//!   requested depth.
+//! - No ID → list every cached project, with its files grouped underneath,
+//!   recursing into each file's canvases/frames up to `--depth`.
+//! - `proj:N` → header + files in that project, recursing as above.
+//! - `file:N` → synthesized `file:N FILE "name"` header + descendants. The
+//!   DOCUMENT node at `0:0` is hidden to keep ambiguity at bay.
+//! - `file:N:x:y` or `URL` or bare `x:y` → that node + descendants.
+//!
+//! `--depth` is honored at every level (default 3, counting levels below
+//! "self" — same convention `render_flat` uses).
 //!
 //! Output is the new pipe-rail flat format from `tree::render_flat` so each
 //! line is grep-friendly and paste-safe across commands.
@@ -19,24 +22,23 @@ use serde_json::{json, Value};
 use crate::cache::{CacheNode, EntryStatus, FileMeta};
 use crate::id::Id;
 use crate::resolver::{parse_id, render_resolve_error, ResolvedTarget, Resolver};
-use crate::tree::render_flat;
+use crate::tree::{collect_visible, render_flat, truncate_display, NAME_DISPLAY_MAX};
 use crate::{print, Globals, Output};
 
-/// Default depth when descending into a node (`file:N:x:y`, bare, URL).
-const DEFAULT_NODE_DEPTH: usize = 3;
-/// Default depth when listing the top of a file (`file:N`). Capped to 1 so a
-/// bare `figma-explorer ls file:N` doesn't dump an 80k-node tree by accident.
-const DEFAULT_FILE_DEPTH: usize = 1;
+/// Default descent depth. Depth counts levels below "self" (the same
+/// convention `render_flat` uses). At the root this means projects (depth 0),
+/// files (depth 1), canvases (depth 2), frames (depth 3). At `file:N` it
+/// means file (depth 0), canvases (depth 1), and so on.
+const DEFAULT_DEPTH: usize = 3;
 
-/// List a node and its descendants. Default depth varies by level (see
-/// constants above). At the root (no ID) or `proj:N`, lists cached entities
-/// rather than rendering a node tree.
+/// List a node and its descendants. Honors `--depth` (default 3) at every
+/// level — root, project, file, and node alike.
 #[derive(ClapArgs, Debug)]
 pub struct Args {
     /// Tagged or native ID, or a Figma URL. Omit to list cached projects.
     pub id: Option<String>,
 
-    /// Override the default descent depth. Ignored at the root listing.
+    /// Override the default descent depth.
     #[arg(long)]
     pub depth: Option<usize>,
 }
@@ -45,9 +47,10 @@ impl Args {
     pub async fn run(self, cfg: &Configuration, globals: &Globals) -> Result<()> {
         let resolver = Resolver::new(globals.cache_only)?;
         let format = globals.output;
+        let depth = self.depth.unwrap_or(DEFAULT_DEPTH);
 
         match self.id.as_deref() {
-            None => render_root(&resolver, format),
+            None => render_root(&resolver, depth, format),
             Some(s) => {
                 let id = parse_id(s).map_err(|e| anyhow::anyhow!("{e}"))?;
                 // Promote a bare native id to a qualified one when --in
@@ -60,16 +63,14 @@ impl Args {
                     .await
                     .map_err(|e| render_resolve_error(e, format))?;
                 match target {
-                    ResolvedTarget::Root => render_root(&resolver, format),
+                    ResolvedTarget::Root => render_root(&resolver, depth, format),
                     ResolvedTarget::Project { synth, project_id } => {
-                        render_project(&resolver, synth, &project_id, format)
+                        render_project(&resolver, synth, &project_id, depth, format)
                     }
                     ResolvedTarget::File { synth, meta, document } => {
-                        let depth = self.depth.unwrap_or(DEFAULT_FILE_DEPTH);
                         render_file(synth, &meta, &document.document, depth, format)
                     }
                     ResolvedTarget::Node { file_synth, meta, node } => {
-                        let depth = self.depth.unwrap_or(DEFAULT_NODE_DEPTH);
                         render_node_subtree(file_synth, &meta, &node, depth, format)
                     }
                 }
@@ -78,8 +79,12 @@ impl Args {
     }
 }
 
-/// Root listing — projects + their files, read directly from the cache state.
-fn render_root(resolver: &Resolver, format: Output) -> Result<()> {
+/// Root listing — projects + their files, recursing into each file's
+/// canvases/frames when `depth >= 2`. Reads structural data directly from
+/// the cache; files whose payload is missing or fails to decode are emitted
+/// as a file row only (no descent), so a partially populated cache still
+/// produces useful output.
+fn render_root(resolver: &Resolver, depth: usize, format: Output) -> Result<()> {
     let synth = resolver.synth();
     let metas = resolver.cache().list_metas()?;
 
@@ -103,63 +108,47 @@ fn render_root(resolver: &Resolver, format: Output) -> Result<()> {
 
     match format {
         Output::Yaml => {
-            // Two-pass column-width measurement across every line (project +
-            // every file) so the pipe rail stays at a fixed column.
-            let mut rows: Vec<RootRow> = Vec::new();
+            let mut rows: Vec<Row> = Vec::new();
             for (psynth, _pid, pname, files) in &groups {
-                rows.push(RootRow {
-                    id: format!("proj:{psynth}"),
-                    kind: "PROJECT".to_owned(),
-                    name: pname.clone(),
-                    bounds: "-".to_owned(),
-                    depth: 0,
-                });
-                for fm in files {
-                    let fsynth = synth.file_synth(&fm.file_key).expect("filtered above");
-                    rows.push(RootRow {
-                        id: format!("file:{fsynth}"),
-                        kind: "FILE".to_owned(),
-                        name: fm.name.clone(),
-                        bounds: "-".to_owned(),
-                        depth: 1,
-                    });
+                rows.push(Row::header(
+                    format!("proj:{psynth}"),
+                    0,
+                    "PROJECT",
+                    pname.clone(),
+                ));
+                if depth >= 1 {
+                    for fm in files {
+                        let fsynth = synth.file_synth(&fm.file_key).expect("filtered above");
+                        rows.push(Row::header(
+                            format!("file:{fsynth}"),
+                            1,
+                            "FILE",
+                            fm.name.clone(),
+                        ));
+                        if depth >= 2 {
+                            append_descent_rows(resolver, fsynth, fm, depth, 1, &mut rows);
+                        }
+                    }
                 }
             }
-            let max_id = rows.iter().map(|r| r.id.len()).max().unwrap_or(0);
-            let max_bounds = rows.iter().map(|r| r.bounds.len()).max().unwrap_or(1);
-            let mut out = String::new();
-            for r in &rows {
-                let indent = "  ".repeat(r.depth);
-                out.push_str(&format!(
-                    "{id:<id_w$}  {b:<b_w$}  | {indent}{kind}  \"{name}\"\n",
-                    id = r.id,
-                    b = r.bounds,
-                    kind = r.kind,
-                    name = r.name,
-                    id_w = max_id,
-                    b_w = max_bounds,
-                    indent = indent,
-                ));
-            }
-            print!("{out}");
+            print!("{}", format_rows(&rows));
             Ok(())
         }
         Output::Json => {
             let projects: Vec<Value> = groups
                 .iter()
                 .map(|(ps, pid, pname, files)| {
-                    let file_jsons: Vec<Value> = files
-                        .iter()
-                        .map(|fm| {
-                            let fs = synth.file_synth(&fm.file_key).expect("filtered above");
-                            json!({
-                                "id": format!("file:{fs}"),
-                                "file_key": fm.file_key,
-                                "name": fm.name,
-                                "last_modified": fm.last_modified,
+                    let file_jsons: Vec<Value> = if depth >= 1 {
+                        files
+                            .iter()
+                            .map(|fm| {
+                                let fs = synth.file_synth(&fm.file_key).expect("filtered above");
+                                build_file_json(resolver, fs, fm, depth)
                             })
-                        })
-                        .collect();
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
                     json!({
                         "id": format!("proj:{ps}"),
                         "project_id": pid,
@@ -173,12 +162,128 @@ fn render_root(resolver: &Resolver, format: Output) -> Result<()> {
     }
 }
 
-struct RootRow {
+/// Unified row used by the YAML printers in `render_root` and `render_project`.
+/// `id`, `bounds`, and `name` are pre-formatted; `format_rows` only handles
+/// column alignment and indentation.
+struct Row {
     id: String,
-    kind: String,
-    name: String,
     bounds: String,
     depth: usize,
+    kind: String,
+    name: String,
+    truncated: Option<usize>,
+}
+
+impl Row {
+    /// Project- or file-header row. No bounds, no truncation marker. Header
+    /// names are kept verbatim — they come from cache metadata, not user
+    /// node names, so the 200-char node-name cap doesn't apply.
+    fn header(id: String, depth: usize, kind: &str, name: String) -> Self {
+        Self {
+            id,
+            bounds: "-".to_owned(),
+            depth,
+            kind: kind.to_owned(),
+            name,
+            truncated: None,
+        }
+    }
+}
+
+/// Two-pass YAML printer: measure id/bounds column widths, then emit lines.
+/// Format matches `tree::format_cache_line` so root/project rows stack
+/// visually with descendant rows pulled from `CacheNode`s.
+fn format_rows(rows: &[Row]) -> String {
+    if rows.is_empty() {
+        return String::new();
+    }
+    let max_id = rows.iter().map(|r| r.id.len()).max().unwrap_or(0);
+    let max_bounds = rows.iter().map(|r| r.bounds.len()).max().unwrap_or(1).max(1);
+    let mut out = String::new();
+    for r in rows {
+        let indent = "  ".repeat(r.depth);
+        out.push_str(&format!(
+            "{id:<id_w$}  {b:<b_w$}  | {indent}{kind}  \"{name}\"",
+            id = r.id,
+            b = r.bounds,
+            kind = r.kind,
+            name = r.name,
+            id_w = max_id,
+            b_w = max_bounds,
+            indent = indent,
+        ));
+        if let Some(n) = r.truncated {
+            out.push_str(&format!("  [+{n} children]"));
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// Load `fm`'s cached document and append descendant rows under the (already
+/// emitted) FILE header. `file_depth` is the depth at which the FILE header
+/// sits in the surrounding listing (1 under both root and project headers).
+/// Silent no-op when the payload is missing or fails to decode — callers
+/// have already emitted the file row.
+fn append_descent_rows(
+    resolver: &Resolver,
+    file_synth: u32,
+    fm: &FileMeta,
+    depth: usize,
+    file_depth: usize,
+    rows: &mut Vec<Row>,
+) {
+    let cached = match resolver.cache().read_file(&fm.file_key) {
+        Ok(Some(c)) => c,
+        _ => return,
+    };
+    let synthetic = synthesize_file_root(fm, &cached.document);
+    // The synthesized root itself represents the FILE row, already emitted
+    // by the caller; descend its children up to `depth - file_depth` levels.
+    let max_sub_depth = depth.saturating_sub(file_depth);
+    let mut tuples: Vec<(&CacheNode, usize, Option<usize>)> = Vec::new();
+    collect_visible(&synthetic, 0, max_sub_depth, &mut tuples);
+    for (node, sub_depth, truncated) in tuples.into_iter().skip(1) {
+        let kind = if node.type_.is_empty() {
+            "?".to_owned()
+        } else {
+            node.type_.clone()
+        };
+        rows.push(Row {
+            id: format!("file:{}:{}", file_synth, node.id),
+            bounds: node.bounds.map(|b| b.compact()).unwrap_or_else(|| "-".to_owned()),
+            depth: file_depth + sub_depth,
+            kind,
+            name: truncate_display(&node.name, NAME_DISPLAY_MAX).into_owned(),
+            truncated,
+        });
+    }
+}
+
+/// Build the JSON object for one file row, attaching a recursive `children`
+/// array (or `truncated` marker) when `depth >= 2`. Mirrors the YAML descent
+/// in `append_descent_rows`.
+fn build_file_json(resolver: &Resolver, file_synth: u32, fm: &FileMeta, depth: usize) -> Value {
+    let mut obj = serde_json::Map::new();
+    obj.insert("id".into(), json!(format!("file:{file_synth}")));
+    obj.insert("file_key".into(), json!(fm.file_key));
+    obj.insert("name".into(), json!(fm.name));
+    obj.insert("last_modified".into(), json!(fm.last_modified));
+    if depth >= 2 {
+        if let Ok(Some(cached)) = resolver.cache().read_file(&fm.file_key) {
+            let synthetic = synthesize_file_root(fm, &cached.document);
+            let rendered = render_subtree_json(file_synth, &synthetic, depth - 1);
+            if let Value::Object(rendered_obj) = rendered {
+                if let Some(kids) = rendered_obj.get("children") {
+                    obj.insert("children".into(), kids.clone());
+                }
+                if let Some(trunc) = rendered_obj.get("truncated") {
+                    obj.insert("truncated".into(), trunc.clone());
+                }
+            }
+        }
+    }
+    Value::Object(obj)
 }
 
 /// Best-effort lookup of the human-readable project name for `project_id` by
@@ -193,74 +298,59 @@ fn derive_project_name(metas: &[FileMeta], project_id: &str) -> String {
         .unwrap_or_else(|| project_id.to_owned())
 }
 
-/// Project listing — header + files in that project. Read from cache state.
+/// Project listing — header + files in that project, recursing into each
+/// file's structural tree when `depth >= 2`. Reads from cache state.
 fn render_project(
     resolver: &Resolver,
     project_synth: u32,
     project_id: &str,
+    depth: usize,
     format: Output,
 ) -> Result<()> {
     let synth = resolver.synth();
     let metas = resolver.cache().list_metas()?;
     let project_name = derive_project_name(&metas, project_id);
     let mut files: Vec<(u32, FileMeta)> = metas
-        .into_iter()
+        .iter()
         .filter(|m| m.status == EntryStatus::Ok && m.project_id == project_id)
-        .filter_map(|m| synth.file_synth(&m.file_key).map(|s| (s, m)))
+        .filter_map(|m| synth.file_synth(&m.file_key).map(|s| (s, m.clone())))
         .collect();
     files.sort_by(|(_, a), (_, b)| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
 
     match format {
         Output::Yaml => {
-            // Pre-compute widths.
-            let header = (format!("proj:{project_synth}"), "-".to_owned());
-            let mut max_id = header.0.len();
-            let mut max_b = header.1.len();
-            for (fs, _) in &files {
-                let id = format!("file:{fs}");
-                if id.len() > max_id {
-                    max_id = id.len();
+            let mut rows: Vec<Row> = Vec::new();
+            rows.push(Row::header(
+                format!("proj:{project_synth}"),
+                0,
+                "PROJECT",
+                project_name.clone(),
+            ));
+            if depth >= 1 {
+                for (fs, fm) in &files {
+                    rows.push(Row::header(
+                        format!("file:{fs}"),
+                        1,
+                        "FILE",
+                        fm.name.clone(),
+                    ));
+                    if depth >= 2 {
+                        append_descent_rows(resolver, *fs, fm, depth, 1, &mut rows);
+                    }
                 }
             }
-            // bounds column is always "-" here.
-            if max_b < 1 {
-                max_b = 1;
-            }
-            let mut out = String::new();
-            out.push_str(&format!(
-                "{id:<id_w$}  {b:<b_w$}  | PROJECT  \"{name}\"\n",
-                id = header.0,
-                b = header.1,
-                name = project_name,
-                id_w = max_id,
-                b_w = max_b,
-            ));
-            for (fs, fm) in &files {
-                let id = format!("file:{fs}");
-                out.push_str(&format!(
-                    "{id:<id_w$}  {b:<b_w$}  |   FILE  \"{name}\"\n",
-                    id = id,
-                    b = "-",
-                    name = fm.name,
-                    id_w = max_id,
-                    b_w = max_b,
-                ));
-            }
-            print!("{out}");
+            print!("{}", format_rows(&rows));
             Ok(())
         }
         Output::Json => {
-            let file_jsons: Vec<Value> = files
-                .iter()
-                .map(|(fs, fm)| {
-                    json!({
-                        "id": format!("file:{fs}"),
-                        "file_key": fm.file_key,
-                        "name": fm.name,
-                        "last_modified": fm.last_modified,
-                    })
-                })
-                .collect();
+            let file_jsons: Vec<Value> = if depth >= 1 {
+                files
+                    .iter()
+                    .map(|(fs, fm)| build_file_json(resolver, *fs, fm, depth))
+                    .collect()
+            } else {
+                Vec::new()
+            };
             print(
                 &json!({
                     "id": format!("proj:{project_synth}"),

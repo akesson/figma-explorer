@@ -234,7 +234,7 @@ pub fn format_cache_line(
 /// Pre-order DFS that collects (node, depth, optional truncated-count) tuples
 /// for every visible node down to `max_depth` levels of children. Invisible
 /// nodes (and their subtrees) are skipped at every level.
-fn collect_visible<'a>(
+pub(crate) fn collect_visible<'a>(
     node: &'a CacheNode,
     depth: usize,
     max_depth: usize,
