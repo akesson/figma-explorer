@@ -8,6 +8,7 @@ pub mod cache;
 pub mod context;
 pub mod extract_assets;
 pub mod files;
+pub mod find;
 pub mod frames;
 pub mod pages;
 pub mod screenshot;
