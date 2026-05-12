@@ -17,12 +17,14 @@ use anyhow::{Context, Result};
 use figma_api::apis::configuration::Configuration;
 use serde_json::{json, Map, Value};
 
+use crate::cache::project_to_cache;
 use crate::node::{bounds, name as node_name, type_str};
 use crate::{assets, screenshot, styles, tree};
 
 pub async fn build(
     cfg: &Configuration,
     file_key: &str,
+    file_synth: u32,
     file_resp: &Value,
     frame: &Value,
     out_dir: &Path,
@@ -32,8 +34,13 @@ pub async fn build(
     std::fs::create_dir_all(out_dir.join("styles"))?;
     std::fs::create_dir_all(out_dir.join("assets"))?;
 
-    // tree.txt
-    let tree_text = tree::render(frame, usize::MAX);
+    // tree.txt — flat pipe-rail format, qualified IDs. Matches `ls`/`find`
+    // output so an agent can paste any row's first column into another
+    // command. Projects the live Value subtree through the same shape the
+    // cache uses, so the rendered output is byte-for-byte what `ls` would
+    // produce for the same node.
+    let projected = project_to_cache(frame);
+    let tree_text = tree::render_flat(&projected, file_synth, usize::MAX).join("\n");
     std::fs::write(out_dir.join("tree.txt"), &tree_text)?;
 
     // screenshot.png (scale=2 by default, good balance of size and clarity)

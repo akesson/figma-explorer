@@ -22,9 +22,10 @@ struct Cli {
     #[arg(long, global = true)]
     cache_only: bool,
 
-    /// Scope the bare-id form to a specific file or subtree. Used to break
-    /// ambiguity for common ids like `0:0`, and by `find` to restrict the
-    /// search. Accepts any tagged id (e.g. `file:2`, `file:2:1094:66591`).
+    /// Scope subsequent lookups to a file or subtree. `find` searches inside
+    /// the scope; `ls` uses it to qualify a bare native id (e.g. `0:0`).
+    /// Other commands ignore it. Accepts any tagged id (e.g. `file:2`,
+    /// `file:2:1094:66591`).
     // `id = "scope_in"` namespaces this flag in clap so it doesn't collide
     // with subcommand-local fields named `scope` (e.g. `tokens --scope`).
     #[arg(long = "in", id = "scope_in", value_name = "ID", global = true)]

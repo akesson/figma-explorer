@@ -37,11 +37,13 @@ impl Args {
             .await
             .map_err(|e| render_resolve_error(e, format))?;
 
-        let (file_key, node_id) = match target {
-            ResolvedTarget::Node { meta, node, .. } => (meta.file_key, Some(node.id)),
-            ResolvedTarget::File { meta, document, .. } => {
+        let (file_key, node_id, file_synth) = match target {
+            ResolvedTarget::Node { meta, node, file_synth } => {
+                (meta.file_key, Some(node.id), file_synth)
+            }
+            ResolvedTarget::File { meta, document, synth } => {
                 // For a bare file:N, bundle the whole document — use its root id.
-                (meta.file_key, Some(document.document.id.clone()))
+                (meta.file_key, Some(document.document.id.clone()), synth)
             }
             ResolvedTarget::Root | ResolvedTarget::Project { .. } => {
                 anyhow::bail!(
@@ -60,7 +62,8 @@ impl Args {
             None => doc,
         };
 
-        let summary = ctx::build(cfg, &file_key, &file, target_value, &self.out_dir).await?;
+        let summary =
+            ctx::build(cfg, &file_key, file_synth, &file, target_value, &self.out_dir).await?;
         print(&summary, format)
     }
 }
