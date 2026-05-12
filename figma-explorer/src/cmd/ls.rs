@@ -84,7 +84,7 @@ fn render_root(resolver: &Resolver, format: Output) -> Result<()> {
     let metas = resolver.cache().list_metas()?;
 
     // Group OK files by project synth.
-    let mut groups: Vec<(u32, String, Vec<FileMeta>)> = Vec::new();
+    let mut groups: Vec<(u32, String, String, Vec<FileMeta>)> = Vec::new();
     for (project_id, &project_synth) in &synth.projects {
         let mut files: Vec<FileMeta> = metas
             .iter()
@@ -96,20 +96,21 @@ fn render_root(resolver: &Resolver, format: Output) -> Result<()> {
             .cloned()
             .collect();
         files.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-        groups.push((project_synth, project_id.clone(), files));
+        let project_name = derive_project_name(&metas, project_id);
+        groups.push((project_synth, project_id.clone(), project_name, files));
     }
-    groups.sort_by_key(|(s, _, _)| *s);
+    groups.sort_by_key(|(s, _, _, _)| *s);
 
     match format {
         Output::Yaml => {
             // Two-pass column-width measurement across every line (project +
             // every file) so the pipe rail stays at a fixed column.
             let mut rows: Vec<RootRow> = Vec::new();
-            for (psynth, pid, files) in &groups {
+            for (psynth, _pid, pname, files) in &groups {
                 rows.push(RootRow {
                     id: format!("proj:{psynth}"),
                     kind: "PROJECT".to_owned(),
-                    name: pid.clone(),
+                    name: pname.clone(),
                     bounds: "-".to_owned(),
                     depth: 0,
                 });
@@ -146,7 +147,7 @@ fn render_root(resolver: &Resolver, format: Output) -> Result<()> {
         Output::Json => {
             let projects: Vec<Value> = groups
                 .iter()
-                .map(|(ps, pid, files)| {
+                .map(|(ps, pid, pname, files)| {
                     let file_jsons: Vec<Value> = files
                         .iter()
                         .map(|fm| {
@@ -162,6 +163,7 @@ fn render_root(resolver: &Resolver, format: Output) -> Result<()> {
                     json!({
                         "id": format!("proj:{ps}"),
                         "project_id": pid,
+                        "name": pname,
                         "files": file_jsons,
                     })
                 })
@@ -179,6 +181,18 @@ struct RootRow {
     depth: usize,
 }
 
+/// Best-effort lookup of the human-readable project name for `project_id` by
+/// scanning file metas. Falls back to `project_id` when no file in the project
+/// carries a non-empty name (project never listed, or listing predated the
+/// project_name field).
+fn derive_project_name(metas: &[FileMeta], project_id: &str) -> String {
+    metas
+        .iter()
+        .find(|m| m.project_id == project_id && !m.project_name.is_empty())
+        .map(|m| m.project_name.clone())
+        .unwrap_or_else(|| project_id.to_owned())
+}
+
 /// Project listing — header + files in that project. Read from cache state.
 fn render_project(
     resolver: &Resolver,
@@ -188,6 +202,7 @@ fn render_project(
 ) -> Result<()> {
     let synth = resolver.synth();
     let metas = resolver.cache().list_metas()?;
+    let project_name = derive_project_name(&metas, project_id);
     let mut files: Vec<(u32, FileMeta)> = metas
         .into_iter()
         .filter(|m| m.status == EntryStatus::Ok && m.project_id == project_id)
@@ -216,7 +231,7 @@ fn render_project(
                 "{id:<id_w$}  {b:<b_w$}  | PROJECT  \"{name}\"\n",
                 id = header.0,
                 b = header.1,
-                name = project_id,
+                name = project_name,
                 id_w = max_id,
                 b_w = max_b,
             ));
@@ -250,6 +265,7 @@ fn render_project(
                 &json!({
                     "id": format!("proj:{project_synth}"),
                     "project_id": project_id,
+                    "name": project_name,
                     "files": file_jsons,
                 }),
                 format,
