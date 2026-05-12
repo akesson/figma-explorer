@@ -14,20 +14,20 @@ path = "src/main.rs"
 path = "src/lib.rs"
 
 [dependencies]
-figma-api = { path = "../figma-api" }
-clap = { version = "4", features = ["derive", "env"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
-anyhow = "1"
-dotenvy = "0.15"
-serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["preserve_order"] }
-serde_yaml_ng = "0.10"
-reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
-futures = "0.3"
-nucleo-matcher = "0.3"
-rkyv = "0.8"
-memmap2 = "0.9"
-dirs = "6"
-tempfile = "3"
-thiserror = "2"
-fs2 = "0.4"
+figma-api.workspace = true
+clap.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+dotenvy.workspace = true
+serde.workspace = true
+serde_json = { workspace = true, features = ["preserve_order"] }
+serde_yaml_ng.workspace = true
+reqwest.workspace = true
+futures.workspace = true
+nucleo-matcher.workspace = true
+rkyv.workspace = true
+memmap2.workspace = true
+dirs.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+fs2.workspace = true
