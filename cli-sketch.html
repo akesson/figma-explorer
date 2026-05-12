@@ -1,0 +1,605 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>figma-explorer CLI — sketch</title>
+<style>
+  :root {
+    --bg: #fafafa;
+    --fg: #1f2328;
+    --muted: #57606a;
+    --border: #d0d7de;
+    --code-bg: #f6f8fa;
+    --accent: #0969da;
+    --warn-bg: #fff8c5;
+    --warn-border: #d4a72c;
+    --danger: #cf222e;
+  }
+  * { box-sizing: border-box; }
+  html { font-size: 15px; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--fg);
+    line-height: 1.55;
+    max-width: 960px;
+    margin: 40px auto;
+    padding: 0 24px 80px;
+  }
+  h1 { font-size: 28px; margin: 0 0 4px; }
+  h2 {
+    font-size: 22px;
+    margin-top: 56px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--border);
+  }
+  h3 { font-size: 16px; margin-top: 28px; color: var(--muted); font-weight: 600; }
+  p.lead { color: var(--muted); margin-bottom: 28px; font-size: 16px; }
+  code, pre, kbd {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 13px;
+  }
+  p code, li code, td code, th code {
+    background: var(--code-bg);
+    padding: 1px 5px;
+    border-radius: 3px;
+  }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 12px 16px;
+    overflow-x: auto;
+    margin: 8px 0 16px;
+    line-height: 1.5;
+  }
+  pre code { background: transparent; padding: 0; }
+  .cmd { color: var(--accent); font-weight: 600; }
+  .comment { color: var(--muted); }
+  .str { color: #0a3069; }
+  .flag { color: #8250df; }
+  .err { color: var(--danger); font-weight: 600; }
+  table { border-collapse: collapse; width: 100%; margin: 12px 0; }
+  th, td {
+    text-align: left;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+    font-size: 14px;
+  }
+  th { background: var(--code-bg); font-weight: 600; }
+  .grammar {
+    background: var(--code-bg);
+    border-left: 3px solid var(--accent);
+    padding: 12px 16px;
+    margin: 16px 0;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 13px;
+    white-space: pre;
+    overflow-x: auto;
+  }
+  .note {
+    background: var(--warn-bg);
+    border-left: 3px solid var(--warn-border);
+    padding: 8px 14px;
+    margin: 12px 0;
+    font-size: 14px;
+    border-radius: 0 4px 4px 0;
+  }
+  .removed {
+    border-left: 3px solid var(--danger);
+    background: #ffebe9;
+    padding: 8px 14px;
+    margin: 12px 0;
+    font-size: 14px;
+    border-radius: 0 4px 4px 0;
+  }
+  .toc {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 14px 22px;
+    margin: 24px 0 8px;
+  }
+  .toc ul { margin: 4px 0; padding-left: 22px; }
+  .toc a { color: var(--accent); text-decoration: none; }
+  .toc a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+
+<h1>figma-explorer — CLI sketch</h1>
+<p class="lead">Tagged IDs. One uniform <code>ID</code> argument across every command except <code>cache</code>. <code>ls</code> / <code>find</code> for navigation; <code>screenshot</code> / <code>tokens</code> / <code>assets</code> / <code>context</code> for extraction.</p>
+
+<div class="toc">
+  <strong>Contents</strong>
+  <ul>
+    <li><a href="#id">ID grammar</a> — the one positional argument</li>
+    <li><a href="#globals">Global flags &amp; output rules</a></li>
+    <li><a href="#ambiguity">Bare IDs &amp; ambiguity</a></li>
+    <li><a href="#changes">What changes from today</a></li>
+    <li><a href="#ls">ls</a></li>
+    <li><a href="#find">find</a></li>
+    <li><a href="#screenshot">screenshot</a></li>
+    <li><a href="#tokens">tokens</a></li>
+    <li><a href="#assets">assets</a></li>
+    <li><a href="#context">context</a></li>
+    <li><a href="#cache">cache</a></li>
+    <li><a href="#workflows">End-to-end workflows</a></li>
+  </ul>
+</div>
+
+<h2 id="id">ID grammar</h2>
+<p>Every command except <code>cache</code> takes <em>one</em> positional ID. IDs use a typed-prefix scheme so files, projects, comments, and nodes are syntactically distinct — no magic-number ranges, no shape clashes.</p>
+
+<div class="grammar">ID    ::= TAG ":" REST
+        | NUM ":" NUM                    <span class="comment"># bare native node id (file-scoped; lenient lookup)</span>
+        | URL                            <span class="comment"># escape hatch — always works</span>
+
+TAG   ::= "proj" | "file"                <span class="comment"># active today</span>
+        | "comm" | "user" | "var"        <span class="comment"># reserved for future entity types</span>
+        | "style" | "comp"
+
+REST  ::= NUM                            <span class="comment"># e.g.   file:2          → a file</span>
+        | NUM ":" NUM ":" NUM            <span class="comment"># e.g.   file:2:1094:66591 → a node in a file</span>
+        | NUM ":" TAG ":" ID_BODY        <span class="comment"># e.g.   file:2:comm:abc → comment inside file</span>
+
+NUM   ::= [0-9]+
+URL   ::= "https://" .*figma.com.*       <span class="comment"># node-id query param normalized 1094-66591 → 1094:66591</span></div>
+
+<p><strong>Parsing rule</strong>: peek the first token before <code>:</code>. If it's a known tag → typed ID, dispatch on the tag. If both halves are numeric → bare native node ID, resolve via cache lookup. Else if it starts with <code>https://</code> → URL.</p>
+
+<p><strong>Synth IDs (<code>proj:N</code>, <code>file:N</code>)</strong> are assigned by the cache. <code>N</code> is a small sequential integer, stable across cache reads (persisted in the manifest). New files get the next free <code>N</code>; deleted files leave gaps.</p>
+
+<p><strong>Native node IDs</strong> stay in Figma's <code>x:y</code> shape inside the qualified form (<code>file:N:x:y</code>). When you paste a Figma URL or copy a node-id from Figma's UI, the parts are recognized natively.</p>
+
+<h2 id="globals">Global flags &amp; output rules</h2>
+
+<table>
+  <tr><th>Flag</th><th>Effect</th></tr>
+  <tr><td><code>--json</code></td><td>Emit full JSON with metadata headers. Default is compact YAML.</td></tr>
+  <tr><td><code>--token &lt;TOKEN&gt;</code></td><td>API token. Falls back to <code>FIGMA_TOKEN</code>.</td></tr>
+  <tr><td><code>--cache-only</code></td><td>Refuse to fall through to the live API. Errors if the cache can't satisfy the request.</td></tr>
+  <tr><td><code>--in &lt;ID&gt;</code></td><td>Scope a bare node ID. Used to disambiguate <code>0:0</code>-class collisions. Accepts <code>file:N</code> or <code>file:N:x:y</code>.</td></tr>
+</table>
+
+<p><strong>Output convention</strong>: every line emits a <em>fully qualified</em> ID (<code>file:N:x:y</code> rather than bare <code>x:y</code>) so any line is paste-safe into another command, regardless of which file it came from.</p>
+
+<p><strong>Line format</strong>:</p>
+<pre>ID  BOUNDS_OR_ANCHOR  | [indent]TYPE  "NAME"  ["CONTENT"]  [extras]</pre>
+<p>Column 1 (ID) and column 2 (bounds/anchor) are padded to the local max width per listing so the pipe lands at a fixed position. The pipe is the visual rail and a clean awk split point. Depth indentation lives <em>after</em> the pipe, in column 3. Long fields — names, content, comments — sit at the tail where they can run arbitrarily without disturbing the rail.</p>
+<p>Bounds render as <code>WxH@X,Y</code> (no internal whitespace). Nodes without a bounding box (DOCUMENT, virtual nodes) and entities that aren't spatial (projects, files) show <code>-</code>. Comment anchors render as <code>@&lt;node-id&gt;</code>.</p>
+<p>Pipes inside <code>"…"</code> are content; pipes outside quotes are delimiters.</p>
+<p><strong>Parsing recipes</strong>:</p>
+<table>
+  <tr><th>Tool</th><th>Result</th></tr>
+  <tr><td><code>awk '{print $1}'</code></td><td>IDs</td></tr>
+  <tr><td><code>awk '{print $2}'</code></td><td>bounds/anchors</td></tr>
+  <tr><td><code>awk -F'|' '{print $2}'</code></td><td>the indented content half (TYPE + name + …)</td></tr>
+  <tr><td><code>awk -F'"' '{print $2}'</code></td><td>names</td></tr>
+  <tr><td><code>awk -F'"' '{print $4}'</code></td><td>content (when present)</td></tr>
+  <tr><td><code>grep file:2:1094:66591</code></td><td>that node + all descendants (their IDs share the prefix)</td></tr>
+</table>
+
+<h2 id="ambiguity">Bare IDs &amp; ambiguity</h2>
+<p>A bare <code>x:y</code> is convenient — it's what you copy out of Figma's UI. The CLI is <strong>lenient</strong>: bare IDs get looked up against the cache's <code>node_id → [file_synth]</code> index.</p>
+
+<ul>
+  <li>Exactly one cached file contains it → use it.</li>
+  <li>No cached file contains it → suggest pasting a URL (file may not be cached).</li>
+  <li>Multiple cached files contain it → error with candidates, ask for qualified form.</li>
+</ul>
+
+<p>Collisions concentrate at low IDs. Empirically across 50 cached files:</p>
+<ul>
+  <li><code>0:0</code> exists in all 50 (DOCUMENT root)</li>
+  <li>Low-x canvases (<code>0:1</code>, etc.) overlap heavily</li>
+  <li>Deeper node IDs (<code>1094:66591</code>-class) almost never collide</li>
+</ul>
+
+<h3>Ambiguity error example</h3>
+<pre>$ <span class="cmd">figma tree</span> 0:0
+<span class="err">error: node 0:0 exists in 50 cached files.</span>
+       Disambiguate with --in or paste a URL. Top candidates:
+         file:1   FILE <span class="str">"404 / No Access"</span>
+         file:2   FILE <span class="str">"Admin Module"</span>
+         file:3   FILE <span class="str">"Allowances"</span>
+         file:4   FILE <span class="str">"Booking Leave"</span>
+         ... 46 more (see `figma ls`)
+       Try:  figma tree file:2:0:0
+       Or:   figma tree 0:0 --in file:2</pre>
+
+<h2 id="changes">What changes from today</h2>
+
+<div class="removed">
+  <strong>Removed</strong>
+  <ul>
+    <li><code>find</code> (single-token fuzzy across all names) — its job is absorbed by the renamed multi-token <code>search</code>.</li>
+    <li><code>tree</code> — merged into <code>ls --depth N</code>. The default depth for <code>ls</code> bumped to 3; deep dumps use <code>--depth 6</code> (or whatever).</li>
+    <li><code>--file-key</code>, <code>--node-id</code>, <code>--url</code>, <code>--page</code>, <code>--frame</code> flags. Everything is the single positional ID.</li>
+    <li>Separate <code>pages</code> / <code>frames</code> / <code>files</code> commands. Replaced by <code>ls</code> at depth N.</li>
+    <li>The compound <code>FILE_KEY:NODE_ID</code> locator shape. Replaced by tagged IDs.</li>
+  </ul>
+</div>
+
+<div class="note">
+  <strong>Renamed</strong>
+  <ul>
+    <li><code>search</code> → <code>find</code> (the only name-aware command left)</li>
+    <li><code>extract-assets</code> → <code>assets</code></li>
+    <li><code>styles</code> → <code>tokens</code></li>
+  </ul>
+</div>
+
+<h2 id="ls">ls</h2>
+<p>List a node and its descendants. Default depth = 3 — the node, its children, and their children's children. Use <code>--depth</code> to go shallower (orient quickly) or deeper (render the whole subtree).</p>
+
+<h3>Usage</h3>
+<pre><span class="cmd">figma ls</span> [ID] [<span class="flag">--depth</span> N]</pre>
+
+<h3>Special cases</h3>
+<ul>
+  <li><strong>No ID</strong>: lists projects from the cache manifest, with files grouped under each. Read-only on the cache; no API calls.</li>
+  <li><strong><code>file:N</code></strong>: depth starts at the file root (DOCUMENT node). Depth 1 = pages; depth 2 = pages + frames; etc.</li>
+  <li><strong><code>file:N:x:y</code></strong>: depth starts at that node.</li>
+  <li><strong>Bare <code>x:y</code></strong>: resolved via cache lookup (lenient).</li>
+</ul>
+
+<div class="note">
+A bare <code>file:N</code> ID without explicit <code>--depth</code> uses depth 1 (just pages) — going deeper on a large file can flood the output (some files in your cache have 80k+ nodes). Pass <code>--depth N</code> deliberately when you want more.
+</div>
+
+<h3>Example 1 — no ID (project listing)</h3>
+<pre>$ <span class="cmd">figma ls</span>
+proj:1  -  | PROJECT  <span class="str">"Desktop"</span>
+file:1  -  |   FILE     <span class="str">"404 / No Access"</span>          key:eQWQoxQzbDRTzXuHCGSAyg  modified:2026-03-25
+file:2  -  |   FILE     <span class="str">"Admin Module"</span>             key:48nDWkcsuJ8TdoEIW9LGl6  modified:2024-02-01
+file:3  -  |   FILE     <span class="str">"Allowances"</span>               key:ojK3tzTL9Dy2Q08AZVsUum  modified:2026-05-06
+file:4  -  |   FILE     <span class="str">"Booking Leave"</span>            key:gAjQhOIgmOiUwPwYDoc2ln  modified:2026-05-11
+file:5  -  |   FILE     <span class="str">"Calendar"</span>                 key:LyO0nhsk5rkh18L9ybkxx5  modified:2026-03-16
+file:6  -  |   FILE     <span class="str">"Company &amp; Profile Details"</span> key:aJRgvCvTsenA7Ulx6NlxhK  modified:2026-03-16</pre>
+
+<h3>Example 2 — list pages in a file (depth 1)</h3>
+<pre>$ <span class="cmd">figma ls</span> file:2 <span class="flag">--depth</span> 1
+file:2             -  | FILE    <span class="str">"Admin Module"</span>
+file:2:0:1         -  |   CANVAS  <span class="str">"Cover"</span>
+file:2:1:1400      -  |   CANVAS  <span class="str">"Company Details"</span>
+file:2:1091:72187  -  |   CANVAS  <span class="str">"Profile"</span>
+file:2:58:4217     -  |   CANVAS  <span class="str">"Departments"</span>
+file:2:724:17786   -  |   CANVAS  <span class="str">"Allowances"</span>
+file:2:1094:66591  -  |   CANVAS  <span class="str">"Employees ✅ 🆕"</span>
+file:2:1239:69747  -  |   CANVAS  <span class="str">"Calendar"</span>
+file:2:1493:124486 -  |   CANVAS  <span class="str">"Data Import"</span>
+file:2:1961:177165 -  |   CANVAS  <span class="str">"Prototype"</span></pre>
+
+<h3>Example 3 — list frames on a page (depth 1)</h3>
+<pre>$ <span class="cmd">figma ls</span> file:2:1094:66591 <span class="flag">--depth</span> 1
+file:2:1094:66591  -                | CANVAS  <span class="str">"Employees ✅ 🆕"</span>
+file:2:1094:66600  1440×80@0,0      |   FRAME   <span class="str">"Header"</span>
+file:2:1094:66612  1440×64@0,80     |   FRAME   <span class="str">"Filters"</span>
+file:2:1094:66640  1440×600@0,144   |   FRAME   <span class="str">"Employee Table"</span>
+file:2:1094:67200  1440×56@0,744    |   FRAME   <span class="str">"Pagination"</span>
+file:2:1094:67260  1440×400@0,144   |   FRAME   <span class="str">"Empty State"</span></pre>
+
+<h3>Example 4 — default depth (3 levels)</h3>
+<pre>$ <span class="cmd">figma ls</span> file:2:1094:66591
+file:2:1094:66591  -                | CANVAS    <span class="str">"Employees ✅ 🆕"</span>
+file:2:1094:66600  1440×80@0,0      |   FRAME     <span class="str">"Header"</span>
+file:2:1094:66601  200×32@24,24     |     TEXT      <span class="str">"Title"</span>           <span class="str">"Employees"</span>
+file:2:1094:66602  320×40@720,20    |     INSTANCE  <span class="str">"Search"</span>          [+3 children]
+file:2:1094:66603  140×40@1276,20   |     INSTANCE  <span class="str">"Add Employee"</span>    [+2 children]
+file:2:1094:66612  1440×64@0,80     |   FRAME     <span class="str">"Filters"</span>
+file:2:1094:66613  120×40@24,12     |     INSTANCE  <span class="str">"Department"</span>      [+4 children]
+file:2:1094:66614  120×40@164,12    |     INSTANCE  <span class="str">"Status"</span>          [+4 children]
+file:2:1094:66615  200×40@304,12    |     INSTANCE  <span class="str">"Date Range"</span>      [+6 children]
+file:2:1094:66616  80×40@524,12     |     INSTANCE  <span class="str">"Clear"</span>           [+1 children]
+file:2:comm:abc12  @1094:66600      |     COMMENT   <span class="str">"Henrik Åkesson"</span>  <span class="str">"Why is this button so big? Brand spec says 40×120 max — please tighten before review on Thursday."</span>
+file:2:1094:66640  1440×600@0,144   |   FRAME     <span class="str">"Employee Table"</span>  [+18 children]
+file:2:1094:67200  1440×56@0,744    |   FRAME     <span class="str">"Pagination"</span>      [+5 children]
+file:2:1094:67260  1440×400@0,144   |   FRAME     <span class="str">"Empty State"</span>     [+3 children]</pre>
+
+<h3>Example 5 — deep render (<code>--depth 6</code>)</h3>
+<pre>$ <span class="cmd">figma ls</span> file:2:1094:66600 <span class="flag">--depth</span> 6
+file:2:1094:66600    1440×80@0,0     | FRAME       <span class="str">"Header"</span>
+file:2:1094:66601    200×32@24,24    |   TEXT        <span class="str">"Title"</span>     <span class="str">"Employees"</span>
+file:2:1094:66602    320×40@720,20   |   INSTANCE    <span class="str">"Search"</span>
+file:2:1094:66602:1  320×40@720,20   |     FRAME       <span class="str">"container"</span>
+file:2:1094:66602:1:1 16×16@732,32   |       VECTOR      <span class="str">"icon"</span>
+file:2:1094:66602:1:2 260×20@756,30  |       TEXT        <span class="str">"placeholder"</span>  <span class="str">"Search…"</span>
+file:2:1094:66603    140×40@1276,20  |   INSTANCE    <span class="str">"Add Employee"</span>
+file:2:1094:66603:1  140×40@1276,20  |     FRAME       <span class="str">"bg"</span>
+file:2:1094:66603:2  60×20@1316,30   |     TEXT        <span class="str">"label"</span>     <span class="str">"+ Add"</span></pre>
+
+<h3>Example 6 — bare native node ID (lenient lookup)</h3>
+<pre>$ <span class="cmd">figma ls</span> 1094:66591 <span class="flag">--depth</span> 1
+<span class="comment"># Cache lookup: 1094:66591 found in exactly one file (file:2) → resolved.</span>
+file:2:1094:66591  -                | CANVAS  <span class="str">"Employees ✅ 🆕"</span>
+file:2:1094:66600  1440×80@0,0      |   FRAME   <span class="str">"Header"</span>
+file:2:1094:66612  1440×64@0,80     |   FRAME   <span class="str">"Filters"</span>
+...</pre>
+
+<h3>Example 7 — paste a Figma URL</h3>
+<pre>$ <span class="cmd">figma ls</span> <span class="str">"https://www.figma.com/design/48nDWkcsuJ8TdoEIW9LGl6/Admin?node-id=1094-66640"</span>
+file:2:1094:66640    1440×600@0,144  | FRAME     <span class="str">"Employee Table"</span>
+file:2:1094:66641    1440×40@0,0     |   INSTANCE  <span class="str">"Table Header"</span>
+file:2:1094:66641:1  120×40@24,0     |     TEXT       <span class="str">"col"</span>   <span class="str">"Name"</span>
+file:2:1094:66641:2  120×40@164,0    |     TEXT       <span class="str">"col"</span>   <span class="str">"Department"</span>
+file:2:1094:66641:3  120×40@304,0    |     TEXT       <span class="str">"col"</span>   <span class="str">"Status"</span>
+file:2:1094:66642    1440×520@0,40   |   FRAME      <span class="str">"Rows"</span>          [+15 children]
+file:2:1094:66660    1440×400@0,40   |   INSTANCE   <span class="str">"Empty State"</span>
+file:2:1094:66660:1  1440×400@0,40   |     FRAME      <span class="str">"container"</span>
+file:2:1094:66660:2  320×24@560,200  |     TEXT       <span class="str">"label"</span>  <span class="str">"No employees yet"</span></pre>
+
+<h3>Example 8 — <code>--json</code> output</h3>
+<pre>$ <span class="cmd">figma ls</span> file:2:1094:66591 <span class="flag">--depth</span> 1 <span class="flag">--json</span>
+{
+  <span class="str">"id"</span>: <span class="str">"file:2:1094:66591"</span>,
+  <span class="str">"resolved"</span>: {
+    <span class="str">"file_synth"</span>: 2,
+    <span class="str">"file_key"</span>: <span class="str">"48nDWkcsuJ8TdoEIW9LGl6"</span>,
+    <span class="str">"node_id"</span>: <span class="str">"1094:66591"</span>
+  },
+  <span class="str">"parent"</span>: {
+    <span class="str">"id"</span>: <span class="str">"file:2:1094:66591"</span>,
+    <span class="str">"name"</span>: <span class="str">"Employees ✅ 🆕"</span>,
+    <span class="str">"type"</span>: <span class="str">"CANVAS"</span>
+  },
+  <span class="str">"items"</span>: [
+    { <span class="str">"id"</span>: <span class="str">"file:2:1094:66600"</span>, <span class="str">"name"</span>: <span class="str">"Header"</span>,         <span class="str">"type"</span>: <span class="str">"FRAME"</span>, <span class="str">"bounds"</span>: <span class="str">"1440×80 @0,0"</span>    },
+    { <span class="str">"id"</span>: <span class="str">"file:2:1094:66612"</span>, <span class="str">"name"</span>: <span class="str">"Filters"</span>,        <span class="str">"type"</span>: <span class="str">"FRAME"</span>, <span class="str">"bounds"</span>: <span class="str">"1440×64 @0,80"</span>   },
+    { <span class="str">"id"</span>: <span class="str">"file:2:1094:66640"</span>, <span class="str">"name"</span>: <span class="str">"Employee Table"</span>, <span class="str">"type"</span>: <span class="str">"FRAME"</span>, <span class="str">"bounds"</span>: <span class="str">"1440×600 @0,144"</span> },
+    { <span class="str">"id"</span>: <span class="str">"file:2:1094:67200"</span>, <span class="str">"name"</span>: <span class="str">"Pagination"</span>,     <span class="str">"type"</span>: <span class="str">"FRAME"</span>, <span class="str">"bounds"</span>: <span class="str">"1440×56 @0,744"</span>  },
+    { <span class="str">"id"</span>: <span class="str">"file:2:1094:67260"</span>, <span class="str">"name"</span>: <span class="str">"Empty State"</span>,    <span class="str">"type"</span>: <span class="str">"FRAME"</span>, <span class="str">"bounds"</span>: <span class="str">"1440×400 @0,144"</span> }
+  ]
+}</pre>
+
+<h2 id="find">find</h2>
+<p>Multi-token ancestor-chain name search. Each whitespace-separated query token must fuzzy-match some name along the root→node path; leaf hits score highest. Output is ranked, with each line's leading column being a paste-ready fully-qualified ID.</p>
+
+<h3>Usage</h3>
+<pre><span class="cmd">figma find</span> QUERY... [<span class="flag">--in</span> ID] [<span class="flag">--type</span> T1,T2,...] [<span class="flag">--limit</span> N]</pre>
+
+<h3>Example 1 — global search (whole cache)</h3>
+<pre>$ <span class="cmd">figma find</span> wallchart filter button
+file:2:1094:71203  120×40@24,12   | INSTANCE  9.2  <span class="str">"Filter Button"</span>   (Wallchart &gt; Header &gt; Filters)
+file:2:1094:71215  80×40@164,12   | INSTANCE  8.8  <span class="str">"Filter Reset"</span>    (Wallchart &gt; Header &gt; Filters)
+file:2:1094:71400  1440×64@0,80   | FRAME     7.4  <span class="str">"Filters"</span>         (Wallchart &gt; Header)
+file:5:312:8801    100×32@12,12   | INSTANCE  7.1  <span class="str">"Filter"</span>          (Calendar &gt; Sidebar)</pre>
+
+<h3>Example 2 — scoped to a file</h3>
+<pre>$ <span class="cmd">figma find</span> filter button <span class="flag">--in</span> file:2
+file:2:1094:71203  120×40@24,12   | INSTANCE  9.2  <span class="str">"Filter Button"</span>  (Wallchart &gt; Header &gt; Filters)
+file:2:1094:71215  80×40@164,12   | INSTANCE  8.8  <span class="str">"Filter Reset"</span>   (Wallchart &gt; Header &gt; Filters)
+file:2:1094:71400  1440×64@0,80   | FRAME     7.4  <span class="str">"Filters"</span>        (Wallchart &gt; Header)</pre>
+
+<h3>Example 3 — scoped to a subtree, with type filter</h3>
+<pre>$ <span class="cmd">figma find</span> button <span class="flag">--in</span> file:2:1094:66591 <span class="flag">--type</span> INSTANCE <span class="flag">--limit</span> 5
+file:2:1094:66603  140×40@1276,20 | INSTANCE  9.0  <span class="str">"Add Employee"</span>   (Header)
+file:2:1094:67205  60×32@1100,16  | INSTANCE  8.4  <span class="str">"Next"</span>           (Pagination)
+file:2:1094:67206  60×32@1170,16  | INSTANCE  8.4  <span class="str">"Previous"</span>       (Pagination)
+file:2:1094:66616  80×40@524,12   | INSTANCE  7.2  <span class="str">"Clear"</span>          (Filters)</pre>
+
+<h3>Example 4 — <code>--json</code></h3>
+<pre>$ <span class="cmd">figma find</span> filter button <span class="flag">--in</span> file:2 <span class="flag">--json</span>
+{
+  <span class="str">"query"</span>: <span class="str">"filter button"</span>,
+  <span class="str">"tokens"</span>: [<span class="str">"filter"</span>, <span class="str">"button"</span>],
+  <span class="str">"scope"</span>: { <span class="str">"id"</span>: <span class="str">"file:2"</span>, <span class="str">"file_key"</span>: <span class="str">"48nDWkcsuJ8TdoEIW9LGl6"</span> },
+  <span class="str">"hits"</span>: [
+    {
+      <span class="str">"id"</span>:        <span class="str">"file:2:1094:71203"</span>,
+      <span class="str">"node_id"</span>:   <span class="str">"1094:71203"</span>,
+      <span class="str">"name"</span>:      <span class="str">"Filter Button"</span>,
+      <span class="str">"type"</span>:      <span class="str">"INSTANCE"</span>,
+      <span class="str">"score"</span>:     9.2,
+      <span class="str">"path"</span>: [
+        { <span class="str">"id"</span>: <span class="str">"file:2:0:1"</span>,        <span class="str">"name"</span>: <span class="str">"Wallchart"</span> },
+        { <span class="str">"id"</span>: <span class="str">"file:2:1094:71000"</span>, <span class="str">"name"</span>: <span class="str">"Header"</span> },
+        { <span class="str">"id"</span>: <span class="str">"file:2:1094:71100"</span>, <span class="str">"name"</span>: <span class="str">"Filters"</span> }
+      ]
+    }
+  ]
+}</pre>
+
+<h2 id="screenshot">screenshot</h2>
+<p>Render a node as PNG/JPG/SVG/PDF. Without <code>--out</code>, prints the source URL — no bytes are downloaded.</p>
+
+<h3>Usage</h3>
+<pre><span class="cmd">figma screenshot</span> ID [<span class="flag">--img-format</span> png|jpg|svg|pdf] [<span class="flag">--scale</span> F] [<span class="flag">--out</span> PATH]</pre>
+
+<h3>Example 1 — write a file</h3>
+<pre>$ <span class="cmd">figma screenshot</span> file:2:1094:66600 <span class="flag">--out</span> header.png <span class="flag">--scale</span> 2
+file:2:1094:66600 → header.png  (PNG, 24 KB)</pre>
+
+<h3>Example 2 — just the URL</h3>
+<pre>$ <span class="cmd">figma screenshot</span> file:2:1094:66600
+id:  file:2:1094:66600
+url: https://s3-figma-rendered-images.figma.com/.../abc123.png</pre>
+
+<h3>Example 3 — <code>--json</code></h3>
+<pre>$ <span class="cmd">figma screenshot</span> file:2:1094:66600 <span class="flag">--out</span> header.png <span class="flag">--json</span>
+{
+  <span class="str">"id"</span>:         <span class="str">"file:2:1094:66600"</span>,
+  <span class="str">"node_id"</span>:    <span class="str">"1094:66600"</span>,
+  <span class="str">"file_key"</span>:   <span class="str">"48nDWkcsuJ8TdoEIW9LGl6"</span>,
+  <span class="str">"wrote"</span>:      <span class="str">"header.png"</span>,
+  <span class="str">"bytes"</span>:      24576,
+  <span class="str">"source_url"</span>: <span class="str">"https://s3-figma-rendered-images.figma.com/.../abc123.png"</span>
+}</pre>
+
+<h2 id="tokens">tokens</h2>
+<p>Extract design tokens (colors, fonts, sizes, spacing, radii, shadows, grids). Pulls from the target's subtree and/or the file's published variables.</p>
+
+<h3>Usage</h3>
+<pre><span class="cmd">figma tokens</span> ID [<span class="flag">--scope</span> target|file|both]
+                     [<span class="flag">--only</span> CAT1,CAT2,...]
+                     [<span class="flag">--as</span> tokens|css]</pre>
+
+<h3>Example 1 — default tokens output</h3>
+<pre>$ <span class="cmd">figma tokens</span> file:2:1094:66591 <span class="flag">--only</span> colors,spacing
+colors:
+  bg-primary:   <span class="str">"#ffffff"</span>
+  bg-muted:     <span class="str">"#f6f8fa"</span>
+  text-primary: <span class="str">"#1f2328"</span>
+  text-muted:   <span class="str">"#57606a"</span>
+  accent:       <span class="str">"#0969da"</span>
+  danger:       <span class="str">"#cf222e"</span>
+spacing:
+  xs: 4
+  sm: 8
+  md: 16
+  lg: 24
+  xl: 32</pre>
+
+<h3>Example 2 — CSS output</h3>
+<pre>$ <span class="cmd">figma tokens</span> file:2:1094:66591 <span class="flag">--as</span> css
+:root {
+  --color-bg-primary: #ffffff;
+  --color-bg-muted: #f6f8fa;
+  --color-text-primary: #1f2328;
+  --color-text-muted: #57606a;
+  --color-accent: #0969da;
+  --color-danger: #cf222e;
+  --spacing-xs: 4px;
+  --spacing-sm: 8px;
+  --spacing-md: 16px;
+  --spacing-lg: 24px;
+  --spacing-xl: 32px;
+}</pre>
+
+<h2 id="assets">assets</h2>
+<p>Walk a node's subtree and export every icon (SVG) and image/composite (PNG) into a directory.</p>
+
+<h3>Usage</h3>
+<pre><span class="cmd">figma assets</span> ID [<span class="flag">--out-dir</span> DIR]</pre>
+
+<h3>Example 1 — default summary</h3>
+<pre>$ <span class="cmd">figma assets</span> file:2:1094:66591 <span class="flag">--out-dir</span> ./out
+id:       file:2:1094:66591
+out_dir:  ./out
+manifest: ./out/manifest.json
+icons: 12  images: 3  composites: 1  failed: 0</pre>
+
+<h3>Example 2 — <code>--json</code> dumps the full manifest</h3>
+<pre>$ <span class="cmd">figma assets</span> file:2:1094:66591 <span class="flag">--out-dir</span> ./out <span class="flag">--json</span>
+{
+  <span class="str">"id"</span>:      <span class="str">"file:2:1094:66591"</span>,
+  <span class="str">"out_dir"</span>: <span class="str">"./out"</span>,
+  <span class="str">"icons"</span>: [
+    { <span class="str">"id"</span>: <span class="str">"file:2:1094:66602:1:1"</span>, <span class="str">"name"</span>: <span class="str">"search-icon"</span>,
+      <span class="str">"path"</span>: <span class="str">"./out/icons/search-icon.svg"</span> },
+    { <span class="str">"id"</span>: <span class="str">"file:2:1094:66613:2"</span>,   <span class="str">"name"</span>: <span class="str">"chevron-down"</span>,
+      <span class="str">"path"</span>: <span class="str">"./out/icons/chevron-down.svg"</span> }
+  ],
+  <span class="str">"images"</span>: [
+    { <span class="str">"id"</span>: <span class="str">"file:2:1094:67260:2"</span>, <span class="str">"name"</span>: <span class="str">"empty-illustration"</span>,
+      <span class="str">"path"</span>: <span class="str">"./out/images/empty-illustration.png"</span> }
+  ],
+  <span class="str">"composites"</span>: [],
+  <span class="str">"failed"</span>: []
+}</pre>
+
+<h2 id="context">context</h2>
+<p>Bundled export: tree + screenshot + tokens + assets into one directory. The "give me everything to implement this frame in code" command.</p>
+
+<h3>Usage</h3>
+<pre><span class="cmd">figma context</span> ID [<span class="flag">--out-dir</span> DIR]</pre>
+
+<h3>Example</h3>
+<pre>$ <span class="cmd">figma context</span> file:2:1094:66600 <span class="flag">--out-dir</span> ./hero
+id:      file:2:1094:66600
+out_dir: ./hero
+wrote:
+  - hero/tree.yaml         (1.2 KB)
+  - hero/screenshot.png    (24 KB)
+  - hero/tokens.yaml       (380 B)
+  - hero/assets/           (12 icons, 3 images)
+  - hero/manifest.json</pre>
+
+<h3>Example — <code>--json</code></h3>
+<pre>$ <span class="cmd">figma context</span> file:2:1094:66600 <span class="flag">--out-dir</span> ./hero <span class="flag">--json</span>
+{
+  <span class="str">"id"</span>:         <span class="str">"file:2:1094:66600"</span>,
+  <span class="str">"out_dir"</span>:    <span class="str">"./hero"</span>,
+  <span class="str">"tree"</span>:       { <span class="str">"path"</span>: <span class="str">"./hero/tree.yaml"</span>,       <span class="str">"bytes"</span>: 1228 },
+  <span class="str">"screenshot"</span>: { <span class="str">"path"</span>: <span class="str">"./hero/screenshot.png"</span>, <span class="str">"bytes"</span>: 24576 },
+  <span class="str">"tokens"</span>:     { <span class="str">"path"</span>: <span class="str">"./hero/tokens.yaml"</span>,     <span class="str">"bytes"</span>: 380   },
+  <span class="str">"assets"</span>:     { <span class="str">"icons"</span>: 12, <span class="str">"images"</span>: 3, <span class="str">"composites"</span>: 0,
+                  <span class="str">"manifest"</span>: <span class="str">"./hero/assets/manifest.json"</span> }
+}</pre>
+
+<h2 id="cache">cache</h2>
+<p>Prime / refresh the local file cache. The only command that doesn't take an ID. Walks every configured project, refetches files whose <code>lastModified</code> changed, and persists the synth-ID mappings (<code>proj:N</code> / <code>file:N</code>) in the manifest.</p>
+
+<h3>Usage</h3>
+<pre><span class="cmd">figma cache</span> [<span class="flag">--projects</span> IDS] [<span class="flag">--force</span>] [<span class="flag">--concurrency</span> N] [<span class="flag">--dir</span> PATH]</pre>
+
+<h3>Example — incremental refresh</h3>
+<pre>$ <span class="cmd">figma cache</span>
+cache: 47 files in projects, 44 up-to-date, 3 to fetch (concurrency=3)
+  ok    file:2   48nDWkcsuJ8TdoEIW9LGl6   Admin Module    83847 nodes,  9640 KB in 18.2s
+  ok    file:3   ojK3tzTL9Dy2Q08AZVsUum   Allowances      16592 nodes,  1874 KB in  4.1s
+  ok    file:4   gAjQhOIgmOiUwPwYDoc2ln   Booking Leave    8124 nodes,   920 KB in  2.3s
+
+elapsed: 24.6s  fetched: 3  skipped: 44  ok: 45  not_exportable: 2  failed: 0</pre>
+
+<h3>Example — <code>--json</code></h3>
+<pre>$ <span class="cmd">figma cache</span> <span class="flag">--json</span>
+{
+  <span class="str">"cache_dir"</span>:    <span class="str">"~/Library/Caches/figma-explorer"</span>,
+  <span class="str">"elapsed_seconds"</span>: 24.6,
+  <span class="str">"fetched"</span>:          3,
+  <span class="str">"skipped_up_to_date"</span>: 44,
+  <span class="str">"pruned_stale"</span>:     0,
+  <span class="str">"total_in_projects"</span>: 47,
+  <span class="str">"ok"</span>:                45,
+  <span class="str">"not_exportable"</span>:    2,
+  <span class="str">"failed"</span>:            0,
+  <span class="str">"cache_bytes"</span>:       23488000,
+  <span class="str">"total_nodes"</span>:       184213,
+  <span class="str">"synth_ids"</span>: {
+    <span class="str">"projects"</span>: { <span class="str">"1"</span>: <span class="str">"77195660"</span> },
+    <span class="str">"files"</span>:    { <span class="str">"1"</span>: <span class="str">"eQWQoxQzbDRTzXuHCGSAyg"</span>, <span class="str">"2"</span>: <span class="str">"48nDWkcsuJ8TdoEIW9LGl6"</span>, <span class="str">"..."</span>: <span class="str">"..."</span> }
+  }
+}</pre>
+
+<h2 id="workflows">End-to-end LLM workflows</h2>
+
+<h3>"Implement the Employees screen"</h3>
+<pre>$ <span class="cmd">figma find</span> Employees <span class="flag">--type</span> CANVAS <span class="flag">--limit</span> 3
+file:2:1094:66591  -  | CANVAS  10.0  <span class="str">"Employees ✅ 🆕"</span>  (Admin Module)
+...
+
+$ <span class="cmd">figma context</span> file:2:1094:66591 <span class="flag">--out-dir</span> ./employees
+<span class="comment"># → ./employees/{tree.yaml, screenshot.png, tokens.yaml, assets/...}</span></pre>
+
+<h3>"From this URL, give me design tokens as CSS"</h3>
+<pre>$ <span class="cmd">figma tokens</span> <span class="str">"https://www.figma.com/design/48nDWkcsuJ8TdoEIW9LGl6/Admin?node-id=1094-66591"</span> <span class="flag">--as</span> css
+<span class="comment"># → :root { --color-bg-primary: #ffffff; ... }</span></pre>
+
+<h3>"What's on the Employees page?"</h3>
+<pre>$ <span class="cmd">figma find</span> Employees <span class="flag">--type</span> CANVAS <span class="flag">--limit</span> 1
+file:2:1094:66591  -  | CANVAS  10.0  <span class="str">"Employees ✅ 🆕"</span>  (Admin Module)
+
+$ <span class="cmd">figma ls</span> file:2:1094:66591 <span class="flag">--depth</span> 1
+<span class="comment"># → frames on the page, each line emits a paste-ready file:2:... id</span></pre>
+
+<h3>"Paste a bare node id from Figma's UI"</h3>
+<pre>$ <span class="cmd">figma ls</span> 1094:66600
+<span class="comment"># Lenient lookup: 1094:66600 found in exactly one cached file → resolved.</span>
+file:2:1094:66600  1440×80@0,0    | FRAME       <span class="str">"Header"</span>
+file:2:1094:66601  200×32@24,24   |   TEXT        <span class="str">"Title"</span>     <span class="str">"Employees"</span>
+file:2:1094:66602  320×40@720,20  |   INSTANCE    <span class="str">"Search"</span>     [+3 children]
+file:2:1094:66603  140×40@1276,20 |   INSTANCE    <span class="str">"Add Employee"</span> [+2 children]</pre>
+
+<h3>"Screenshot every filter button"</h3>
+<pre>$ <span class="cmd">figma find</span> filter button <span class="flag">--in</span> file:2 <span class="flag">--type</span> INSTANCE <span class="flag">--json</span> \
+  | jq -r <span class="str">'.hits[].id'</span> \
+  | xargs -I{} <span class="cmd">figma screenshot</span> {} <span class="flag">--out</span> <span class="str">"shots/{}.png"</span></pre>
+
+<h3>"Explore an unknown file from its URL"</h3>
+<pre>$ <span class="cmd">figma ls</span> <span class="str">"https://www.figma.com/design/SomeNewKey/Foo"</span> <span class="flag">--depth</span> 1
+<span class="comment"># Live-fetches if not cached; lists pages with file:N synthesized on-the-fly.</span></pre>
+
+</body>
+</html>

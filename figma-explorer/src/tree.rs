@@ -148,7 +148,150 @@ pub fn format_node_line(node: &Value) -> String {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// CacheNode-typed renderers (cache consumers)
+// Flat renderer (new ls/find output format — pipe rail, padded left columns)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Max characters rendered for any single `"name"` / path-component string
+/// in the flat YAML output. Figma auto-names TEXT nodes by their content, so
+/// designers pasting paragraphs of design notes turn a frame title into a
+/// 1000-char wall. Truncating at the renderer keeps the line scannable
+/// without losing the underlying data (`--json` paths emit the full name).
+pub const NAME_DISPLAY_MAX: usize = 200;
+
+/// UTF-8-safe character truncation. Returns the input unchanged when it fits
+/// in `max` chars; otherwise returns `<first max-1 chars>…`. The trailing
+/// horizontal-ellipsis is one character, so the result is at most `max` chars.
+pub fn truncate_display(s: &str, max: usize) -> std::borrow::Cow<'_, str> {
+    if max == 0 {
+        return std::borrow::Cow::Borrowed("");
+    }
+    let count = s.chars().count();
+    if count <= max {
+        return std::borrow::Cow::Borrowed(s);
+    }
+    let head: String = s.chars().take(max.saturating_sub(1)).collect();
+    std::borrow::Cow::Owned(format!("{head}…"))
+}
+
+/// Per-listing context that lets every line align column 1 (id) and column 2
+/// (bounds) at the same width. Both widths are computed once across the
+/// entire listing in `render_flat` so the pipe rail stays at a fixed column.
+#[derive(Clone, Copy, Debug)]
+pub struct FormatCtx {
+    pub file_synth: u32,
+    pub max_id_width: usize,
+    pub max_bounds_width: usize,
+}
+
+/// Render one node as a single line in the new flat format:
+///
+/// ```text
+/// file:N:x:y    1440x80@0,0     | [indent]TYPE  "name"  [extras]
+/// ```
+///
+/// The left rail (id + bounds) is padded to per-listing local maxima so the
+/// pipe lands at a fixed column. Depth indentation lives *after* the pipe in
+/// column 3 so `awk '{print $1}'` and `awk '{print $2}'` stay stable.
+///
+/// `truncated_child_count` lets the caller mark "this node has more visible
+/// descendants but we stopped descending here" — rendered as `[+N children]`.
+pub fn format_cache_line(
+    node: &CacheNode,
+    depth: usize,
+    ctx: &FormatCtx,
+    truncated_child_count: Option<usize>,
+) -> String {
+    // Empty node id is the marker for a synthesized file-root row — render
+    // as the bare `file:N` form so callers can hide the underlying DOCUMENT
+    // node (id 0:0) and present a cleaner top line.
+    let id_str = if node.id.is_empty() {
+        format!("file:{}", ctx.file_synth)
+    } else {
+        format!("file:{}:{}", ctx.file_synth, node.id)
+    };
+    let bounds_str = node
+        .bounds
+        .map(|b| b.compact())
+        .unwrap_or_else(|| "-".to_owned());
+    let kind = if node.type_.is_empty() { "?" } else { node.type_.as_str() };
+    let indent = "  ".repeat(depth);
+    let mut s = format!(
+        "{id:<id_w$}  {b:<b_w$}  | {indent}{kind}  \"{name}\"",
+        id = id_str,
+        b = bounds_str,
+        indent = indent,
+        kind = kind,
+        name = truncate_display(&node.name, NAME_DISPLAY_MAX),
+        id_w = ctx.max_id_width,
+        b_w = ctx.max_bounds_width,
+    );
+    if let Some(n) = truncated_child_count {
+        let _ = write!(s, "  [+{n} children]");
+    }
+    s
+}
+
+/// Pre-order DFS that collects (node, depth, optional truncated-count) tuples
+/// for every visible node down to `max_depth` levels of children. Invisible
+/// nodes (and their subtrees) are skipped at every level.
+fn collect_visible<'a>(
+    node: &'a CacheNode,
+    depth: usize,
+    max_depth: usize,
+    out: &mut Vec<(&'a CacheNode, usize, Option<usize>)>,
+) {
+    if !node.visible {
+        return;
+    }
+    let visible_count = node.children.iter().filter(|c| c.visible).count();
+    let truncated = if depth >= max_depth && visible_count > 0 {
+        Some(visible_count)
+    } else {
+        None
+    };
+    out.push((node, depth, truncated));
+    if depth < max_depth {
+        for c in node.children.iter().filter(|c| c.visible) {
+            collect_visible(c, depth + 1, max_depth, out);
+        }
+    }
+}
+
+/// Render `root` and `max_depth` levels of descendants as a vector of flat
+/// lines, one per visible node. Two-pass: first walk collects nodes (and
+/// computes truncation markers); second pass measures id/bounds widths and
+/// formats. Returns owned `String`s ready to be joined with `\n`.
+pub fn render_flat(root: &CacheNode, file_synth: u32, max_depth: usize) -> Vec<String> {
+    let mut items: Vec<(&CacheNode, usize, Option<usize>)> = Vec::new();
+    collect_visible(root, 0, max_depth, &mut items);
+    if items.is_empty() {
+        return Vec::new();
+    }
+    let max_id_width = items
+        .iter()
+        .map(|(n, _, _)| {
+            if n.id.is_empty() {
+                format!("file:{}", file_synth).len()
+            } else {
+                format!("file:{}:{}", file_synth, n.id).len()
+            }
+        })
+        .max()
+        .unwrap_or(0);
+    let max_bounds_width = items
+        .iter()
+        .map(|(n, _, _)| n.bounds.map(|b| b.compact().len()).unwrap_or(1))
+        .max()
+        .unwrap_or(1);
+    let ctx = FormatCtx { file_synth, max_id_width, max_bounds_width };
+    items
+        .into_iter()
+        .map(|(n, d, trunc)| format_cache_line(n, d, &ctx, trunc))
+        .collect()
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CacheNode-typed renderers (legacy nested cache consumers, to be retired)
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Render a `CacheNode` as a compact YAML-friendly tree. Mirrors
@@ -224,6 +367,7 @@ pub fn format_cache_node_line(node: &CacheNode) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::node::Bounds;
     use serde_json::json;
 
     #[test]
@@ -336,6 +480,188 @@ mod tests {
         let root_key = "FRAME \"root\" id:0";
         let l1 = &out[root_key][0];
         assert_eq!(l1, &json!("FRAME \"L1\" id:1 [+2 children]"));
+    }
+
+    fn leaf_cache(id: &str, type_: &str, name: &str, bounds: Option<Bounds>) -> CacheNode {
+        CacheNode {
+            id: id.into(),
+            type_: type_.into(),
+            name: name.into(),
+            visible: true,
+            bounds,
+            children: vec![],
+        }
+    }
+
+    fn sample_tree() -> CacheNode {
+        // Header
+        // ├─ Title
+        // └─ Search [+1 hidden child below depth]
+        //    └─ Icon (would be at depth 2)
+        let mut search = leaf_cache(
+            "1094:66602",
+            "INSTANCE",
+            "Search",
+            Some(Bounds { x: 720.0, y: 20.0, width: 320.0, height: 40.0 }),
+        );
+        search.children.push(leaf_cache(
+            "1094:66602:1",
+            "VECTOR",
+            "icon",
+            Some(Bounds { x: 732.0, y: 32.0, width: 16.0, height: 16.0 }),
+        ));
+        let mut header = leaf_cache(
+            "1094:66600",
+            "FRAME",
+            "Header",
+            Some(Bounds { x: 0.0, y: 0.0, width: 1440.0, height: 80.0 }),
+        );
+        header.children.push(leaf_cache(
+            "1094:66601",
+            "TEXT",
+            "Title",
+            Some(Bounds { x: 24.0, y: 24.0, width: 200.0, height: 32.0 }),
+        ));
+        header.children.push(search);
+        header
+    }
+
+    #[test]
+    fn truncate_display_passes_short_strings_through() {
+        assert_eq!(truncate_display("hello", 200), "hello");
+        assert_eq!(truncate_display("", 200), "");
+    }
+
+    #[test]
+    fn truncate_display_caps_long_strings_with_ellipsis() {
+        let long: String = "a".repeat(500);
+        let truncated = truncate_display(&long, 200);
+        assert_eq!(truncated.chars().count(), 200);
+        assert!(truncated.ends_with('…'));
+    }
+
+    #[test]
+    fn truncate_display_is_utf8_safe() {
+        // Multi-byte chars must not be split mid-codepoint.
+        let mixed = "é".repeat(300); // each é is 2 bytes
+        let truncated = truncate_display(&mixed, 100);
+        assert_eq!(truncated.chars().count(), 100);
+        assert!(truncated.ends_with('…'));
+        // Round-trip through bytes to confirm validity.
+        let _check = truncated.as_bytes();
+    }
+
+    #[test]
+    fn flat_format_truncates_long_names() {
+        let mut node = leaf_cache("1:1", "TEXT", "x", None);
+        node.name = "a".repeat(500);
+        let lines = render_flat(&node, 2, 0);
+        // 200-char name + 2 quote chars = 202; ensure the line contains an
+        // ellipsis and is much shorter than 500.
+        let line = &lines[0];
+        assert!(line.contains('…'), "expected ellipsis, got: {line}");
+        // Whole rendered name field should be <= 202 chars (200 + 2 quotes).
+        let start = line.find('"').unwrap();
+        let end = line[start + 1..].find('"').unwrap() + start + 1;
+        let quoted = &line[start..=end];
+        assert!(
+            quoted.chars().count() <= 202,
+            "quoted name not capped: {} chars",
+            quoted.chars().count()
+        );
+    }
+
+    #[test]
+    fn flat_format_emits_qualified_id_in_column_one() {
+        let lines = render_flat(&sample_tree(), 2, 2);
+        // Every line starts with the qualified id "file:2:..."
+        for l in &lines {
+            assert!(l.starts_with("file:2:"), "bad prefix: {l}");
+        }
+    }
+
+    #[test]
+    fn flat_format_pads_id_column_to_local_max() {
+        let lines = render_flat(&sample_tree(), 2, 2);
+        // All lines should land the pipe at the same column.
+        let pipe_cols: Vec<usize> = lines.iter()
+            .map(|l| l.find('|').expect("pipe present"))
+            .collect();
+        let first = pipe_cols[0];
+        assert!(pipe_cols.iter().all(|c| *c == first), "pipe wobble: {pipe_cols:?}");
+    }
+
+    #[test]
+    fn flat_format_emits_bounds_compact_no_spaces() {
+        let lines = render_flat(&sample_tree(), 2, 2);
+        let header_line = lines.iter().find(|l| l.contains("\"Header\"")).unwrap();
+        // Compact form: 1440x80@0,0 — no spaces inside the bounds field.
+        assert!(header_line.contains("1440x80@0,0"), "expected compact bounds, got: {header_line}");
+        // Make sure the legacy `1440×80 @0,0` form did NOT sneak in.
+        assert!(!header_line.contains("1440×80 @0,0"), "legacy form leaked: {header_line}");
+    }
+
+    #[test]
+    fn flat_format_indents_after_pipe_only() {
+        let lines = render_flat(&sample_tree(), 2, 2);
+        // The Title line is a child of Header (depth 1). The indent after
+        // the pipe should start with "  " (two spaces) for depth 1.
+        let title_line = lines.iter().find(|l| l.contains("\"Title\"")).unwrap();
+        let pipe = title_line.find('|').unwrap();
+        let after = &title_line[pipe + 2..]; // skip "| "
+        assert!(after.starts_with("  TEXT"), "expected '  TEXT' after pipe, got {after:?}");
+    }
+
+    #[test]
+    fn flat_format_marks_truncation_with_child_count() {
+        // Render depth 1 — Search (which has 1 child) should show [+1 children].
+        let lines = render_flat(&sample_tree(), 2, 1);
+        let search_line = lines.iter().find(|l| l.contains("\"Search\"")).unwrap();
+        assert!(search_line.contains("[+1 children]"), "missing trunc marker: {search_line}");
+        // No deeper lines should appear.
+        assert!(!lines.iter().any(|l| l.contains("\"icon\"")));
+    }
+
+    #[test]
+    fn flat_format_skips_invisible_nodes() {
+        let mut hidden_child = leaf_cache("1:99", "TEXT", "hidden", None);
+        hidden_child.visible = false;
+        let mut root = leaf_cache("1:1", "FRAME", "Root", None);
+        root.children.push(hidden_child);
+        root.children.push(leaf_cache("1:2", "TEXT", "shown", None));
+        let lines = render_flat(&root, 1, 3);
+        assert!(lines.iter().any(|l| l.contains("\"shown\"")));
+        assert!(!lines.iter().any(|l| l.contains("\"hidden\"")));
+    }
+
+    #[test]
+    fn flat_format_bounds_dash_when_missing() {
+        let leaf = leaf_cache("0:0", "DOCUMENT", "doc", None);
+        let lines = render_flat(&leaf, 1, 0);
+        let line = &lines[0];
+        // Bounds column shows "-" — verify by checking the bounds field
+        // between the id and the pipe.
+        let pipe = line.find('|').unwrap();
+        let head = &line[..pipe];
+        assert!(head.contains(" -  "), "expected '-' bounds marker, got: {line}");
+    }
+
+    #[test]
+    fn flat_format_awk_friendly_extraction() {
+        let lines = render_flat(&sample_tree(), 2, 2);
+        // Simulate `awk '{print $1}'` — first whitespace-delimited token.
+        for l in &lines {
+            let first = l.split_whitespace().next().unwrap();
+            assert!(first.starts_with("file:2:"), "first token isn't id: {l}");
+        }
+        // Simulate `awk '{print $2}'` — second token is bounds (or "-").
+        for l in &lines {
+            let second = l.split_whitespace().nth(1).unwrap();
+            assert!(
+                second == "-" || second.contains('@'),
+                "second token isn't bounds: {l}"
+            );
+        }
     }
 
     #[test]

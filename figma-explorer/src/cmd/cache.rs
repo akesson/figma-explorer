@@ -11,7 +11,7 @@ use crate::cache::{
     self, build_cached_file, default_dir, CacheDir, EntryStatus, FileMeta, FileRef,
 };
 use crate::cmd::fetch_file_json;
-use crate::{print, Output};
+use crate::{print, Globals, Output};
 
 /// Cache maintenance commands.
 ///
@@ -59,7 +59,8 @@ pub struct ClearArgs {
 }
 
 impl Args {
-    pub async fn run(self, cfg: &Configuration, format: Output) -> Result<()> {
+    pub async fn run(self, cfg: &Configuration, globals: &Globals) -> Result<()> {
+        let format = globals.output;
         match self.command {
             CacheCommand::Prefetch(a) => a.run(cfg, format).await,
             CacheCommand::Clear(a) => a.run(format),
@@ -257,9 +258,28 @@ impl PrefetchArgs {
             .fold(0usize, |n, _| async move { n + 1 })
             .await;
 
-        // (4) Tally summary from disk so we capture both newly-fetched and
-        //     previously-cached entries within jurisdiction.
+        // (4a) Intern synth IDs for every project + every successfully-cached
+        //      file. One lock-protected pass at the end so prefetch's worker
+        //      loop doesn't contend on the synth mutex.
         let metas_after = cache_dir.list_metas()?;
+        if let Err(e) = crate::synth::with_lock(&cache_dir, |state| {
+            for pid in &self.project_ids {
+                state.intern_project(pid);
+            }
+            for m in &metas_after {
+                if m.status == EntryStatus::Ok && configured.contains(&m.project_id) {
+                    if !m.project_id.is_empty() {
+                        state.intern_project(&m.project_id);
+                    }
+                    state.intern_file(&m.file_key);
+                }
+            }
+        }) {
+            eprintln!("cache: synth intern failed: {e:#}");
+        }
+
+        // (4b) Tally summary from disk so we capture both newly-fetched and
+        //      previously-cached entries within jurisdiction.
         let ok = metas_after
             .iter()
             .filter(|m| configured.contains(&m.project_id) && m.status == EntryStatus::Ok)

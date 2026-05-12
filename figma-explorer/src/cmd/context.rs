@@ -1,25 +1,26 @@
+//! `context` — bundled export: tree + screenshot + tokens + assets into one
+//! directory. The "give me everything to implement this frame in code" command.
+//!
+//! Wraps the existing `crate::context::build` helper, which takes a live
+//! `&Value` document node. We resolve the user's ID to a `(file_key, node_id)`
+//! pair, fetch the live document, and pass the appropriate subtree down.
+
 use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};
 use clap::Args as ClapArgs;
 use figma_api::apis::configuration::Configuration;
 
-use crate::cmd::{fetch_file_json, LocatorArgs};
-use crate::{context as ctx, print, resolve, Output};
+use crate::cmd::fetch_file_json;
+use crate::resolve;
+use crate::resolver::{parse_id, render_resolve_error, ResolvedTarget, Resolver};
+use crate::{context as ctx, print, Globals};
 
-/// Bundled export of everything needed to implement a frame in code.
+/// Bundled export of everything needed to implement a node in code.
 #[derive(ClapArgs, Debug)]
 pub struct Args {
-    #[command(flatten)]
-    pub locator: LocatorArgs,
-
-    /// Page name (used with --frame).
-    #[arg(long)]
-    pub page: Option<String>,
-
-    /// Frame name (or pass --node-id / --url).
-    #[arg(long)]
-    pub frame: Option<String>,
+    /// Tagged or native ID, or a Figma URL pointing at the node to bundle.
+    pub id: String,
 
     /// Output directory. Will be created. Existing files will be overwritten.
     #[arg(long, default_value = "figma-context")]
@@ -27,35 +28,39 @@ pub struct Args {
 }
 
 impl Args {
-    pub async fn run(self, cfg: &Configuration, format: Output) -> Result<()> {
-        let (file_key, url_node_id) = self.locator.resolve()?;
-        let file = fetch_file_json(cfg, &file_key, None).await?;
-        let doc = &file["document"];
+    pub async fn run(self, cfg: &Configuration, globals: &Globals) -> Result<()> {
+        let resolver = Resolver::new(globals.cache_only)?;
+        let format = globals.output;
+        let id = parse_id(&self.id).map_err(|e| anyhow!("{e}"))?;
+        let target = resolver
+            .resolve(cfg, &id)
+            .await
+            .map_err(|e| render_resolve_error(e, format))?;
 
-        let target = if let Some(nid) = url_node_id
-            .as_deref()
-            .or(self.locator.node_id.as_deref())
-        {
-            resolve::resolve_node_id(doc, nid)
-                .ok_or_else(|| anyhow!("no node with id {nid}"))?
-        } else {
-            let page_q = self.page.as_deref().ok_or_else(|| {
-                anyhow!("--page is required (or pin the target with --node-id/--url)")
-            })?;
-            let page = resolve::resolve_page(doc, page_q)
-                .ok_or_else(|| anyhow!("no page matching {page_q:?}"))?;
-            match self.frame.as_deref() {
-                Some(q) => resolve::resolve_frame(page, q).ok_or_else(|| {
-                    anyhow!(
-                        "no frame matching {q:?} on page {:?}",
-                        crate::node::name(page).unwrap_or("")
-                    )
-                })?,
-                None => page,
+        let (file_key, node_id) = match target {
+            ResolvedTarget::Node { meta, node, .. } => (meta.file_key, Some(node.id)),
+            ResolvedTarget::File { meta, document, .. } => {
+                // For a bare file:N, bundle the whole document — use its root id.
+                (meta.file_key, Some(document.document.id.clone()))
+            }
+            ResolvedTarget::Root | ResolvedTarget::Project { .. } => {
+                anyhow::bail!(
+                    "context needs a file or node-level id; got {}",
+                    self.id
+                );
             }
         };
 
-        let summary = ctx::build(cfg, &file_key, &file, target, &self.out_dir).await?;
+        let file = fetch_file_json(cfg, &file_key, None).await?;
+        let doc = &file["document"];
+
+        let target_value = match &node_id {
+            Some(nid) => resolve::resolve_node_id(doc, nid)
+                .ok_or_else(|| anyhow!("no node with id {nid}"))?,
+            None => doc,
+        };
+
+        let summary = ctx::build(cfg, &file_key, &file, target_value, &self.out_dir).await?;
         print(&summary, format)
     }
 }

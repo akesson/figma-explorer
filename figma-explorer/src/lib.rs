@@ -9,10 +9,14 @@ pub mod assets;
 pub mod cache;
 pub mod cmd;
 pub mod context;
+pub mod id;
 pub mod node;
+pub mod node_index;
 pub mod resolve;
+pub mod resolver;
 pub mod screenshot;
 pub mod styles;
+pub mod synth;
 pub mod tree;
 pub mod url;
 
@@ -25,6 +29,21 @@ pub enum Output {
     Yaml,
     /// Full pretty JSON with all metadata headers — for jq-style pipelines.
     Json,
+}
+
+/// Process-wide flags assembled from the global CLI args. Threaded through
+/// every command so behavior (output format, cache-only mode, bare-id scope)
+/// stays consistent regardless of which subcommand consumes them.
+#[derive(Clone, Debug)]
+pub struct Globals {
+    pub output: Output,
+    /// `--cache-only`: refuse to fall through to a live API fetch. Commands
+    /// should construct their `Resolver` with this flag forwarded.
+    pub cache_only: bool,
+    /// `--in <ID>`: scope override for the bare-id form, used by `ls` (to
+    /// disambiguate the few intrinsically-ambiguous ids like `0:0`) and
+    /// `find` (to restrict the search). Other commands ignore it.
+    pub scope: Option<String>,
 }
 
 pub fn build_config(token: Option<&str>) -> anyhow::Result<Configuration> {

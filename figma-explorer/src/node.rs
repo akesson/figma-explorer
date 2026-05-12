@@ -80,6 +80,22 @@ impl std::fmt::Display for Bounds {
     }
 }
 
+impl Bounds {
+    /// Whitespace-free rendering: `WxH@X,Y`. Used by the flat `ls` output
+    /// where the bounds occupy a fixed column and inner spaces would create
+    /// phantom awk fields. Distinct from `Display` (which keeps the inner
+    /// space for human-friendly tree rendering).
+    pub fn compact(&self) -> String {
+        format!(
+            "{}x{}@{},{}",
+            self.width.round() as i64,
+            self.height.round() as i64,
+            self.x.round() as i64,
+            self.y.round() as i64,
+        )
+    }
+}
+
 pub fn fills(node: &Value) -> &[Value] {
     node.get("fills")
         .and_then(|f| f.as_array())

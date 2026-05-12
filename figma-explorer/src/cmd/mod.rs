@@ -2,56 +2,44 @@ use anyhow::Result;
 use clap::Subcommand;
 use figma_api::apis::configuration::Configuration;
 
-use crate::Output;
+use crate::Globals;
 
+pub mod assets;
 pub mod cache;
 pub mod context;
-pub mod extract_assets;
-pub mod files;
-pub mod frames;
-pub mod pages;
+pub mod find;
+pub mod ls;
 pub mod screenshot;
-pub mod search;
-pub mod styles;
-pub mod tree;
+pub mod tokens;
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
-    /// List files across all projects in FIGMA_PROJECTS_IDS.
-    Files(files::Args),
-    /// List all pages in a file.
-    Pages(pages::Args),
-    /// List top-level frames on a page.
-    Frames(frames::Args),
-    /// Render a frame as a nested tree (skips invisible nodes).
-    Tree(tree::Args),
-    /// Locate nodes by a multi-token ancestor-chain hint (e.g. "wallchart grid filter button").
-    Search(search::Args),
+    /// List a node and its descendants (or projects/files at the root).
+    Ls(ls::Args),
+    /// Locate nodes by a multi-token ancestor-chain query.
+    Find(find::Args),
     /// Export a node as PNG/JPG/SVG/PDF.
     Screenshot(screenshot::Args),
-    /// Export every icon/image/composite below a frame into a directory.
-    ExtractAssets(extract_assets::Args),
     /// Extract design tokens (colors, fonts, sizes, spacing, …).
-    Styles(styles::Args),
-    /// Aggregate command: dump tree + screenshot + styles + assets for a frame.
+    Tokens(tokens::Args),
+    /// Export every icon/image/composite below a node into a directory.
+    Assets(assets::Args),
+    /// Aggregate: dump tree + screenshot + tokens + assets for a node.
     Context(context::Args),
     /// Maintain the local file cache (prefetch / clear).
     Cache(cache::Args),
 }
 
 impl Command {
-    pub async fn run(self, cfg: &Configuration, format: Output) -> Result<()> {
+    pub async fn run(self, cfg: &Configuration, globals: &Globals) -> Result<()> {
         match self {
-            Self::Files(a) => a.run(cfg, format).await,
-            Self::Pages(a) => a.run(cfg, format).await,
-            Self::Frames(a) => a.run(cfg, format).await,
-            Self::Tree(a) => a.run(cfg, format).await,
-            Self::Search(a) => a.run(cfg, format).await,
-            Self::Screenshot(a) => a.run(cfg, format).await,
-            Self::ExtractAssets(a) => a.run(cfg, format).await,
-            Self::Styles(a) => a.run(cfg, format).await,
-            Self::Context(a) => a.run(cfg, format).await,
-            Self::Cache(a) => a.run(cfg, format).await,
+            Self::Ls(a) => a.run(cfg, globals).await,
+            Self::Find(a) => a.run(cfg, globals).await,
+            Self::Screenshot(a) => a.run(cfg, globals).await,
+            Self::Tokens(a) => a.run(cfg, globals).await,
+            Self::Assets(a) => a.run(cfg, globals).await,
+            Self::Context(a) => a.run(cfg, globals).await,
+            Self::Cache(a) => a.run(cfg, globals).await,
         }
     }
 }
@@ -106,34 +94,3 @@ pub async fn get_json(cfg: &Configuration, url: &str) -> Result<serde_json::Valu
     serde_json::from_str(&body).with_context(|| format!("parsing response from {url}"))
 }
 
-/// Either explicit args or a URL — resolve down to (file_key, optional node_id).
-#[derive(Debug, Clone, clap::Args)]
-pub struct LocatorArgs {
-    /// Figma file key (from the file URL).
-    #[arg(long, conflicts_with = "url")]
-    pub file_key: Option<String>,
-
-    /// Figma file/node URL. If set, overrides --file-key and --node-id.
-    #[arg(long)]
-    pub url: Option<String>,
-
-    /// Explicit Figma node id (e.g. `1:23`).
-    #[arg(long, conflicts_with = "url")]
-    pub node_id: Option<String>,
-}
-
-impl LocatorArgs {
-    /// Resolve the locator into (file_key, optional node_id). Errors if
-    /// neither URL nor file-key is supplied.
-    pub fn resolve(&self) -> Result<(String, Option<String>)> {
-        if let Some(url) = &self.url {
-            let p = crate::url::parse(url)?;
-            return Ok((p.file_key, p.node_id));
-        }
-        let file_key = self
-            .file_key
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("--file-key or --url is required"))?;
-        Ok((file_key, self.node_id.clone()))
-    }
-}

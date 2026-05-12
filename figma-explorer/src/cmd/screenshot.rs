@@ -5,24 +5,17 @@ use clap::Args as ClapArgs;
 use figma_api::apis::configuration::Configuration;
 use serde_json::json;
 
-use crate::cmd::{fetch_file_json, LocatorArgs};
-use crate::node::id;
+use crate::resolver::{parse_id, render_resolve_error, ResolvedTarget, Resolver};
 use crate::screenshot::{self as render, Format};
-use crate::{print, resolve, Output};
+use crate::{print, Globals};
 
-/// Render a node as an image. Writes bytes to `--out` or prints the source URL.
+/// Render a node as an image. Writes bytes to `--out` or prints the source
+/// URL. Accepts any qualified node id (`file:N:x:y`), a bare native id, or a
+/// Figma URL. File-level locators (`file:N`) screenshot the document root.
 #[derive(ClapArgs, Debug)]
 pub struct Args {
-    #[command(flatten)]
-    pub locator: LocatorArgs,
-
-    /// Page name (used with --frame).
-    #[arg(long)]
-    pub page: Option<String>,
-
-    /// Frame/node name to render.
-    #[arg(long)]
-    pub frame: Option<String>,
+    /// Tagged or native ID, or a Figma URL pointing at the node to render.
+    pub id: String,
 
     /// Output format.
     #[arg(long, value_enum, default_value_t = Format::Png)]
@@ -39,45 +32,51 @@ pub struct Args {
 }
 
 impl Args {
-    pub async fn run(self, cfg: &Configuration, format: Output) -> Result<()> {
-        let (file_key, url_node_id) = self.locator.resolve()?;
+    pub async fn run(self, cfg: &Configuration, globals: &Globals) -> Result<()> {
+        let resolver = Resolver::new(globals.cache_only)?;
+        let format = globals.output;
+        let id = parse_id(&self.id).map_err(|e| anyhow!("{e}"))?;
+        let target = resolver
+            .resolve(cfg, &id)
+            .await
+            .map_err(|e| render_resolve_error(e, format))?;
 
-        let target_id = if let Some(nid) = url_node_id
-            .or_else(|| self.locator.node_id.clone())
-        {
-            nid
-        } else {
-            // Resolve by name. We need to fetch the file to find the node id.
-            let file = fetch_file_json(cfg, &file_key, None).await?;
-            let doc = &file["document"];
-            let page_query = self.page.as_deref().ok_or_else(|| {
-                anyhow!("--page is required (or pin the target with --node-id/--url)")
-            })?;
-            let page = resolve::resolve_page(doc, page_query)
-                .ok_or_else(|| anyhow!("no page matching {page_query:?}"))?;
-            let node = match self.frame.as_deref() {
-                Some(q) => resolve::resolve_frame(page, q).ok_or_else(|| {
-                    anyhow!(
-                        "no frame matching {q:?} on page {:?}",
-                        crate::node::name(page).unwrap_or("")
-                    )
-                })?,
-                None => page,
-            };
-            id(node)
-                .ok_or_else(|| anyhow!("target node has no id"))?
-                .to_owned()
+        // For screenshot we always need (file_key, node_id). File-level
+        // targets fall back to the file's DOCUMENT id; ResolvedTarget::Root /
+        // ::Project are rejected — there's nothing to render at that level.
+        let (file_key, node_id, display_id) = match target {
+            ResolvedTarget::Node { file_synth, meta, node } => {
+                let node_id = node.id.clone();
+                let display_id = if node.id.is_empty() {
+                    format!("file:{file_synth}")
+                } else {
+                    format!("file:{file_synth}:{}", node.id)
+                };
+                (meta.file_key, node_id, display_id)
+            }
+            ResolvedTarget::File { synth, meta, document } => (
+                meta.file_key,
+                document.document.id,
+                format!("file:{synth}"),
+            ),
+            ResolvedTarget::Root | ResolvedTarget::Project { .. } => {
+                anyhow::bail!(
+                    "screenshot needs a node-level id (file:N:x:y, a bare x:y, or a Figma URL); got {}",
+                    self.id
+                );
+            }
         };
 
         match &self.out {
             Some(path) => {
                 let rendered =
-                    render::render_node(cfg, &file_key, &target_id, self.scale, self.img_format)
+                    render::render_node(cfg, &file_key, &node_id, self.scale, self.img_format)
                         .await?;
                 std::fs::write(path, &rendered.bytes)?;
                 let out = json!({
+                    "id": display_id,
                     "file_key": file_key,
-                    "node_id": target_id,
+                    "node_id": node_id,
                     "wrote": path.display().to_string(),
                     "bytes": rendered.bytes.len(),
                     "source_url": rendered.source_url,
@@ -88,18 +87,19 @@ impl Args {
                 let urls = render::render_urls(
                     cfg,
                     &file_key,
-                    std::slice::from_ref(&target_id),
+                    std::slice::from_ref(&node_id),
                     self.scale,
                     self.img_format,
                 )
                 .await?;
                 let url = urls
-                    .get(&target_id)
+                    .get(&node_id)
                     .cloned()
-                    .ok_or_else(|| anyhow!("Figma returned no URL for node {target_id}"))?;
+                    .ok_or_else(|| anyhow!("Figma returned no URL for node {node_id}"))?;
                 let out = json!({
+                    "id": display_id,
                     "file_key": file_key,
-                    "node_id": target_id,
+                    "node_id": node_id,
                     "url": url,
                 });
                 print(&out, format)

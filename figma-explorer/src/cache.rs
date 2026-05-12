@@ -293,7 +293,7 @@ pub struct FileMeta {
 }
 
 impl FileMeta {
-    fn from_success(
+    pub fn from_success(
         file_ref: &FileRef,
         payload: &CachedFile,
         bytes: u64,
@@ -712,6 +712,17 @@ async fn fetch_and_cache(
             let bytes = cache.write_file(file_key, &payload)?;
             let meta = FileMeta::from_success(&synthetic_ref, &payload, bytes, now);
             cache.write_meta(&meta)?;
+            // Intern synth IDs so downstream commands (`ls`, etc.) can render
+            // qualified `file:N:x:y` lines for this freshly cached file.
+            // Best-effort: a synth save failure logs and continues.
+            if let Err(e) = crate::synth::with_lock(cache, |s| {
+                if !meta.project_id.is_empty() {
+                    s.intern_project(&meta.project_id);
+                }
+                s.intern_file(&meta.file_key);
+            }) {
+                eprintln!("cache: synth intern failed for {file_key}: {e:#}");
+            }
             Ok(payload)
         }
         Err(e) => {
