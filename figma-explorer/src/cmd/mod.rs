@@ -8,7 +8,6 @@ pub mod cache;
 pub mod context;
 pub mod extract_assets;
 pub mod files;
-pub mod find;
 pub mod frames;
 pub mod pages;
 pub mod screenshot;
@@ -38,7 +37,7 @@ pub enum Command {
     Styles(styles::Args),
     /// Aggregate command: dump tree + screenshot + styles + assets for a frame.
     Context(context::Args),
-    /// Prime / refresh the local file cache (structural projection only).
+    /// Maintain the local file cache (prefetch / clear).
     Cache(cache::Args),
 }
 

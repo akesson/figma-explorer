@@ -1,24 +1,35 @@
 //! Local file cache.
 //!
-//! Stores a slimmed-down projection of each Figma file under `cache/files/`,
-//! plus a `manifest.json` keyed by file_key. The projection keeps only the
-//! fields the structural commands (`find`, `pages`, `frames`, `tree`,
-//! `search`) consume: `id`, `name`, `type`, `visible`, `absoluteBoundingBox`,
-//! and `children` recursively. Everything else — fills, strokes, effects,
-//! type styles, characters, layout grids, vector geometry — is dropped.
+//! Stores a slimmed-down projection of each Figma file under `files/`. Each
+//! file gets two pieces on disk:
 //!
-//! On-disk format per file: `[4-byte magic "FXC\0"][4-byte u32 LE version][rkyv body]`.
+//! - `files/{file_key}.rkyv` — rkyv-encoded `CachedFile` payload (structural
+//!   projection of the document). Present only when status is `Ok`.
+//! - `files/{file_key}.meta.json` — per-file sidecar with status, listing
+//!   metadata, and timestamps. Always present (the only way to remember
+//!   `Failed`/`NotExportable` markers between runs).
+//!
+//! On-disk payload format: `[4-byte magic "FXC\0"][4-byte u32 LE version][rkyv body]`.
 //! Magic catches "wrong kind of file" cases; version catches schema drift
-//! (silent refetch on mismatch). The body is an rkyv archive of `CachedFile`.
+//! (silent refetch on mismatch).
 //!
-//! The manifest stays JSON — small, infrequent writes, human-readable matters
-//! for debugging.
+//! Layout root is resolved via `dirs::cache_dir()` (e.g.
+//! `~/Library/Caches/figma-explorer/` on macOS), overridable via
+//! `FIGMA_EXPLORER_CACHE_DIR`. There is no central manifest — every piece of
+//! per-file state lives in its own `.meta.json` so concurrent writers touching
+//! different file_keys never share a write path.
+//!
+//! Multi-repo coexistence: each meta records the `project_id` that produced
+//! it. Operations that prune (`cache prefetch` invalidation) only touch metas
+//! whose `project_id` is in the current process's `FIGMA_PROJECTS_IDS`. Files
+//! claimed by other project sets are out of jurisdiction.
 //!
 //! Endianness: rkyv archives are not portable across endianness. This cache
 //! is single-user and local; we don't try to support shared/transferred
-//! cache directories.
+//! cache directories across machines.
 
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -33,7 +44,6 @@ use serde_json::Value;
 use crate::into_anyhow;
 use crate::node::Bounds;
 
-pub const DEFAULT_DIR: &str = "cache";
 pub const DEFAULT_TTL_SECS: u64 = 3600;
 
 /// 4-byte magic prefix on every `.rkyv` cache file. Distinguishes a cache
@@ -238,12 +248,7 @@ pub struct MmappedCache {
 
 impl MmappedCache {
     pub fn archived(&self) -> &rkyv::Archived<CachedFile> {
-        // Safety guaranteed by validated access at construction time —
-        // we re-validate here so callers can't accidentally bypass it.
         let body = &self.mmap[CACHE_HEADER_LEN..];
-        // SAFETY: header was validated in `MmappedCache::open`. Access
-        // unchecked here would be sound, but stay safe and re-validate so
-        // misuse is caught immediately.
         rkyv::access::<rkyv::Archived<CachedFile>, rancor::Error>(body)
             .expect("body validated at open")
     }
@@ -257,19 +262,27 @@ pub enum EntryStatus {
     /// Figma returned 403 "File not exportable" — typically community files.
     /// Skip on subsequent runs unless `last_modified` changes.
     NotExportable,
-    /// Transient failure. Retried on next run regardless of `last_modified`.
+    /// Transient failure. Retried on next access.
     Failed,
 }
 
+/// Per-file sidecar describing what we know about a cached file_key. Always
+/// present for any file_key we've tried to cache (even if the fetch failed).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ManifestEntry {
+pub struct FileMeta {
     pub file_key: String,
     pub name: String,
+    /// Project the file was claimed by at last successful listing. Empty when
+    /// the file was fetched via direct URL with no listing context.
     pub project_id: String,
     pub project_name: String,
-    /// `lastModified` from the project listing — drives invalidation.
+    /// `lastModified` from the project listing (or file response) — drives
+    /// invalidation.
     pub last_modified: String,
     pub cached_at_epoch: u64,
+    /// Last time we confirmed (via listing or fresh fetch) that this is the
+    /// current `last_modified`. TTL is measured from here.
+    pub last_listed_at_epoch: u64,
     pub status: EntryStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -279,10 +292,27 @@ pub struct ManifestEntry {
     pub bytes: Option<u64>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct Manifest {
-    pub updated_at_epoch: u64,
-    pub files: Vec<ManifestEntry>,
+impl FileMeta {
+    fn from_success(
+        file_ref: &FileRef,
+        payload: &CachedFile,
+        bytes: u64,
+        now: u64,
+    ) -> Self {
+        FileMeta {
+            file_key: payload.file_key.clone(),
+            name: payload.name.clone(),
+            project_id: file_ref.project_id.clone(),
+            project_name: file_ref.project_name.clone(),
+            last_modified: payload.last_modified.clone(),
+            cached_at_epoch: now,
+            last_listed_at_epoch: now,
+            status: EntryStatus::Ok,
+            error: None,
+            node_count: Some(payload.node_count as usize),
+            bytes: Some(bytes),
+        }
+    }
 }
 
 pub struct CacheDir {
@@ -295,44 +325,95 @@ impl CacheDir {
     }
 
     pub fn ensure(&self) -> Result<()> {
-        fs::create_dir_all(&self.root)
-            .with_context(|| format!("creating {}", self.root.display()))?;
-        fs::create_dir_all(self.root.join("files"))?;
+        fs::create_dir_all(self.files_dir())
+            .with_context(|| format!("creating {}", self.files_dir().display()))?;
         Ok(())
     }
 
-    pub fn manifest_path(&self) -> PathBuf {
-        self.root.join("manifest.json")
+    pub fn files_dir(&self) -> PathBuf {
+        self.root.join("files")
     }
 
     pub fn file_path(&self, file_key: &str) -> PathBuf {
-        self.root.join("files").join(format!("{file_key}.rkyv"))
+        self.files_dir().join(format!("{file_key}.rkyv"))
     }
 
-    pub fn read_manifest(&self) -> Result<Manifest> {
-        let p = self.manifest_path();
+    pub fn meta_path(&self, file_key: &str) -> PathBuf {
+        self.files_dir().join(format!("{file_key}.meta.json"))
+    }
+
+    pub fn read_meta(&self, file_key: &str) -> Result<Option<FileMeta>> {
+        let p = self.meta_path(file_key);
         if !p.exists() {
-            return Ok(Manifest::default());
+            return Ok(None);
         }
         let s = fs::read_to_string(&p).with_context(|| format!("reading {}", p.display()))?;
-        serde_json::from_str(&s).with_context(|| format!("parsing {}", p.display()))
+        let m = serde_json::from_str(&s).with_context(|| format!("parsing {}", p.display()))?;
+        Ok(Some(m))
     }
 
-    pub fn write_manifest(&self, m: &Manifest) -> Result<()> {
-        let s = serde_json::to_string_pretty(m)?;
-        let path = self.manifest_path();
-        // Same tempfile+rename trick as write_file — keeps a concurrent
-        // tree/find that's also rewriting the manifest from leaving a
-        // half-written file. Last-writer-wins is fine.
-        let tmp = path.with_extension("json.tmp");
-        fs::write(&tmp, &s).with_context(|| format!("writing {}", tmp.display()))?;
-        fs::rename(&tmp, &path).with_context(|| format!("renaming into {}", path.display()))?;
+    pub fn write_meta(&self, meta: &FileMeta) -> Result<()> {
+        let path = self.meta_path(&meta.file_key);
+        let bytes = serde_json::to_vec_pretty(meta)?;
+        atomic_write(&path, &bytes)
+    }
+
+    /// Delete `{file_key}.meta.json` first, then `{file_key}.rkyv`. The
+    /// ordering matters: readers seeing no meta treat the entry as uncached,
+    /// so a transient "meta gone but rkyv lingers" window is benign.
+    pub fn delete_entry(&self, file_key: &str) -> Result<()> {
+        let meta = self.meta_path(file_key);
+        let payload = self.file_path(file_key);
+        if meta.exists() {
+            fs::remove_file(&meta)
+                .with_context(|| format!("removing {}", meta.display()))?;
+        }
+        if payload.exists() {
+            fs::remove_file(&payload)
+                .with_context(|| format!("removing {}", payload.display()))?;
+        }
         Ok(())
     }
 
+    /// List every meta currently on disk. Used by `cache prefetch` (to
+    /// invalidate stale entries against a fresh listing) and `cache clear`
+    /// (to sweep orphans).
+    pub fn list_metas(&self) -> Result<Vec<FileMeta>> {
+        let dir = self.files_dir();
+        if !dir.exists() {
+            return Ok(Vec::new());
+        }
+        let mut out = Vec::new();
+        for entry in fs::read_dir(&dir).with_context(|| format!("reading {}", dir.display()))? {
+            let entry = entry?;
+            let path = entry.path();
+            let name = match path.file_name().and_then(|n| n.to_str()) {
+                Some(n) => n.to_owned(),
+                None => continue,
+            };
+            if !name.ends_with(".meta.json") {
+                continue;
+            }
+            let s = match fs::read_to_string(&path) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("cache: skipping unreadable meta {}: {e}", path.display());
+                    continue;
+                }
+            };
+            match serde_json::from_str::<FileMeta>(&s) {
+                Ok(m) => out.push(m),
+                Err(e) => {
+                    eprintln!("cache: skipping malformed meta {}: {e}", path.display());
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// Read a cached payload by file_key. Returns `Ok(None)` if no file exists.
-    /// `Err(CacheError::VersionMismatch)` signals a schema drift that the
-    /// caller should treat as a cache miss.
+    /// `Err(CacheError::VersionMismatch)` (and friends) signal corruption /
+    /// schema drift that the caller should treat as a cache miss.
     pub fn read_file(&self, file_key: &str) -> std::result::Result<Option<CachedFile>, CacheError> {
         let path = self.file_path(file_key);
         if !path.exists() {
@@ -357,9 +438,7 @@ impl CacheDir {
         let file = fs::File::open(&path)?;
         // SAFETY: the file is local and trusted; standard mmap caveats apply.
         let mmap = unsafe { Mmap::map(&file)? };
-        // Validate header up front; body is validated on first `archived()` call.
         let (_body, _ver) = split_header(&mmap)?;
-        // Pre-validate the rkyv body so subsequent `archived()` calls are cheap.
         let body = &mmap[CACHE_HEADER_LEN..];
         rkyv::access::<rkyv::Archived<CachedFile>, rancor::Error>(body)
             .map_err(|e| CacheError::Decode(format!("rkyv access: {e}")))?;
@@ -372,11 +451,26 @@ impl CacheDir {
     pub fn write_file(&self, file_key: &str, payload: &CachedFile) -> Result<u64> {
         let bytes = encode_cached_file(payload).map_err(|e| anyhow::anyhow!("{e}"))?;
         let path = self.file_path(file_key);
-        let tmp = path.with_extension("rkyv.tmp");
-        fs::write(&tmp, &bytes).with_context(|| format!("writing {}", tmp.display()))?;
-        fs::rename(&tmp, &path).with_context(|| format!("renaming into {}", path.display()))?;
+        atomic_write(&path, &bytes)?;
         Ok(bytes.len() as u64)
     }
+}
+
+/// Write `bytes` to `path` atomically: tempfile in the same directory, then
+/// rename. Crashes leave the previous file intact.
+fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("path has no parent: {}", path.display()))?;
+    fs::create_dir_all(parent)
+        .with_context(|| format!("creating {}", parent.display()))?;
+    let mut tmp = tempfile::NamedTempFile::new_in(parent)
+        .with_context(|| format!("creating tempfile in {}", parent.display()))?;
+    tmp.write_all(bytes)
+        .with_context(|| format!("writing tempfile for {}", path.display()))?;
+    tmp.persist(path)
+        .map_err(|e| anyhow::anyhow!("persisting {}: {}", path.display(), e))?;
+    Ok(())
 }
 
 pub fn now_epoch() -> u64 {
@@ -392,9 +486,21 @@ pub fn is_not_exportable_error(err: &str) -> bool {
     err.contains("403") && err.to_lowercase().contains("not exportable")
 }
 
-/// Resolve the default cache dir, anchored at the working directory.
+/// Resolve the cache root.
+///
+/// Precedence: `FIGMA_EXPLORER_CACHE_DIR` env, then `dirs::cache_dir()`
+/// (e.g. `~/Library/Caches/figma-explorer/`), with a final fallback to a
+/// CWD-local `cache/` directory for headless environments where neither
+/// works.
 pub fn default_dir() -> PathBuf {
-    Path::new(DEFAULT_DIR).to_path_buf()
+    if let Ok(s) = std::env::var("FIGMA_EXPLORER_CACHE_DIR") {
+        if !s.is_empty() {
+            return PathBuf::from(s);
+        }
+    }
+    dirs::cache_dir()
+        .map(|d| d.join("figma-explorer"))
+        .unwrap_or_else(|| PathBuf::from("cache"))
 }
 
 /// One row from the Figma project listing — what `get_project_files` returns,
@@ -441,41 +547,6 @@ pub async fn list_project_files(
     Ok(out)
 }
 
-/// What `load_file` should do given the current manifest state. Factored out
-/// so the pure decision logic can be unit-tested without any I/O.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LoadAction {
-    /// No manifest entry exists — bypass cache, fetch live, don't write.
-    Bypass,
-    /// Manifest entry exists and is fresh; just read from disk.
-    UseCache,
-    /// Manifest entry exists but TTL expired, payload missing, or version
-    /// drifted — re-list projects, compare `last_modified`, refetch this
-    /// file if changed.
-    CheckFreshness,
-}
-
-pub fn decide_action(
-    has_entry: bool,
-    manifest_updated_at: u64,
-    now: u64,
-    ttl_secs: u64,
-    payload_exists: bool,
-) -> LoadAction {
-    if !has_entry {
-        return LoadAction::Bypass;
-    }
-    if !payload_exists {
-        return LoadAction::CheckFreshness;
-    }
-    let elapsed = now.saturating_sub(manifest_updated_at);
-    if elapsed >= ttl_secs {
-        LoadAction::CheckFreshness
-    } else {
-        LoadAction::UseCache
-    }
-}
-
 fn parse_project_ids_env() -> Vec<String> {
     std::env::var("FIGMA_PROJECTS_IDS")
         .ok()
@@ -505,219 +576,275 @@ pub fn build_cached_file(file_ref: &FileRef, raw_document: &Value, now: u64) -> 
     }
 }
 
-/// Refetch a file, restrip, and update both the on-disk payload and the
-/// manifest entry. Returns the new payload on success.
-async fn refetch_and_store(
-    cfg: &Configuration,
-    cache: &CacheDir,
-    manifest: &mut Manifest,
-    idx: usize,
-    file_ref: &FileRef,
-    now: u64,
-) -> Result<CachedFile> {
-    let file = crate::cmd::fetch_file_json(cfg, &file_ref.file_key, None).await?;
-    let payload = build_cached_file(file_ref, &file["document"], now);
-    let bytes = cache.write_file(&file_ref.file_key, &payload)?;
-    let entry = &mut manifest.files[idx];
-    entry.name = file_ref.name.clone();
-    entry.project_id = file_ref.project_id.clone();
-    entry.project_name = file_ref.project_name.clone();
-    entry.last_modified = file_ref.last_modified.clone();
-    entry.cached_at_epoch = now;
-    entry.status = EntryStatus::Ok;
-    entry.error = None;
-    entry.node_count = Some(payload.node_count as usize);
-    entry.bytes = Some(bytes);
-    Ok(payload)
+/// Outcome of `load_file`'s freshness decision over a `FileMeta`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoadAction {
+    /// Meta is fresh and status=Ok — serve the cached payload directly.
+    UseCache,
+    /// Meta says NotExportable and is still fresh — surface the cached error
+    /// without burning an API call.
+    NotExportableCached,
+    /// Either there's no meta, TTL expired, or the cached status is Failed —
+    /// caller should attempt a refresh (single-project listing if possible)
+    /// and then a live fetch.
+    Refresh,
 }
 
-/// Best-effort freshness check + lazy refetch for `file_key`. Mutates the
-/// manifest in place (and rewrites it to disk) but never returns the
-/// refreshed payload — the outer `load_file` re-reads from disk so the
-/// success and stale-fallback paths share the same return code.
+pub fn decide_action(
+    meta: Option<&FileMeta>,
+    payload_exists: bool,
+    now: u64,
+    ttl_secs: u64,
+) -> LoadAction {
+    let Some(m) = meta else {
+        return LoadAction::Refresh;
+    };
+    let elapsed = now.saturating_sub(m.last_listed_at_epoch);
+    let fresh = elapsed < ttl_secs;
+    match m.status {
+        EntryStatus::Ok if fresh && payload_exists => LoadAction::UseCache,
+        EntryStatus::NotExportable if fresh => LoadAction::NotExportableCached,
+        _ => LoadAction::Refresh,
+    }
+}
+
+/// Attempt to refresh a single file_key via a one-project listing.
 ///
-/// Failures log to stderr and leave the cache untouched. Listing failures
-/// don't bump `updated_at_epoch`, so the next call will retry.
-async fn try_refresh(
+/// Returns:
+/// - `Ok(Some(payload))` — we successfully refetched or confirmed the cached
+///   payload is current; payload is returned.
+/// - `Ok(None)` — listing was attempted but didn't yield a decision (file
+///   absent from the project, or marker meta confirmed unchanged). The
+///   caller should fall back to serving stale or fetching live.
+/// - `Err(e)` — propagate a hard error (e.g. NotExportable that the caller
+///   should surface to the user).
+async fn try_refresh_single(
     cfg: &Configuration,
     cache: &CacheDir,
-    manifest: &mut Manifest,
     file_key: &str,
-    idx: usize,
+    project_id: &str,
+    meta: Option<&FileMeta>,
     now: u64,
-) {
-    let project_ids = parse_project_ids_env();
-    if project_ids.is_empty() {
-        eprintln!(
-            "cache: TTL expired but FIGMA_PROJECTS_IDS unset — serving cached entry for {file_key}"
-        );
-        return;
-    }
-
-    let listings = match list_project_files(cfg, &project_ids).await {
+) -> Result<Option<CachedFile>> {
+    let listings = match list_project_files(cfg, std::slice::from_ref(&project_id.to_owned())).await
+    {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("cache: freshness check failed: {e:#} — serving cached entry for {file_key}");
-            return;
+            eprintln!("cache: freshness check failed for {file_key}: {e:#} — serving stale");
+            return Ok(None);
         }
     };
 
-    let current = match listings.iter().find(|f| f.file_key == file_key) {
-        Some(c) => c.clone(),
-        None => {
-            eprintln!(
-                "cache: file {file_key} no longer present in any configured project — serving cached entry"
-            );
-            // Listing itself succeeded, so the global timestamp is current.
-            manifest.updated_at_epoch = now;
-            let _ = cache.write_manifest(manifest);
-            return;
-        }
+    let Some(current) = listings.into_iter().find(|f| f.file_key == file_key) else {
+        // File no longer in the project listing — out of jurisdiction for
+        // automatic deletion (that's `cache prefetch`'s job). Serve stale.
+        return Ok(None);
     };
 
-    let cached_unchanged = manifest.files[idx].last_modified == current.last_modified;
-    let cached_status = manifest.files[idx].status;
-    // If the on-disk payload is corrupt or version-mismatched, force a refetch
-    // even when the listing says nothing changed.
+    let cached_unchanged = meta.is_some_and(|m| m.last_modified == current.last_modified);
+    let cached_status = meta.map(|m| m.status).unwrap_or(EntryStatus::Failed);
     let payload_readable = matches!(cache.read_file(file_key), Ok(Some(_)));
 
-    // Listing fetched OK — even if nothing changed, our knowledge of "what's
-    // current" is now fresh; bump the global timestamp.
-    manifest.updated_at_epoch = now;
-
     if cached_unchanged && cached_status == EntryStatus::Ok && payload_readable {
-        let _ = cache.write_manifest(manifest);
-        return;
-    }
-    if cached_unchanged && cached_status == EntryStatus::NotExportable {
-        // Don't burn an API call refetching a known not-exportable file
-        // whose timestamp hasn't moved.
-        let _ = cache.write_manifest(manifest);
-        return;
+        // Bump last_listed_at to reset TTL window.
+        if let Some(m) = meta {
+            let mut updated = m.clone();
+            updated.last_listed_at_epoch = now;
+            // Keep project info fresh from the listing in case it drifted.
+            updated.project_name = current.project_name.clone();
+            updated.name = current.name.clone();
+            let _ = cache.write_meta(&updated);
+        }
+        return cache
+            .read_file(file_key)
+            .map_err(|e| anyhow::anyhow!("{e}"));
     }
 
-    // Either the file changed, we previously failed to fetch it, or the
-    // on-disk payload is unreadable (corrupt / version drift). Try again.
-    match refetch_and_store(cfg, cache, manifest, idx, &current, now).await {
-        Ok(_) => {
-            let entry = &manifest.files[idx];
-            eprintln!(
-                "cache: refreshed {} ({}, {} nodes, {} KB)",
-                entry.file_key,
-                entry.name,
-                entry.node_count.unwrap_or(0),
-                entry.bytes.unwrap_or(0) / 1024
-            );
-            let _ = cache.write_manifest(manifest);
+    if cached_unchanged && cached_status == EntryStatus::NotExportable {
+        // Known-bad community file, timestamp unchanged — don't burn an API
+        // call. Bump listed_at to silence the TTL until next change.
+        if let Some(m) = meta {
+            let mut updated = m.clone();
+            updated.last_listed_at_epoch = now;
+            let _ = cache.write_meta(&updated);
+        }
+        anyhow::bail!("file {file_key} is not exportable (cached marker, unchanged on Figma)");
+    }
+
+    // Either last_modified changed, prior status was Failed, or payload is
+    // unreadable — refetch.
+    Ok(Some(fetch_and_cache(cfg, cache, file_key, Some(&current), now).await?))
+}
+
+/// Live fetch + write to cache. `file_ref` carries project context when we
+/// have a listing in hand; without it we record `project_id=""` (direct-URL
+/// access outside any configured project).
+async fn fetch_and_cache(
+    cfg: &Configuration,
+    cache: &CacheDir,
+    file_key: &str,
+    file_ref: Option<&FileRef>,
+    now: u64,
+) -> Result<CachedFile> {
+    match crate::cmd::fetch_file_json(cfg, file_key, None).await {
+        Ok(file) => {
+            let last_modified = file
+                .get("lastModified")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned();
+            let name = file
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned();
+            let (project_id, project_name) = file_ref
+                .map(|fr| (fr.project_id.clone(), fr.project_name.clone()))
+                .unwrap_or_default();
+            let synthetic_ref = FileRef {
+                file_key: file_key.to_owned(),
+                name: name.clone(),
+                last_modified: last_modified.clone(),
+                project_id,
+                project_name,
+            };
+            let payload = build_cached_file(&synthetic_ref, &file["document"], now);
+            let bytes = cache.write_file(file_key, &payload)?;
+            let meta = FileMeta::from_success(&synthetic_ref, &payload, bytes, now);
+            cache.write_meta(&meta)?;
+            Ok(payload)
         }
         Err(e) => {
             let msg = format!("{e:#}");
-            eprintln!("cache: refetch of {file_key} failed: {msg} — serving stale cached payload");
-            let entry = &mut manifest.files[idx];
-            entry.status = if is_not_exportable_error(&msg) {
+            let status = if is_not_exportable_error(&msg) {
                 EntryStatus::NotExportable
             } else {
                 EntryStatus::Failed
             };
-            entry.error = Some(msg);
-            let _ = cache.write_manifest(manifest);
+            // Record a marker meta so subsequent loads don't keep retrying
+            // NotExportable on every call.
+            let (project_id, project_name, name, last_modified) = file_ref
+                .map(|fr| {
+                    (
+                        fr.project_id.clone(),
+                        fr.project_name.clone(),
+                        fr.name.clone(),
+                        fr.last_modified.clone(),
+                    )
+                })
+                .unwrap_or_default();
+            let marker = FileMeta {
+                file_key: file_key.to_owned(),
+                name,
+                project_id,
+                project_name,
+                last_modified,
+                cached_at_epoch: now,
+                last_listed_at_epoch: now,
+                status,
+                error: Some(msg.clone()),
+                node_count: None,
+                bytes: None,
+            };
+            // Also drop any stale payload — meta-first ordering.
+            let _ = cache.delete_entry(file_key);
+            let _ = cache.write_meta(&marker);
+            Err(e)
         }
     }
 }
 
-/// Cache-first loader for the four structural commands.
+/// Cache-first loader for the structural commands.
 ///
-/// - If the file is in the manifest, within TTL, and the on-disk payload is
-///   readable: returns it.
-/// - If TTL expired, the payload file is missing, or the schema version on
-///   disk drifted from the build's `CACHE_SCHEMA_VERSION`: re-queries
-///   project listings; refetches the file when its `last_modified` advanced
-///   or the on-disk payload is unreadable.
-/// - If the file isn't in the manifest at all: falls through to a live fetch
-///   that's projected on the fly (the cache is scoped to
-///   `FIGMA_PROJECTS_IDS` — random external files don't belong in it).
+/// Flow (see plan):
+/// 1. Read meta. If fresh + Ok + payload present → return.
+/// 2. If meta says NotExportable and is fresh → return the cached error.
+/// 3. If TTL expired and `meta.project_id ∈ FIGMA_PROJECTS_IDS` → list that
+///    one project, decide refetch vs. serve-stale vs. confirm-current.
+/// 4. Otherwise → fetch live. The fetch always writes meta+payload (or a
+///    failure marker meta on error).
+/// 5. Rkyv corruption / version mismatch is treated as a cache miss: the
+///    entry is deleted and we fall through to refetch.
 pub async fn load_file(cfg: &Configuration, file_key: &str) -> Result<CachedFile> {
     let cache = CacheDir::new(default_dir());
     cache.ensure()?;
-    let mut manifest = cache.read_manifest()?;
     let now = now_epoch();
+    let mut meta = cache.read_meta(file_key).ok().flatten();
 
-    let idx = manifest.files.iter().position(|e| e.file_key == file_key);
-    let payload_exists = cache.file_path(file_key).exists();
-    let action = decide_action(
-        idx.is_some(),
-        manifest.updated_at_epoch,
-        now,
-        DEFAULT_TTL_SECS,
-        payload_exists,
-    );
-
-    match action {
-        LoadAction::Bypass => fetch_and_project(cfg, file_key, None).await,
-        LoadAction::UseCache => match cache.read_file(file_key) {
-            Ok(Some(v)) => Ok(v),
-            Ok(None) => fetch_and_project(cfg, file_key, None).await,
-            // Version drift on the on-disk payload — fall through to refetch.
-            Err(CacheError::VersionMismatch { .. }) | Err(CacheError::TooShort { .. }) => {
-                let i = idx.expect("UseCache implies manifest entry");
-                try_refresh(cfg, &cache, &mut manifest, file_key, i, now).await;
-                match cache.read_file(file_key) {
-                    Ok(Some(v)) => Ok(v),
-                    _ => fetch_and_project(cfg, file_key, None).await,
-                }
-            }
-            Err(e) => Err(anyhow::anyhow!("{e}")),
-        },
-        LoadAction::CheckFreshness => {
-            // idx is Some by construction of LoadAction
-            let i = idx.expect("CheckFreshness implies manifest entry");
-            try_refresh(cfg, &cache, &mut manifest, file_key, i, now).await;
-            match cache.read_file(file_key) {
-                Ok(Some(v)) => Ok(v),
-                _ => fetch_and_project(cfg, file_key, None).await,
+    // Sanity sweep: if meta claims Ok but payload is missing or corrupt,
+    // drop the entry so the freshness decision doesn't try to serve junk.
+    if let Some(m) = &meta {
+        if m.status == EntryStatus::Ok {
+            let payload_path = cache.file_path(file_key);
+            if !payload_path.exists() {
+                let _ = cache.delete_entry(file_key);
+                meta = None;
+            } else if let Err(
+                CacheError::VersionMismatch { .. }
+                | CacheError::BadMagic { .. }
+                | CacheError::TooShort { .. }
+                | CacheError::Decode(_),
+            ) = cache.read_file(file_key)
+            {
+                let _ = cache.delete_entry(file_key);
+                meta = None;
             }
         }
     }
-}
 
-/// Live fetch with on-the-fly projection. Used when the file isn't in the
-/// manifest (bypass) or as a fall-through after a failed refresh. Returns a
-/// `CachedFile` with no `cached_at_epoch` meaning (set to `now_epoch()`) and
-/// empty listing metadata so downstream consumers can treat it uniformly.
-async fn fetch_and_project(
-    cfg: &Configuration,
-    file_key: &str,
-    depth: Option<f64>,
-) -> Result<CachedFile> {
-    let file = crate::cmd::fetch_file_json(cfg, file_key, depth).await?;
-    let name = file
-        .get("name")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_owned();
-    let last_modified = file
-        .get("lastModified")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_owned();
-    let document = project_to_cache(&file["document"]);
-    let node_count = count_nodes(&document) as u64;
-    Ok(CachedFile {
-        file_key: file_key.to_owned(),
-        name,
-        project_id: String::new(),
-        project_name: String::new(),
-        last_modified,
-        cached_at_epoch: now_epoch(),
-        node_count,
-        document,
-    })
+    let payload_exists = cache.file_path(file_key).exists();
+    match decide_action(meta.as_ref(), payload_exists, now, DEFAULT_TTL_SECS) {
+        LoadAction::UseCache => {
+            return cache
+                .read_file(file_key)
+                .map_err(|e| anyhow::anyhow!("{e}"))?
+                .ok_or_else(|| anyhow::anyhow!("cache: meta says Ok but payload vanished mid-read"));
+        }
+        LoadAction::NotExportableCached => {
+            let err = meta
+                .as_ref()
+                .and_then(|m| m.error.clone())
+                .unwrap_or_else(|| "file marked not exportable".to_owned());
+            anyhow::bail!("{err}");
+        }
+        LoadAction::Refresh => { /* fall through */ }
+    }
+
+    // Refresh path. Prefer a single-project listing when we have a project
+    // hint that matches the user's env — that's cheaper than a blind refetch
+    // and lets us preserve the cache entry when last_modified is unchanged.
+    let env_projects = parse_project_ids_env();
+    let project_hint = meta
+        .as_ref()
+        .map(|m| m.project_id.as_str())
+        .unwrap_or("");
+    if !project_hint.is_empty() && env_projects.iter().any(|p| p == project_hint) {
+        match try_refresh_single(cfg, &cache, file_key, project_hint, meta.as_ref(), now).await {
+            Ok(Some(payload)) => return Ok(payload),
+            Ok(None) => {
+                // No decision possible. Serve stale if we have an Ok payload.
+                if let Some(m) = &meta {
+                    if m.status == EntryStatus::Ok {
+                        if let Ok(Some(v)) = cache.read_file(file_key) {
+                            return Ok(v);
+                        }
+                    }
+                }
+                // Otherwise fall through to live fetch.
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
+    // Final fallback: blind live fetch (cold load, or refresh fell through).
+    fetch_and_cache(cfg, &cache, file_key, None, now).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+    use tempfile::TempDir;
 
     #[test]
     fn project_keeps_structural_fields_drops_paint() {
@@ -746,8 +873,6 @@ mod tests {
         assert_eq!(s.children[0].name, "Title");
         assert!(s.children[0].visible);
         assert!(!s.children[1].visible);
-        // The CacheNode is a struct, so paint/character fields don't exist —
-        // the projection drops them by construction.
     }
 
     #[test]
@@ -795,49 +920,66 @@ mod tests {
         assert!(!is_not_exportable_error("HTTP request failed: timeout"));
     }
 
+    fn ok_meta(now: u64, listed_at: u64) -> FileMeta {
+        FileMeta {
+            file_key: "K".into(),
+            name: "n".into(),
+            project_id: "10".into(),
+            project_name: "P".into(),
+            last_modified: "ts".into(),
+            cached_at_epoch: now,
+            last_listed_at_epoch: listed_at,
+            status: EntryStatus::Ok,
+            error: None,
+            node_count: Some(1),
+            bytes: Some(100),
+        }
+    }
+
     #[test]
-    fn decide_action_no_entry_bypasses() {
-        assert_eq!(
-            decide_action(false, 0, 0, 3600, false),
-            LoadAction::Bypass
-        );
+    fn decide_action_no_meta_refreshes() {
+        assert_eq!(decide_action(None, false, 0, 3600), LoadAction::Refresh);
     }
 
     #[test]
     fn decide_action_within_ttl_uses_cache() {
-        // now=1000, manifest_updated=500, ttl=3600 → 500s elapsed, fresh.
+        let m = ok_meta(0, 500);
+        assert_eq!(decide_action(Some(&m), true, 1000, 3600), LoadAction::UseCache);
+    }
+
+    #[test]
+    fn decide_action_ttl_expired_refreshes() {
+        let m = ok_meta(0, 1000);
+        assert_eq!(decide_action(Some(&m), true, 6000, 3600), LoadAction::Refresh);
+    }
+
+    #[test]
+    fn decide_action_missing_payload_forces_refresh() {
+        let m = ok_meta(0, 500);
+        assert_eq!(decide_action(Some(&m), false, 1000, 3600), LoadAction::Refresh);
+    }
+
+    #[test]
+    fn decide_action_not_exportable_within_ttl_surfaces_error() {
+        let mut m = ok_meta(0, 500);
+        m.status = EntryStatus::NotExportable;
         assert_eq!(
-            decide_action(true, 500, 1000, 3600, true),
-            LoadAction::UseCache
+            decide_action(Some(&m), false, 1000, 3600),
+            LoadAction::NotExportableCached
         );
     }
 
     #[test]
-    fn decide_action_ttl_expired_checks_freshness() {
-        // 5000s elapsed against a 3600s TTL.
-        assert_eq!(
-            decide_action(true, 1000, 6000, 3600, true),
-            LoadAction::CheckFreshness
-        );
-    }
-
-    #[test]
-    fn decide_action_missing_payload_forces_check_even_if_fresh() {
-        // Fresh manifest but payload deleted from disk — must refresh
-        // rather than serve a hole.
-        assert_eq!(
-            decide_action(true, 500, 1000, 3600, false),
-            LoadAction::CheckFreshness
-        );
+    fn decide_action_failed_status_always_refreshes() {
+        let mut m = ok_meta(0, 500);
+        m.status = EntryStatus::Failed;
+        assert_eq!(decide_action(Some(&m), false, 1000, 3600), LoadAction::Refresh);
     }
 
     #[test]
     fn decide_action_boundary_ttl_treated_as_expired() {
-        // Exactly at TTL should refresh (>= comparison).
-        assert_eq!(
-            decide_action(true, 0, 3600, 3600, true),
-            LoadAction::CheckFreshness
-        );
+        let m = ok_meta(0, 0);
+        assert_eq!(decide_action(Some(&m), true, 3600, 3600), LoadAction::Refresh);
     }
 
     fn leaf(id: &str, name: &str, type_: &str) -> CacheNode {
@@ -901,7 +1043,6 @@ mod tests {
     fn version_mismatch_is_typed_error() {
         let original = sample_cached_file();
         let mut bytes = encode_cached_file(&original).unwrap();
-        // Bump the on-disk version to something the build won't recognize.
         bytes[4..8].copy_from_slice(&(CACHE_SCHEMA_VERSION + 1).to_le_bytes());
         match decode_cached_file(&bytes) {
             Err(CacheError::VersionMismatch { found, expected }) => {
@@ -929,5 +1070,142 @@ mod tests {
             Err(CacheError::TooShort { len }) => assert_eq!(len, 3),
             other => panic!("expected TooShort, got {other:?}"),
         }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Filesystem integration tests (tempdir-scoped CacheDir)
+    // ─────────────────────────────────────────────────────────────────────
+
+    fn meta_for(file_key: &str, project_id: &str, last_modified: &str, now: u64) -> FileMeta {
+        FileMeta {
+            file_key: file_key.into(),
+            name: "x".into(),
+            project_id: project_id.into(),
+            project_name: "P".into(),
+            last_modified: last_modified.into(),
+            cached_at_epoch: now,
+            last_listed_at_epoch: now,
+            status: EntryStatus::Ok,
+            error: None,
+            node_count: Some(1),
+            bytes: Some(1),
+        }
+    }
+
+    #[test]
+    fn write_and_read_meta_roundtrip() {
+        let td = TempDir::new().unwrap();
+        let cache = CacheDir::new(td.path());
+        cache.ensure().unwrap();
+        let m = meta_for("abc", "10", "ts1", 42);
+        cache.write_meta(&m).unwrap();
+        let back = cache.read_meta("abc").unwrap().unwrap();
+        assert_eq!(back.file_key, "abc");
+        assert_eq!(back.project_id, "10");
+        assert_eq!(back.last_modified, "ts1");
+        assert_eq!(back.status, EntryStatus::Ok);
+    }
+
+    #[test]
+    fn write_and_read_payload_roundtrip() {
+        let td = TempDir::new().unwrap();
+        let cache = CacheDir::new(td.path());
+        cache.ensure().unwrap();
+        let payload = sample_cached_file();
+        let bytes = cache.write_file("K", &payload).unwrap();
+        assert!(bytes > 0);
+        let read = cache.read_file("K").unwrap().unwrap();
+        assert_eq!(read, payload);
+    }
+
+    #[test]
+    fn delete_entry_removes_both_meta_and_payload() {
+        let td = TempDir::new().unwrap();
+        let cache = CacheDir::new(td.path());
+        cache.ensure().unwrap();
+        let payload = sample_cached_file();
+        cache.write_file("K", &payload).unwrap();
+        cache.write_meta(&meta_for("K", "10", "ts", 42)).unwrap();
+        assert!(cache.meta_path("K").exists());
+        assert!(cache.file_path("K").exists());
+
+        cache.delete_entry("K").unwrap();
+        assert!(!cache.meta_path("K").exists());
+        assert!(!cache.file_path("K").exists());
+    }
+
+    #[test]
+    fn delete_entry_is_idempotent() {
+        let td = TempDir::new().unwrap();
+        let cache = CacheDir::new(td.path());
+        cache.ensure().unwrap();
+        // Deleting nothing should not error.
+        cache.delete_entry("never-existed").unwrap();
+    }
+
+    #[test]
+    fn list_metas_returns_all_sidecars_skipping_payloads() {
+        let td = TempDir::new().unwrap();
+        let cache = CacheDir::new(td.path());
+        cache.ensure().unwrap();
+        cache.write_meta(&meta_for("A", "10", "t", 1)).unwrap();
+        cache.write_meta(&meta_for("B", "20", "t", 1)).unwrap();
+        // Drop a stray rkyv file with no matching meta — list_metas must
+        // ignore it (it's an orphan payload, not a meta).
+        cache.write_file("C", &sample_cached_file()).unwrap();
+
+        let mut metas = cache.list_metas().unwrap();
+        metas.sort_by(|a, b| a.file_key.cmp(&b.file_key));
+        assert_eq!(metas.len(), 2);
+        assert_eq!(metas[0].file_key, "A");
+        assert_eq!(metas[1].file_key, "B");
+    }
+
+    #[test]
+    fn list_metas_skips_malformed_json() {
+        let td = TempDir::new().unwrap();
+        let cache = CacheDir::new(td.path());
+        cache.ensure().unwrap();
+        cache.write_meta(&meta_for("A", "10", "t", 1)).unwrap();
+        // Drop a garbage .meta.json.
+        fs::write(
+            cache.files_dir().join("BROKEN.meta.json"),
+            "not valid json {",
+        )
+        .unwrap();
+
+        let metas = cache.list_metas().unwrap();
+        assert_eq!(metas.len(), 1);
+        assert_eq!(metas[0].file_key, "A");
+    }
+
+    #[test]
+    fn default_dir_respects_env_override() {
+        let prev = std::env::var("FIGMA_EXPLORER_CACHE_DIR").ok();
+        std::env::set_var("FIGMA_EXPLORER_CACHE_DIR", "/tmp/figma-explorer-test-cache");
+        assert_eq!(default_dir(), PathBuf::from("/tmp/figma-explorer-test-cache"));
+        match prev {
+            Some(v) => std::env::set_var("FIGMA_EXPLORER_CACHE_DIR", v),
+            None => std::env::remove_var("FIGMA_EXPLORER_CACHE_DIR"),
+        }
+    }
+
+    #[test]
+    fn write_meta_is_atomic_no_tmp_left_behind() {
+        let td = TempDir::new().unwrap();
+        let cache = CacheDir::new(td.path());
+        cache.ensure().unwrap();
+        cache.write_meta(&meta_for("K", "10", "t", 1)).unwrap();
+
+        let entries: Vec<_> = fs::read_dir(cache.files_dir())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(entries.iter().any(|n| n == "K.meta.json"));
+        assert!(
+            !entries.iter().any(|n| n.contains(".tmp")),
+            "found stray tempfile: {entries:?}"
+        );
     }
 }
