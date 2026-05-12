@@ -18,6 +18,7 @@ use anyhow::Result;
 use clap::Args as ClapArgs;
 use figma_api::apis::configuration::Configuration;
 use serde_json::{json, Value};
+use std::collections::BTreeSet;
 
 use crate::cache::{CacheNode, EntryStatus, FileMeta};
 use crate::id::Id;
@@ -31,6 +32,46 @@ use crate::{print, Globals, Output};
 /// means file (depth 0), canvases (depth 1), and so on.
 const DEFAULT_DEPTH: usize = 3;
 
+/// Default canvas names hidden from listings unless `--no-ignore` is passed.
+/// Case-insensitive match against CANVAS-type nodes only. These names are
+/// designer conventions for cover pages, in-progress work, and archived
+/// versions — noise when browsing for real product surfaces. The cache still
+/// stores them, so drilling in (`ls file:N:0:5`) and other commands work.
+const DEFAULT_IGNORED_CANVASES: &[&str] = &["Cover", "WIP", "Archive"];
+
+/// Returns the canonical (cased) ignore-list name for `node` when it matches,
+/// or `None` otherwise. The returned name comes from `DEFAULT_IGNORED_CANVASES`
+/// rather than the node, so reports display "WIP" consistently regardless of
+/// whether the designer wrote "wip", "WIP", or "Wip".
+fn ignored_canvas_label(node: &CacheNode) -> Option<&'static str> {
+    if node.type_ != "CANVAS" {
+        return None;
+    }
+    DEFAULT_IGNORED_CANVASES
+        .iter()
+        .copied()
+        .find(|n| n.eq_ignore_ascii_case(&node.name))
+}
+
+/// Emit the one-line YAML/text transparency note when the filter actually
+/// fired. Stays silent when nothing was hidden (clean listings) or when
+/// `--no-ignore` disabled the filter (no names ever accumulated).
+fn print_hidden_comment(hidden: &BTreeSet<&'static str>) {
+    if hidden.is_empty() {
+        return;
+    }
+    let names = hidden.iter().copied().collect::<Vec<_>>().join(", ");
+    let label = if hidden.len() == 1 { "canvas" } else { "canvases" };
+    println!("# hidden {label}: {names} — use --no-ignore to show");
+}
+
+/// Build the JSON shape for the top-level `ignored` field. Always emitted by
+/// JSON callers (stable schema for consumers) — possibly with an empty array.
+fn ignored_json(hidden: &BTreeSet<&'static str>) -> Value {
+    let canvases: Vec<Value> = hidden.iter().map(|n| json!(n)).collect();
+    json!({ "canvases": canvases })
+}
+
 /// List a node and its descendants. Honors `--depth` (default 3) at every
 /// level — root, project, file, and node alike.
 #[derive(ClapArgs, Debug)]
@@ -41,6 +82,12 @@ pub struct Args {
     /// Override the default descent depth.
     #[arg(long)]
     pub depth: Option<usize>,
+
+    /// Disable the default canvas-name ignore filter — show Cover/WIP/Archive
+    /// canvases that are hidden by default. The cache always stores them;
+    /// this flag only affects display.
+    #[arg(long)]
+    pub no_ignore: bool,
 }
 
 impl Args {
@@ -49,8 +96,9 @@ impl Args {
         let format = globals.output;
         let depth = self.depth.unwrap_or(DEFAULT_DEPTH);
 
+        let show_all = self.no_ignore;
         match self.id.as_deref() {
-            None => render_root(&resolver, depth, format),
+            None => render_root(&resolver, depth, format, show_all),
             Some(s) => {
                 let id = parse_id(s).map_err(|e| anyhow::anyhow!("{e}"))?;
                 // Promote a bare native id to a qualified one when --in
@@ -63,14 +111,17 @@ impl Args {
                     .await
                     .map_err(|e| render_resolve_error(e, format))?;
                 match target {
-                    ResolvedTarget::Root => render_root(&resolver, depth, format),
+                    ResolvedTarget::Root => render_root(&resolver, depth, format, show_all),
                     ResolvedTarget::Project { synth, project_id } => {
-                        render_project(&resolver, synth, &project_id, depth, format)
+                        render_project(&resolver, synth, &project_id, depth, format, show_all)
                     }
                     ResolvedTarget::File { synth, meta, document } => {
-                        render_file(synth, &meta, &document.document, depth, format)
+                        render_file(synth, &meta, &document.document, depth, format, show_all)
                     }
                     ResolvedTarget::Node { file_synth, meta, node } => {
+                        // Filter intentionally does not apply when the user has
+                        // already drilled into a specific node — drilling in is
+                        // explicit, the filter is for browsing.
                         render_node_subtree(file_synth, &meta, &node, depth, format)
                     }
                 }
@@ -84,7 +135,7 @@ impl Args {
 /// the cache; files whose payload is missing or fails to decode are emitted
 /// as a file row only (no descent), so a partially populated cache still
 /// produces useful output.
-fn render_root(resolver: &Resolver, depth: usize, format: Output) -> Result<()> {
+fn render_root(resolver: &Resolver, depth: usize, format: Output, show_all: bool) -> Result<()> {
     let synth = resolver.synth();
     let metas = resolver.cache().list_metas()?;
 
@@ -106,6 +157,8 @@ fn render_root(resolver: &Resolver, depth: usize, format: Output) -> Result<()> 
     }
     groups.sort_by_key(|(s, _, _, _)| *s);
 
+    let mut hidden: BTreeSet<&'static str> = BTreeSet::new();
+
     match format {
         Output::Yaml => {
             let mut rows: Vec<Row> = Vec::new();
@@ -126,11 +179,21 @@ fn render_root(resolver: &Resolver, depth: usize, format: Output) -> Result<()> 
                             fm.name.clone(),
                         ));
                         if depth >= 2 {
-                            append_descent_rows(resolver, fsynth, fm, depth, 1, &mut rows);
+                            append_descent_rows(
+                                resolver,
+                                fsynth,
+                                fm,
+                                depth,
+                                1,
+                                &mut rows,
+                                show_all,
+                                &mut hidden,
+                            );
                         }
                     }
                 }
             }
+            print_hidden_comment(&hidden);
             print!("{}", format_rows(&rows));
             Ok(())
         }
@@ -143,7 +206,9 @@ fn render_root(resolver: &Resolver, depth: usize, format: Output) -> Result<()> 
                             .iter()
                             .map(|fm| {
                                 let fs = synth.file_synth(&fm.file_key).expect("filtered above");
-                                build_file_json(resolver, fs, fm, depth)
+                                build_file_json(
+                                    resolver, fs, fm, depth, show_all, &mut hidden,
+                                )
                             })
                             .collect()
                     } else {
@@ -157,7 +222,10 @@ fn render_root(resolver: &Resolver, depth: usize, format: Output) -> Result<()> 
                     })
                 })
                 .collect();
-            print(&json!({ "projects": projects }), format)
+            print(
+                &json!({ "ignored": ignored_json(&hidden), "projects": projects }),
+                format,
+            )
         }
     }
 }
@@ -232,12 +300,14 @@ fn append_descent_rows(
     depth: usize,
     file_depth: usize,
     rows: &mut Vec<Row>,
+    show_all: bool,
+    hidden: &mut BTreeSet<&'static str>,
 ) {
     let cached = match resolver.cache().read_file(&fm.file_key) {
         Ok(Some(c)) => c,
         _ => return,
     };
-    let synthetic = synthesize_file_root(fm, &cached.document);
+    let synthetic = synthesize_file_root(fm, &cached.document, show_all, hidden);
     // The synthesized root itself represents the FILE row, already emitted
     // by the caller; descend its children up to `depth - file_depth` levels.
     let max_sub_depth = depth.saturating_sub(file_depth);
@@ -263,7 +333,14 @@ fn append_descent_rows(
 /// Build the JSON object for one file row, attaching a recursive `children`
 /// array (or `truncated` marker) when `depth >= 2`. Mirrors the YAML descent
 /// in `append_descent_rows`.
-fn build_file_json(resolver: &Resolver, file_synth: u32, fm: &FileMeta, depth: usize) -> Value {
+fn build_file_json(
+    resolver: &Resolver,
+    file_synth: u32,
+    fm: &FileMeta,
+    depth: usize,
+    show_all: bool,
+    hidden: &mut BTreeSet<&'static str>,
+) -> Value {
     let mut obj = serde_json::Map::new();
     obj.insert("id".into(), json!(format!("file:{file_synth}")));
     obj.insert("file_key".into(), json!(fm.file_key));
@@ -271,7 +348,7 @@ fn build_file_json(resolver: &Resolver, file_synth: u32, fm: &FileMeta, depth: u
     obj.insert("last_modified".into(), json!(fm.last_modified));
     if depth >= 2 {
         if let Ok(Some(cached)) = resolver.cache().read_file(&fm.file_key) {
-            let synthetic = synthesize_file_root(fm, &cached.document);
+            let synthetic = synthesize_file_root(fm, &cached.document, show_all, hidden);
             let rendered = render_subtree_json(file_synth, &synthetic, depth - 1);
             if let Value::Object(rendered_obj) = rendered {
                 if let Some(kids) = rendered_obj.get("children") {
@@ -306,6 +383,7 @@ fn render_project(
     project_id: &str,
     depth: usize,
     format: Output,
+    show_all: bool,
 ) -> Result<()> {
     let synth = resolver.synth();
     let metas = resolver.cache().list_metas()?;
@@ -316,6 +394,8 @@ fn render_project(
         .filter_map(|m| synth.file_synth(&m.file_key).map(|s| (s, m.clone())))
         .collect();
     files.sort_by(|(_, a), (_, b)| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+
+    let mut hidden: BTreeSet<&'static str> = BTreeSet::new();
 
     match format {
         Output::Yaml => {
@@ -335,27 +415,43 @@ fn render_project(
                         fm.name.clone(),
                     ));
                     if depth >= 2 {
-                        append_descent_rows(resolver, *fs, fm, depth, 1, &mut rows);
+                        append_descent_rows(
+                            resolver,
+                            *fs,
+                            fm,
+                            depth,
+                            1,
+                            &mut rows,
+                            show_all,
+                            &mut hidden,
+                        );
                     }
                 }
             }
+            print_hidden_comment(&hidden);
             print!("{}", format_rows(&rows));
             Ok(())
         }
         Output::Json => {
-            let file_jsons: Vec<Value> = if depth >= 1 {
-                files
-                    .iter()
-                    .map(|(fs, fm)| build_file_json(resolver, *fs, fm, depth))
-                    .collect()
-            } else {
-                Vec::new()
-            };
+            let mut file_jsons: Vec<Value> = Vec::new();
+            if depth >= 1 {
+                for (fs, fm) in &files {
+                    file_jsons.push(build_file_json(
+                        resolver,
+                        *fs,
+                        fm,
+                        depth,
+                        show_all,
+                        &mut hidden,
+                    ));
+                }
+            }
             print(
                 &json!({
                     "id": format!("proj:{project_synth}"),
                     "project_id": project_id,
                     "name": project_name,
+                    "ignored": ignored_json(&hidden),
                     "files": file_jsons,
                 }),
                 format,
@@ -373,10 +469,13 @@ fn render_file(
     document: &CacheNode,
     depth: usize,
     format: Output,
+    show_all: bool,
 ) -> Result<()> {
-    let synthetic_root = synthesize_file_root(meta, document);
+    let mut hidden: BTreeSet<&'static str> = BTreeSet::new();
+    let synthetic_root = synthesize_file_root(meta, document, show_all, &mut hidden);
     match format {
         Output::Yaml => {
+            print_hidden_comment(&hidden);
             let lines = render_flat(&synthetic_root, file_synth, depth);
             print!("{}\n", lines.join("\n"));
             Ok(())
@@ -386,6 +485,7 @@ fn render_file(
                 "id": format!("file:{file_synth}"),
                 "file_key": meta.file_key,
                 "name": meta.name,
+                "ignored": ignored_json(&hidden),
                 "items": render_subtree_json(file_synth, &synthetic_root, depth),
             }),
             format,
@@ -418,7 +518,36 @@ fn render_node_subtree(
     }
 }
 
-pub fn synthesize_file_root(meta: &FileMeta, document: &CacheNode) -> CacheNode {
+pub fn synthesize_file_root(
+    meta: &FileMeta,
+    document: &CacheNode,
+    show_all: bool,
+    hidden: &mut BTreeSet<&'static str>,
+) -> CacheNode {
+    // Skip the DOCUMENT node entirely — its visible children (canvases)
+    // become the top-level items under the synthesized FILE header. Then,
+    // unless `show_all`, drop any CANVAS whose name matches the default
+    // ignore list (Cover/WIP/Archive, case-insensitive). Names of the
+    // dropped canvases are recorded in `hidden` so the caller can emit a
+    // transparency line — never silent.
+    let children: Vec<CacheNode> = document
+        .children
+        .iter()
+        .filter(|c| c.visible)
+        .filter(|c| {
+            if show_all {
+                return true;
+            }
+            match ignored_canvas_label(c) {
+                Some(label) => {
+                    hidden.insert(label);
+                    false
+                }
+                None => true,
+            }
+        })
+        .cloned()
+        .collect();
     CacheNode {
         // Empty id makes `tree::format_cache_line` emit the bare `file:N` form
         // (no trailing `:0:0`), so the DOCUMENT node never surfaces as a row.
@@ -427,9 +556,7 @@ pub fn synthesize_file_root(meta: &FileMeta, document: &CacheNode) -> CacheNode 
         name: meta.name.clone(),
         visible: true,
         bounds: None,
-        // Skip the DOCUMENT node entirely — its visible children (canvases)
-        // become the top-level items under the synthesized FILE header.
-        children: document.children.iter().filter(|c| c.visible).cloned().collect(),
+        children,
     }
 }
 
@@ -496,10 +623,13 @@ mod tests {
         let cache = CacheDir::new(tmp.path());
         cache.ensure().unwrap();
 
+        // Canvas names are deliberately neutral here so the new default
+        // ignore filter (Cover/WIP/Archive) doesn't interfere with this
+        // test's focus — synthesis + DOCUMENT-row suppression.
         let doc = json!({
             "id": "0:0", "name": "doc", "type": "DOCUMENT",
             "children": [
-                { "id": "0:1", "name": "Cover", "type": "CANVAS",
+                { "id": "0:1", "name": "Home", "type": "CANVAS",
                   "children": [{ "id": "1:2", "name": "Header", "type": "FRAME",
                                  "absoluteBoundingBox": { "x": 0.0, "y": 0.0, "width": 1440.0, "height": 80.0 } }] },
                 { "id": "0:2", "name": "Employees", "type": "CANVAS" },
@@ -534,7 +664,8 @@ mod tests {
             ResolvedTarget::File { synth, meta, document } => (synth, meta, document),
             other => panic!("expected File target, got {other:?}"),
         };
-        let synthetic = synthesize_file_root(&meta, &document.document);
+        let mut hidden = BTreeSet::new();
+        let synthetic = synthesize_file_root(&meta, &document.document, false, &mut hidden);
         let lines = render_flat(&synthetic, synth, 1);
 
         // First line must be the synthesized FILE row with bare `file:1` (no
@@ -549,7 +680,7 @@ mod tests {
 
         // CANVAS children should appear with their qualified IDs.
         let joined = lines.join("\n");
-        assert!(joined.contains("file:1:0:1"), "Cover canvas missing: {joined}");
+        assert!(joined.contains("file:1:0:1"), "Home canvas missing: {joined}");
         assert!(joined.contains("file:1:0:2"), "Employees canvas missing: {joined}");
         // No row references `file:1:0:0` — the DOCUMENT node id is suppressed.
         assert!(
@@ -581,6 +712,135 @@ mod tests {
         let id: Id = "0:0".parse().unwrap();
         let err = apply_scope(id, Some("proj:1")).unwrap_err();
         assert!(err.to_string().contains("must name a file"), "got: {err}");
+    }
+
+    /// Build a minimal DOCUMENT CacheNode with the given canvas children.
+    /// Used by the synthesize_file_root filter tests below. The FileMeta is
+    /// constructed via `FileMeta::from_success` (the same helper the rest of
+    /// the codebase uses) so we don't have to track its full field set here.
+    fn document_with_canvases(canvases: Vec<(&str, &str, &str)>) -> (FileMeta, CacheNode) {
+        let file_ref = FileRef {
+            file_key: "k".into(),
+            name: "Demo".into(),
+            last_modified: "2026-01-01".into(),
+            project_id: "p1".into(),
+            project_name: "P".into(),
+        };
+        let doc_json = json!({
+            "id": "0:0", "name": "doc", "type": "DOCUMENT",
+            "children": canvases.iter().map(|(id, type_, name)| json!({
+                "id": *id, "type": *type_, "name": *name,
+            })).collect::<Vec<_>>(),
+        });
+        let payload = build_cached_file(&file_ref, &doc_json, 0);
+        let meta = FileMeta::from_success(&file_ref, &payload, 0, 0);
+        let children: Vec<CacheNode> = canvases
+            .into_iter()
+            .map(|(id, type_, name)| CacheNode {
+                id: id.into(),
+                type_: type_.into(),
+                name: name.into(),
+                visible: true,
+                bounds: None,
+                children: vec![],
+            })
+            .collect();
+        let document = CacheNode {
+            id: "0:0".into(),
+            type_: "DOCUMENT".into(),
+            name: "doc".into(),
+            visible: true,
+            bounds: None,
+            children,
+        };
+        (meta, document)
+    }
+
+    #[test]
+    fn synthesize_file_root_hides_default_canvases() {
+        let (meta, doc) = document_with_canvases(vec![
+            ("0:1", "CANVAS", "Cover"),
+            ("0:2", "CANVAS", "Home"),
+            ("0:3", "CANVAS", "WIP"),
+            ("0:4", "CANVAS", "Settings"),
+            ("0:5", "CANVAS", "Archive"),
+        ]);
+        let mut hidden = BTreeSet::new();
+        let root = synthesize_file_root(&meta, &doc, false, &mut hidden);
+        let names: Vec<&str> = root.children.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["Home", "Settings"]);
+        assert_eq!(
+            hidden.iter().copied().collect::<Vec<_>>(),
+            vec!["Archive", "Cover", "WIP"],
+            "expected canonical sorted names"
+        );
+    }
+
+    #[test]
+    fn synthesize_file_root_case_insensitive() {
+        let (meta, doc) = document_with_canvases(vec![
+            ("0:1", "CANVAS", "cover"),
+            ("0:2", "CANVAS", "WiP"),
+            ("0:3", "CANVAS", "ARCHIVE"),
+        ]);
+        let mut hidden = BTreeSet::new();
+        let root = synthesize_file_root(&meta, &doc, false, &mut hidden);
+        assert!(root.children.is_empty(), "all three should be hidden");
+        // Labels come from the canonical const, not the designer's casing.
+        assert_eq!(
+            hidden.iter().copied().collect::<Vec<_>>(),
+            vec!["Archive", "Cover", "WIP"],
+        );
+    }
+
+    #[test]
+    fn synthesize_file_root_only_filters_canvas_type() {
+        // A FRAME named "Cover" must survive — the filter is CANVAS-only.
+        let (meta, doc) = document_with_canvases(vec![
+            ("0:1", "FRAME", "Cover"),
+            ("0:2", "CANVAS", "Cover"),
+        ]);
+        let mut hidden = BTreeSet::new();
+        let root = synthesize_file_root(&meta, &doc, false, &mut hidden);
+        let kept: Vec<(&str, &str)> = root
+            .children
+            .iter()
+            .map(|c| (c.type_.as_str(), c.name.as_str()))
+            .collect();
+        assert_eq!(kept, vec![("FRAME", "Cover")]);
+        assert_eq!(hidden.iter().copied().collect::<Vec<_>>(), vec!["Cover"]);
+    }
+
+    #[test]
+    fn synthesize_file_root_show_all_disables_filter() {
+        let (meta, doc) = document_with_canvases(vec![
+            ("0:1", "CANVAS", "Cover"),
+            ("0:2", "CANVAS", "Home"),
+            ("0:3", "CANVAS", "Archive"),
+        ]);
+        let mut hidden = BTreeSet::new();
+        let root = synthesize_file_root(&meta, &doc, true, &mut hidden);
+        let names: Vec<&str> = root.children.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["Cover", "Home", "Archive"]);
+        assert!(
+            hidden.is_empty(),
+            "show_all=true must not accumulate hidden names"
+        );
+    }
+
+    #[test]
+    fn ignored_canvas_label_returns_canonical_const_reference() {
+        // Sanity: the returned label is a &'static str pointing at the const
+        // array, so it stays cheap to insert into BTreeSet<&'static str>.
+        let n = CacheNode {
+            id: "0:1".into(),
+            type_: "CANVAS".into(),
+            name: "cover".into(),
+            visible: true,
+            bounds: None,
+            children: vec![],
+        };
+        assert_eq!(ignored_canvas_label(&n), Some("Cover"));
     }
 }
 
