@@ -36,7 +36,7 @@ pub struct Args {
     pub r#type: Vec<String>,
 
     /// Maximum number of hits to report.
-    #[arg(long, default_value_t = 10)]
+    #[arg(long, default_value_t = 100)]
     pub limit: usize,
 }
 
@@ -59,7 +59,11 @@ impl Args {
 
         // Collect hits across the requested scope. For each cached file we
         // run multi_token_search inside, tagging hits with the file's synth
-        // so we can emit qualified IDs at render time.
+        // so we can emit qualified IDs at render time. We pass `usize::MAX`
+        // as the per-search cap so per-file truncation doesn't hide hits
+        // that a tied score from another file might otherwise displace —
+        // we count the true total here and only truncate at the very end
+        // (so `total_matches` is honest).
         let mut all_hits: Vec<ScopedHit> = Vec::new();
 
         match in_ {
@@ -75,14 +79,14 @@ impl Args {
                             &document.document,
                             &tokens,
                             type_filter,
-                            self.limit,
+                            usize::MAX,
                         );
                         for h in hits {
                             all_hits.push(scoped_from_hit(synth, &h));
                         }
                     }
                     ResolvedTarget::Node { file_synth, node, .. } => {
-                        let hits = multi_token_search(&node, &tokens, type_filter, self.limit);
+                        let hits = multi_token_search(&node, &tokens, type_filter, usize::MAX);
                         for h in hits {
                             all_hits.push(scoped_from_hit(file_synth, &h));
                         }
@@ -96,7 +100,8 @@ impl Args {
             }
             None => {
                 // No scope — search every cached file. Per-file results are
-                // already capped at `limit`; we merge then re-cap.
+                // unbounded here so a single file can't monopolize the global
+                // top-N via score ties.
                 let synth = resolver.synth();
                 let metas = resolver.cache().list_metas()?;
                 for m in metas.iter().filter(|m| m.status == EntryStatus::Ok) {
@@ -105,25 +110,38 @@ impl Args {
                         Ok(Some(p)) => p,
                         _ => continue,
                     };
-                    let hits =
-                        multi_token_search(&payload.document, &tokens, type_filter, self.limit);
+                    let hits = multi_token_search(
+                        &payload.document,
+                        &tokens,
+                        type_filter,
+                        usize::MAX,
+                    );
                     for h in hits {
                         all_hits.push(scoped_from_hit(file_synth, &h));
                     }
                 }
-                // Sort and truncate across files.
                 all_hits.sort_by(|a, b| {
                     b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal)
                 });
-                all_hits.truncate(self.limit);
             }
         }
+
+        let total_matches = all_hits.len();
+        all_hits.truncate(self.limit);
 
         // Render. Output format mirrors `ls` (id-first, qualified) so a
         // user can grab any line's first column and paste it into another
         // command. Score and path are tail columns.
+        let truncated = total_matches > all_hits.len();
         match format {
             Output::Yaml => {
+                if truncated {
+                    println!(
+                        "# showing {} of {} matches — use --limit N to see more",
+                        all_hits.len(),
+                        total_matches
+                    );
+                }
                 if all_hits.is_empty() {
                     return Ok(());
                 }
@@ -174,6 +192,9 @@ impl Args {
                         "query": joined,
                         "tokens": tokens,
                         "scope": in_,
+                        "total_matches": total_matches,
+                        "shown": all_hits.len(),
+                        "truncated": truncated,
                         "hits": hits,
                     }),
                     format,
