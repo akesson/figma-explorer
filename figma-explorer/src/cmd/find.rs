@@ -225,12 +225,25 @@ fn scoped_from_hit(file_synth: u32, hit: &SearchHit<'_>) -> ScopedHit {
     let node = hit.node;
     let id = format!("file:{file_synth}:{}", node.id);
     let bounds = node.bounds.map(|b| b.compact()).unwrap_or_else(|| "-".to_owned());
-    let path_components: Vec<String> = hit
-        .path
-        .iter()
-        .map(|n| n.name.clone())
-        .filter(|s| !s.is_empty())
-        .collect();
+    // Trim the path for display: the trailing element is the matched node
+    // itself (already in the "name" column), and the leading DOCUMENT node
+    // is the same on every line. The canvas name and below are what carry
+    // location information.
+    let end = hit.path.len().saturating_sub(1);
+    let start = if hit.path.first().is_some_and(|n| n.type_ == "DOCUMENT") {
+        1
+    } else {
+        0
+    };
+    let path_components: Vec<String> = if start < end {
+        hit.path[start..end]
+            .iter()
+            .map(|n| n.name.clone())
+            .filter(|s| !s.is_empty())
+            .collect()
+    } else {
+        Vec::new()
+    };
     ScopedHit {
         id,
         bounds,

@@ -222,18 +222,19 @@ fn collect_visible_cache<'a>(root: &'a CacheNode, out: &mut Vec<&'a CacheNode>) 
 // Multi-token ancestor-chain search
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Per-token attribution: which path index a token matched, and its raw score.
+/// Per-token attribution: which path index a token matched, and its score.
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct TokenMatch {
     /// The original token from the query.
     pub token: String,
-    /// Index into `SearchHit::path` where the token matched best.
+    /// Index into `SearchHit::path` where the token was assigned.
     pub path_index: usize,
     /// The matched ancestor's name (kept for display so callers don't have to
     /// re-walk the path).
     pub matched_name: String,
-    /// Nucleo's raw fuzzy score for this token against the matched name.
-    pub token_score: u32,
+    /// Length-normalized score (nucleo raw score divided by `sqrt(name_chars)`).
+    /// Short, semantically-named ancestors outscore long descriptive text.
+    pub token_score: f64,
 }
 
 /// One result of `multi_token_search`. The path is root → … → node, so the
@@ -262,15 +263,21 @@ const CONSECUTIVE_PAIR_BONUS: f64 = 0.10;
 /// Algorithm:
 /// 1. DFS through visible nodes, maintaining the root→node path.
 /// 2. For each candidate, every token must fuzzy-match (nucleo) the name of
-///    some ancestor in the path. If any token has no hit, drop the candidate.
-/// 3. Score each token by (nucleo score) * (position weight) where the leaf
-///    position gets weight 1.0 and each step earlier decays by
-///    `LEAF_WEIGHT_DECAY`. Tokens that match the leaf itself rank highest.
-/// 4. Add `CONSECUTIVE_PAIR_BONUS` * total for each adjacent pair of tokens
-///    that hit adjacent path indices (token n+1 just below token n).
-/// 5. Apply `type_filter` post-walk: if set, drop candidates whose `type_`
+///    some ancestor in the path, and each token must be assigned to a
+///    **different** ancestor (otherwise one verbose name can satisfy every
+///    token on its own — the failure mode that motivated this rewrite).
+/// 3. Length-normalize each per-(token, ancestor) score by dividing the raw
+///    nucleo score by `sqrt(name_chars)` so a 130-char prose name doesn't
+///    tie a 9-char semantic name on the same query word.
+/// 4. Pick the best legal assignment (distinct path index per token) that
+///    maximizes the weighted sum, with `LEAF_WEIGHT_DECAY` per step away
+///    from the leaf and `CONSECUTIVE_PAIR_BONUS` for adjacent-token pairs
+///    that landed on adjacent path indices in query order.
+/// 5. If no legal assignment exists (any token unmatched, or `tokens.len() >
+///    path.len()`), drop the node.
+/// 6. Apply `type_filter` post-walk: if set, drop candidates whose `type_`
 ///    isn't in the filter (case-insensitive).
-/// 6. Sort by score descending, take top `limit`.
+/// 7. Sort by score descending, take top `limit`.
 pub fn multi_token_search<'a>(
     root: &'a CacheNode,
     tokens: &[&str],
@@ -302,12 +309,20 @@ pub fn multi_token_search<'a>(
                 return;
             }
         }
-        // Best (path_index, score) per token. None → token didn't hit, skip.
-        let mut per_token: Vec<(usize, u32, String)> = Vec::with_capacity(tokens.len());
-        let mut all_matched = true;
+        // Distinct-ancestor constraint is infeasible if there are more tokens
+        // than ancestors. The assignment bitmask is also a u64, so cap depth.
+        if tokens.len() > path.len() || path.len() > 64 {
+            return;
+        }
+
+        // Build candidates[t] = every (path_index, normalized_score,
+        // ancestor_name) where token t fuzzy-matches the ancestor. The
+        // assignment search below then picks one entry per token, no path
+        // index reused.
+        let mut candidates: Vec<Vec<TokenCandidate>> = Vec::with_capacity(tokens.len());
         let mut buf: Vec<char> = Vec::new();
-        for (ti, pattern) in patterns.iter().enumerate() {
-            let mut best: Option<(usize, u32, String)> = None;
+        for pattern in &patterns {
+            let mut cands: Vec<TokenCandidate> = Vec::new();
             for (pi, ancestor) in path.iter().enumerate() {
                 buf.clear();
                 buf.extend(ancestor.name.chars());
@@ -315,46 +330,36 @@ pub fn multi_token_search<'a>(
                     nucleo_matcher::Utf32Str::new(&ancestor.name, &mut buf),
                     &mut matcher,
                 ) {
-                    if best.as_ref().is_none_or(|(_, bs, _)| s > *bs) {
-                        best = Some((pi, s, ancestor.name.clone()));
-                    }
+                    let name_chars = (ancestor.name.chars().count() as f64).max(1.0);
+                    let normalized = (s as f64) / name_chars.sqrt();
+                    cands.push(TokenCandidate {
+                        path_index: pi,
+                        normalized,
+                        ancestor_name: ancestor.name.clone(),
+                    });
                 }
             }
-            match best {
-                Some(b) => per_token.push(b),
-                None => {
-                    all_matched = false;
-                    break;
-                }
+            if cands.is_empty() {
+                return;
             }
-            let _ = ti;
-        }
-        if !all_matched {
-            return;
+            candidates.push(cands);
         }
 
         let leaf_idx = path.len().saturating_sub(1);
-        // Aggregate score with leaf-weighted decay.
-        let mut score = 0.0f64;
-        let mut matches_out = Vec::with_capacity(per_token.len());
-        for (i, (pi, ts, mn)) in per_token.iter().enumerate() {
-            let depth_from_leaf = leaf_idx.saturating_sub(*pi);
-            let weight = LEAF_WEIGHT_DECAY.powi(depth_from_leaf as i32);
-            score += (*ts as f64) * weight;
-            matches_out.push(TokenMatch {
+        let Some((score, assignment)) = best_assignment(&candidates, leaf_idx) else {
+            return;
+        };
+
+        let matches_out: Vec<TokenMatch> = assignment
+            .iter()
+            .enumerate()
+            .map(|(i, c)| TokenMatch {
                 token: tokens[i].to_string(),
-                path_index: *pi,
-                matched_name: mn.clone(),
-                token_score: *ts,
-            });
-        }
-        // Consecutive-pair bonus: each adjacent token pair that lines up on
-        // adjacent path indices (in query order) gets a multiplicative boost.
-        for w in per_token.windows(2) {
-            if w[1].0 == w[0].0 + 1 {
-                score *= 1.0 + CONSECUTIVE_PAIR_BONUS;
-            }
-        }
+                path_index: c.path_index,
+                matched_name: c.ancestor_name.clone(),
+                token_score: c.normalized,
+            })
+            .collect();
 
         hits.push(SearchHit {
             node,
@@ -367,6 +372,92 @@ pub fn multi_token_search<'a>(
     hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
     hits.truncate(limit);
     hits
+}
+
+/// One candidate ancestor for a token: the path index, the length-normalized
+/// nucleo score, and the ancestor's name (kept for `TokenMatch` attribution).
+#[derive(Clone, Debug)]
+struct TokenCandidate {
+    path_index: usize,
+    normalized: f64,
+    ancestor_name: String,
+}
+
+/// Find the best assignment of tokens to distinct path indices that
+/// maximizes `sum(normalized_score * leaf_weight) * (1 + bonus)^pairs`, where
+/// `pairs` counts adjacent tokens whose assigned indices are also adjacent
+/// (in query order). Returns `None` if no legal assignment exists.
+///
+/// For typical query shapes (≤ 5 tokens, ≤ 20 path depth) the search visits
+/// well under a thousand leaves per node, so a simple backtracking solver
+/// with a `u64` bitmask of used path indices is plenty fast — no Hungarian
+/// algorithm needed.
+fn best_assignment(
+    candidates: &[Vec<TokenCandidate>],
+    leaf_idx: usize,
+) -> Option<(f64, Vec<TokenCandidate>)> {
+    let mut best_score = f64::NEG_INFINITY;
+    let mut best_pick: Option<Vec<TokenCandidate>> = None;
+    let mut current: Vec<TokenCandidate> = Vec::with_capacity(candidates.len());
+    recurse_assignment(
+        candidates,
+        leaf_idx,
+        0,
+        0u64,
+        &mut current,
+        0.0,
+        0,
+        &mut best_score,
+        &mut best_pick,
+    );
+    best_pick.map(|p| (best_score, p))
+}
+
+fn recurse_assignment(
+    candidates: &[Vec<TokenCandidate>],
+    leaf_idx: usize,
+    ti: usize,
+    used: u64,
+    current: &mut Vec<TokenCandidate>,
+    base: f64,
+    bonus_count: u32,
+    best: &mut f64,
+    best_pick: &mut Option<Vec<TokenCandidate>>,
+) {
+    if ti == candidates.len() {
+        let final_score = base * (1.0 + CONSECUTIVE_PAIR_BONUS).powi(bonus_count as i32);
+        if final_score > *best {
+            *best = final_score;
+            *best_pick = Some(current.clone());
+        }
+        return;
+    }
+    for cand in &candidates[ti] {
+        let bit = 1u64 << cand.path_index;
+        if used & bit != 0 {
+            continue;
+        }
+        let depth_from_leaf = leaf_idx.saturating_sub(cand.path_index);
+        let weight = LEAF_WEIGHT_DECAY.powi(depth_from_leaf as i32);
+        let contribution = cand.normalized * weight;
+        let is_consecutive = current
+            .last()
+            .is_some_and(|prev| cand.path_index == prev.path_index + 1);
+        let new_bonus = bonus_count + if is_consecutive { 1 } else { 0 };
+        current.push(cand.clone());
+        recurse_assignment(
+            candidates,
+            leaf_idx,
+            ti + 1,
+            used | bit,
+            current,
+            base + contribution,
+            new_bonus,
+            best,
+            best_pick,
+        );
+        current.pop();
+    }
 }
 
 /// DFS over visible nodes, calling `f(node, path_including_node)` at each
@@ -590,6 +681,101 @@ mod tests {
         let d = wallchart_doc();
         let hits = multi_token_search(&d, &[], None, 10);
         assert!(hits.is_empty());
+    }
+
+    /// A single leaf whose name contains every query word must not be a hit:
+    /// the distinct-ancestor constraint refuses to bind all tokens to the
+    /// same path index, even when nucleo would happily score each one on
+    /// that one verbose name. This is the failure mode that motivated the
+    /// rewrite (long designer notes that happened to contain every keyword).
+    #[test]
+    fn multi_token_rejects_single_name_satisfying_all_tokens() {
+        let doc = cache_node(
+            "0:0",
+            "doc",
+            "DOCUMENT",
+            vec![cache_node(
+                "1:0",
+                "Page",
+                "CANVAS",
+                vec![cache_leaf(
+                    "1:1",
+                    "the wallchart filter and the widget label",
+                    "TEXT",
+                )],
+            )],
+        );
+        // Ancestors {doc, Page} don't contain "wallchart", "filter", or
+        // "widget" — those words live solely on the leaf. All three tokens
+        // want the same path index, which the distinct constraint forbids.
+        let hits = multi_token_search(&doc, &["wallchart", "filter", "widget"], None, 10);
+        assert!(
+            hits.iter().all(|h| h.node.id != "1:1"),
+            "leaf 1:1 leaked despite no distinct-ancestor assignment: {:?}",
+            hits.iter().map(|h| &h.node.id).collect::<Vec<_>>()
+        );
+    }
+
+    /// More tokens than the path can hold → no hit possible. Without this
+    /// short-circuit the assignment search would still iterate through every
+    /// permutation and reject them one by one (slow on dense trees).
+    #[test]
+    fn multi_token_returns_empty_when_tokens_exceed_depth() {
+        // doc > Page > Leaf — depth 3. Query has 5 tokens. Impossible.
+        let doc = cache_node(
+            "0:0",
+            "doc",
+            "DOCUMENT",
+            vec![cache_node(
+                "1:0",
+                "Page",
+                "CANVAS",
+                vec![cache_leaf("1:1", "Leaf", "FRAME")],
+            )],
+        );
+        let hits = multi_token_search(
+            &doc,
+            &["doc", "page", "leaf", "extra", "more"],
+            None,
+            10,
+        );
+        assert!(hits.is_empty());
+    }
+
+    /// Length normalization: a short semantic name (e.g. "Employees") must
+    /// outrank a long descriptive name that happens to contain the same
+    /// word as a substring (e.g. "list of employees here"). Both nucleo
+    /// scores are similar; the sqrt(name_chars) divisor breaks the tie.
+    #[test]
+    fn multi_token_length_normalization_prefers_short_names() {
+        // Two parallel branches under the same root. Both leaves match the
+        // single-token query "employees", but one is the short word and one
+        // is a long prose sentence containing it.
+        let doc = cache_node(
+            "0:0",
+            "doc",
+            "DOCUMENT",
+            vec![cache_node(
+                "1:0",
+                "Page",
+                "CANVAS",
+                vec![
+                    cache_leaf("1:1", "Employees", "FRAME"),
+                    cache_leaf(
+                        "1:2",
+                        "the list of employees and their roles in the company",
+                        "TEXT",
+                    ),
+                ],
+            )],
+        );
+        let hits = multi_token_search(&doc, &["employees"], None, 5);
+        assert!(!hits.is_empty(), "expected at least one hit");
+        assert_eq!(
+            hits[0].node.id, "1:1",
+            "short 'Employees' frame should outrank the long prose; got {:?}",
+            hits.iter().map(|h| (&h.node.id, h.score)).collect::<Vec<_>>()
+        );
     }
 
     #[test]
