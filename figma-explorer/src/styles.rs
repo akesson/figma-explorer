@@ -15,8 +15,8 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::node::{
-    children, effects, fills, is_visible, name as node_name, primary_solid_hex,
-    rgba_to_hex, type_style,
+    children, effects, fills, is_visible, name as node_name, primary_solid_hex, rgba_to_hex,
+    type_style,
 };
 
 #[derive(Clone, Copy, Debug, Default, clap::ValueEnum, PartialEq, Eq)]
@@ -121,7 +121,9 @@ fn walk(node: &Value, tokens: &mut Tokens) {
 
     // Corner radii.
     if let Some(r) = node.get("cornerRadius").and_then(|v| v.as_f64()) {
-        let key = node_name(node).map(slugify).unwrap_or_else(|| "rounded".into());
+        let key = node_name(node)
+            .map(slugify)
+            .unwrap_or_else(|| "rounded".into());
         tokens.radii.entry(key).or_insert(r);
     }
 
@@ -146,7 +148,9 @@ fn walk(node: &Value, tokens: &mut Tokens) {
             let color = fx.get("color").map(rgba_to_hex).unwrap_or_default();
             let inset = if ty == "INNER_SHADOW" { "inset " } else { "" };
             let value = format!("{}{}px {}px {}px {}px {}", inset, x, y, blur, spread, color);
-            let key = node_name(node).map(slugify).unwrap_or_else(|| "shadow".into());
+            let key = node_name(node)
+                .map(slugify)
+                .unwrap_or_else(|| "shadow".into());
             tokens.shadows.entry(key).or_insert(value);
         }
     }
@@ -202,9 +206,7 @@ pub fn merge_published(file_resp: &Value, tokens: &mut Tokens) {
                     }
                     "text" => {
                         if let Some(style) = type_style(node) {
-                            if let Some(family) =
-                                style.get("fontFamily").and_then(|v| v.as_str())
-                            {
+                            if let Some(family) = style.get("fontFamily").and_then(|v| v.as_str()) {
                                 tokens.fonts.insert(family.to_owned());
                             }
                             if let Some(size) = style.get("fontSize").and_then(|v| v.as_f64()) {

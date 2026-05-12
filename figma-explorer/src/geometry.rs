@@ -62,15 +62,26 @@ mod tests {
     use super::*;
 
     fn b(x: f64, y: f64, w: f64, h: f64) -> Bounds {
-        Bounds { x, y, width: w, height: h }
+        Bounds {
+            x,
+            y,
+            width: w,
+            height: h,
+        }
     }
 
     #[test]
     fn contains_point_inside_outside_and_corners() {
         let r = b(10.0, 20.0, 100.0, 50.0);
         assert!(contains_point(&r, 60.0, 45.0));
-        assert!(contains_point(&r, 10.0, 20.0), "top-left corner is inclusive");
-        assert!(contains_point(&r, 110.0, 70.0), "bottom-right corner is inclusive");
+        assert!(
+            contains_point(&r, 10.0, 20.0),
+            "top-left corner is inclusive"
+        );
+        assert!(
+            contains_point(&r, 110.0, 70.0),
+            "bottom-right corner is inclusive"
+        );
         assert!(!contains_point(&r, 9.9, 45.0));
         assert!(!contains_point(&r, 60.0, 70.1));
     }

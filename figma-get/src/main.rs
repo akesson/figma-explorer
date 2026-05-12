@@ -30,7 +30,9 @@ async fn main() -> anyhow::Result<()> {
 /// `dotenvy::from_path` does not override already-set vars, so the closest
 /// `.env` wins and ancestors fill in any keys it didn't define.
 fn load_envs() {
-    let Ok(start) = std::env::current_dir() else { return };
+    let Ok(start) = std::env::current_dir() else {
+        return;
+    };
     let mut dir = start.as_path();
     loop {
         let candidate = dir.join(".env");

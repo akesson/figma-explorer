@@ -80,9 +80,10 @@ fn pick_match_slice<'a>(candidates: &[&'a Value], query: &str) -> Option<&'a Val
     {
         return Some(*hit);
     }
-    if let Some(hit) = candidates.iter().find(|n| {
-        is_visible(n) && name(n).is_some_and(|nm| nm.to_lowercase().contains(&q_lower))
-    }) {
+    if let Some(hit) = candidates
+        .iter()
+        .find(|n| is_visible(n) && name(n).is_some_and(|nm| nm.to_lowercase().contains(&q_lower)))
+    {
         return Some(*hit);
     }
     let mut matcher = Matcher::new(nucleo_matcher::Config::DEFAULT);
@@ -97,8 +98,7 @@ fn pick_match_slice<'a>(candidates: &[&'a Value], query: &str) -> Option<&'a Val
             let nm = name(n)?;
             buf.clear();
             buf.extend(nm.chars());
-            let score =
-                pattern.score(nucleo_matcher::Utf32Str::new(nm, &mut buf), &mut matcher)?;
+            let score = pattern.score(nucleo_matcher::Utf32Str::new(nm, &mut buf), &mut matcher)?;
             Some((score, *n))
         })
         .max_by_key(|(s, _)| *s)
@@ -200,8 +200,10 @@ fn pick_match_cache_slice<'a>(candidates: &[&'a CacheNode], query: &str) -> Opti
             }
             buf.clear();
             buf.extend(n.name.chars());
-            let score =
-                pattern.score(nucleo_matcher::Utf32Str::new(&n.name, &mut buf), &mut matcher)?;
+            let score = pattern.score(
+                nucleo_matcher::Utf32Str::new(&n.name, &mut buf),
+                &mut matcher,
+            )?;
             Some((score, *n))
         })
         .max_by_key(|(s, _)| *s)
@@ -369,7 +371,11 @@ pub fn multi_token_search<'a>(
         });
     });
 
-    hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    hits.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     hits.truncate(limit);
     hits
 }
@@ -639,7 +645,10 @@ mod tests {
         // (2:2) must NOT appear in the hits.
         let hits = multi_token_search(&d, &["wallchart", "filter", "button"], None, 10);
         for h in &hits {
-            assert_ne!(h.node.id, "2:2", "Sidebar button leaked despite missing 'filter'");
+            assert_ne!(
+                h.node.id, "2:2",
+                "Sidebar button leaked despite missing 'filter'"
+            );
         }
     }
 
@@ -665,12 +674,7 @@ mod tests {
         let d = wallchart_doc();
         // With type=TEXT, only the TEXT leaf under Filter ("Label", id 1:5)
         // can match, and only if all tokens still hit on its chain.
-        let hits = multi_token_search(
-            &d,
-            &["wallchart", "grid", "filter"],
-            Some(&["TEXT"]),
-            10,
-        );
+        let hits = multi_token_search(&d, &["wallchart", "grid", "filter"], Some(&["TEXT"]), 10);
         assert!(!hits.is_empty());
         assert!(hits.iter().all(|h| h.node.type_ == "TEXT"));
         assert!(hits.iter().any(|h| h.node.id == "1:5"));
@@ -733,12 +737,7 @@ mod tests {
                 vec![cache_leaf("1:1", "Leaf", "FRAME")],
             )],
         );
-        let hits = multi_token_search(
-            &doc,
-            &["doc", "page", "leaf", "extra", "more"],
-            None,
-            10,
-        );
+        let hits = multi_token_search(&doc, &["doc", "page", "leaf", "extra", "more"], None, 10);
         assert!(hits.is_empty());
     }
 
@@ -772,9 +771,12 @@ mod tests {
         let hits = multi_token_search(&doc, &["employees"], None, 5);
         assert!(!hits.is_empty(), "expected at least one hit");
         assert_eq!(
-            hits[0].node.id, "1:1",
+            hits[0].node.id,
+            "1:1",
             "short 'Employees' frame should outrank the long prose; got {:?}",
-            hits.iter().map(|h| (&h.node.id, h.score)).collect::<Vec<_>>()
+            hits.iter()
+                .map(|h| (&h.node.id, h.score))
+                .collect::<Vec<_>>()
         );
     }
 

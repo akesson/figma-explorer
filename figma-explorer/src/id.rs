@@ -103,12 +103,16 @@ impl FromStr for Id {
 
         // Tagged form.
         if RESERVED_TAGS.contains(&head) {
-            return Err(IdParseError::ReservedTag { tag: head.to_owned() });
+            return Err(IdParseError::ReservedTag {
+                tag: head.to_owned(),
+            });
         }
         match head {
             "proj" => parse_num(rest, s).map(Id::Project),
             "file" => parse_file_rest(rest, s),
-            other => Err(IdParseError::UnknownTag { tag: other.to_owned() }),
+            other => Err(IdParseError::UnknownTag {
+                tag: other.to_owned(),
+            }),
         }
     }
 }
@@ -155,11 +159,14 @@ fn parse_file_rest(rest: &str, full: &str) -> Result<Id, IdParseError> {
 
     // file:N:x:y — split off the leading file synth, the remainder must be
     // a native NUM:NUM node id.
-    let (x, y) = tail.split_once(':').ok_or_else(|| IdParseError::Malformed {
-        input: full.to_owned(),
-        reason: "qualified node id must be file:N:x:y".into(),
-    })?;
-    if x.is_empty() || y.is_empty()
+    let (x, y) = tail
+        .split_once(':')
+        .ok_or_else(|| IdParseError::Malformed {
+            input: full.to_owned(),
+            reason: "qualified node id must be file:N:x:y".into(),
+        })?;
+    if x.is_empty()
+        || y.is_empty()
         || !x.chars().all(|c| c.is_ascii_digit())
         || !y.chars().all(|c| c.is_ascii_digit())
     {
@@ -169,7 +176,10 @@ fn parse_file_rest(rest: &str, full: &str) -> Result<Id, IdParseError> {
         });
     }
 
-    Ok(Id::Node { file, node: tail.to_owned() })
+    Ok(Id::Node {
+        file,
+        node: tail.to_owned(),
+    })
 }
 
 impl fmt::Display for Id {
@@ -219,13 +229,19 @@ mod tests {
     fn parses_qualified_node() {
         assert_eq!(
             parse("file:2:1094:66591").unwrap(),
-            Id::Node { file: 2, node: "1094:66591".into() }
+            Id::Node {
+                file: 2,
+                node: "1094:66591".into()
+            }
         );
     }
 
     #[test]
     fn parses_bare_node() {
-        assert_eq!(parse("1094:66591").unwrap(), Id::BareNode("1094:66591".into()));
+        assert_eq!(
+            parse("1094:66591").unwrap(),
+            Id::BareNode("1094:66591".into())
+        );
         assert_eq!(parse("0:0").unwrap(), Id::BareNode("0:0".into()));
     }
 
@@ -244,10 +260,19 @@ mod tests {
     #[test]
     fn malformed_comment_ids_error() {
         // No comm synth at all.
-        assert!(matches!(parse("file:2:comm"), Err(IdParseError::Malformed { .. })));
+        assert!(matches!(
+            parse("file:2:comm"),
+            Err(IdParseError::Malformed { .. })
+        ));
         // Empty / non-numeric synth.
-        assert!(matches!(parse("file:2:comm:"), Err(IdParseError::Malformed { .. })));
-        assert!(matches!(parse("file:2:comm:abc"), Err(IdParseError::Malformed { .. })));
+        assert!(matches!(
+            parse("file:2:comm:"),
+            Err(IdParseError::Malformed { .. })
+        ));
+        assert!(matches!(
+            parse("file:2:comm:abc"),
+            Err(IdParseError::Malformed { .. })
+        ));
     }
 
     #[test]
@@ -287,11 +312,26 @@ mod tests {
     #[test]
     fn malformed_inputs_error() {
         assert!(matches!(parse(""), Err(IdParseError::Empty)));
-        assert!(matches!(parse("nocolon"), Err(IdParseError::Malformed { .. })));
-        assert!(matches!(parse("proj:abc"), Err(IdParseError::Malformed { .. })));
-        assert!(matches!(parse("file:2:nope"), Err(IdParseError::Malformed { .. })));
-        assert!(matches!(parse("file:2:1094"), Err(IdParseError::Malformed { .. })));
-        assert!(matches!(parse("file:2:1094:"), Err(IdParseError::Malformed { .. })));
+        assert!(matches!(
+            parse("nocolon"),
+            Err(IdParseError::Malformed { .. })
+        ));
+        assert!(matches!(
+            parse("proj:abc"),
+            Err(IdParseError::Malformed { .. })
+        ));
+        assert!(matches!(
+            parse("file:2:nope"),
+            Err(IdParseError::Malformed { .. })
+        ));
+        assert!(matches!(
+            parse("file:2:1094"),
+            Err(IdParseError::Malformed { .. })
+        ));
+        assert!(matches!(
+            parse("file:2:1094:"),
+            Err(IdParseError::Malformed { .. })
+        ));
         assert!(matches!(parse(":1"), Err(IdParseError::Malformed { .. })));
         assert!(matches!(parse("1:"), Err(IdParseError::Malformed { .. })));
     }
@@ -318,13 +358,17 @@ mod tests {
 
     #[test]
     fn url_display_uses_url_prefix() {
-        let id: Id = "https://www.figma.com/design/AbCdEf123/Foo?node-id=5-12".parse().unwrap();
+        let id: Id = "https://www.figma.com/design/AbCdEf123/Foo?node-id=5-12"
+            .parse()
+            .unwrap();
         assert_eq!(id.to_string(), "url:AbCdEf123:5:12");
     }
 
     #[test]
     fn url_without_node_id() {
-        let id: Id = "https://www.figma.com/design/AbCdEf123/Foo".parse().unwrap();
+        let id: Id = "https://www.figma.com/design/AbCdEf123/Foo"
+            .parse()
+            .unwrap();
         assert_eq!(id.to_string(), "url:AbCdEf123");
     }
 }

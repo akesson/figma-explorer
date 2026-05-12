@@ -213,7 +213,11 @@ pub fn format_cache_line(
         .bounds
         .map(|b| b.compact())
         .unwrap_or_else(|| "-".to_owned());
-    let kind = if node.type_.is_empty() { "?" } else { node.type_.as_str() };
+    let kind = if node.type_.is_empty() {
+        "?"
+    } else {
+        node.type_.as_str()
+    };
     let indent = "  ".repeat(depth);
     let mut s = format!(
         "{id:<id_w$}  {b:<b_w$}  | {indent}{kind}  \"{name}\"",
@@ -329,7 +333,11 @@ pub fn render_flat_with_comments(
         .max()
         .unwrap_or(1);
 
-    let ctx = FormatCtx { file_synth, max_id_width, max_bounds_width };
+    let ctx = FormatCtx {
+        file_synth,
+        max_id_width,
+        max_bounds_width,
+    };
     let mut out: Vec<String> = Vec::with_capacity(items.len() + comment_rows.len());
     for (n, depth, trunc) in &items {
         out.push(format_cache_line(n, *depth, &ctx, *trunc));
@@ -428,7 +436,11 @@ pub fn render_structured_cache(root: &CacheNode, max_depth: usize) -> Value {
 /// Single-line summary of a `CacheNode`: `TYPE "name" (bounds) id:nid`.
 /// No color suffix — fills aren't in the cache projection.
 pub fn format_cache_node_line(node: &CacheNode) -> String {
-    let kind = if node.type_.is_empty() { "?" } else { node.type_.as_str() };
+    let kind = if node.type_.is_empty() {
+        "?"
+    } else {
+        node.type_.as_str()
+    };
     let mut s = format!("{} \"{}\"", kind, node.name);
     if let Some(b) = node.bounds {
         let _ = write!(s, " ({})", b);
@@ -575,25 +587,45 @@ mod tests {
             "1094:66602",
             "INSTANCE",
             "Search",
-            Some(Bounds { x: 720.0, y: 20.0, width: 320.0, height: 40.0 }),
+            Some(Bounds {
+                x: 720.0,
+                y: 20.0,
+                width: 320.0,
+                height: 40.0,
+            }),
         );
         search.children.push(leaf_cache(
             "1094:66602:1",
             "VECTOR",
             "icon",
-            Some(Bounds { x: 732.0, y: 32.0, width: 16.0, height: 16.0 }),
+            Some(Bounds {
+                x: 732.0,
+                y: 32.0,
+                width: 16.0,
+                height: 16.0,
+            }),
         ));
         let mut header = leaf_cache(
             "1094:66600",
             "FRAME",
             "Header",
-            Some(Bounds { x: 0.0, y: 0.0, width: 1440.0, height: 80.0 }),
+            Some(Bounds {
+                x: 0.0,
+                y: 0.0,
+                width: 1440.0,
+                height: 80.0,
+            }),
         );
         header.children.push(leaf_cache(
             "1094:66601",
             "TEXT",
             "Title",
-            Some(Bounds { x: 24.0, y: 24.0, width: 200.0, height: 32.0 }),
+            Some(Bounds {
+                x: 24.0,
+                y: 24.0,
+                width: 200.0,
+                height: 32.0,
+            }),
         ));
         header.children.push(search);
         header
@@ -657,11 +689,15 @@ mod tests {
     fn flat_format_pads_id_column_to_local_max() {
         let lines = render_flat(&sample_tree(), 2, 2);
         // All lines should land the pipe at the same column.
-        let pipe_cols: Vec<usize> = lines.iter()
+        let pipe_cols: Vec<usize> = lines
+            .iter()
             .map(|l| l.find('|').expect("pipe present"))
             .collect();
         let first = pipe_cols[0];
-        assert!(pipe_cols.iter().all(|c| *c == first), "pipe wobble: {pipe_cols:?}");
+        assert!(
+            pipe_cols.iter().all(|c| *c == first),
+            "pipe wobble: {pipe_cols:?}"
+        );
     }
 
     #[test]
@@ -669,9 +705,15 @@ mod tests {
         let lines = render_flat(&sample_tree(), 2, 2);
         let header_line = lines.iter().find(|l| l.contains("\"Header\"")).unwrap();
         // Compact form: 1440x80@0,0 — no spaces inside the bounds field.
-        assert!(header_line.contains("1440x80@0,0"), "expected compact bounds, got: {header_line}");
+        assert!(
+            header_line.contains("1440x80@0,0"),
+            "expected compact bounds, got: {header_line}"
+        );
         // Make sure the legacy `1440×80 @0,0` form did NOT sneak in.
-        assert!(!header_line.contains("1440×80 @0,0"), "legacy form leaked: {header_line}");
+        assert!(
+            !header_line.contains("1440×80 @0,0"),
+            "legacy form leaked: {header_line}"
+        );
     }
 
     #[test]
@@ -682,7 +724,10 @@ mod tests {
         let title_line = lines.iter().find(|l| l.contains("\"Title\"")).unwrap();
         let pipe = title_line.find('|').unwrap();
         let after = &title_line[pipe + 2..]; // skip "| "
-        assert!(after.starts_with("  TEXT"), "expected '  TEXT' after pipe, got {after:?}");
+        assert!(
+            after.starts_with("  TEXT"),
+            "expected '  TEXT' after pipe, got {after:?}"
+        );
     }
 
     #[test]
@@ -690,7 +735,10 @@ mod tests {
         // Render depth 1 — Search (which has 1 child) should show [+1 children].
         let lines = render_flat(&sample_tree(), 2, 1);
         let search_line = lines.iter().find(|l| l.contains("\"Search\"")).unwrap();
-        assert!(search_line.contains("[+1 children]"), "missing trunc marker: {search_line}");
+        assert!(
+            search_line.contains("[+1 children]"),
+            "missing trunc marker: {search_line}"
+        );
         // No deeper lines should appear.
         assert!(!lines.iter().any(|l| l.contains("\"icon\"")));
     }
@@ -716,7 +764,10 @@ mod tests {
         // between the id and the pipe.
         let pipe = line.find('|').unwrap();
         let head = &line[..pipe];
-        assert!(head.contains(" -  "), "expected '-' bounds marker, got: {line}");
+        assert!(
+            head.contains(" -  "),
+            "expected '-' bounds marker, got: {line}"
+        );
     }
 
     #[test]
@@ -764,7 +815,10 @@ mod tests {
         // direct children of the root.
         let pipe = last.find('|').unwrap();
         let after = &last[pipe + 2..];
-        assert!(after.starts_with("  COMMENT"), "expected depth-1 indent, got: {after}");
+        assert!(
+            after.starts_with("  COMMENT"),
+            "expected depth-1 indent, got: {after}"
+        );
     }
 
     #[test]

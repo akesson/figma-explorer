@@ -166,7 +166,10 @@ fn walk<'a>(
     if !node.id.is_empty() {
         out.insert(
             node.id.as_str(),
-            IndexEntry { node, path: path_names.clone() },
+            IndexEntry {
+                node,
+                path: path_names.clone(),
+            },
         );
     }
     let push = !node.name.is_empty();
@@ -202,10 +205,7 @@ fn resolve_anchor(
     }
 }
 
-fn resolve_explicit(
-    node_id: &str,
-    by_id: &HashMap<&str, IndexEntry<'_>>,
-) -> ResolvedAnchor {
+fn resolve_explicit(node_id: &str, by_id: &HashMap<&str, IndexEntry<'_>>) -> ResolvedAnchor {
     match by_id.get(node_id) {
         Some(entry) => ResolvedAnchor {
             node: Some(node_ref_from(entry)),
@@ -370,7 +370,13 @@ mod tests {
         FrameOffset as ApiFrameOffset, Reaction, Region as ApiRegion, User, Vector as ApiVector,
     };
 
-    fn node(id: &str, type_: &str, name: &str, bounds: Option<Bounds>, children: Vec<CacheNode>) -> CacheNode {
+    fn node(
+        id: &str,
+        type_: &str,
+        name: &str,
+        bounds: Option<Bounds>,
+        children: Vec<CacheNode>,
+    ) -> CacheNode {
         CacheNode {
             id: id.to_owned(),
             type_: type_.to_owned(),
@@ -382,7 +388,12 @@ mod tests {
     }
 
     fn b(x: f64, y: f64, w: f64, h: f64) -> Bounds {
-        Bounds { x, y, width: w, height: h }
+        Bounds {
+            x,
+            y,
+            width: w,
+            height: h,
+        }
     }
 
     fn user() -> Box<User> {
@@ -416,9 +427,27 @@ mod tests {
     ///         inner (FRAME 50,50 100x100)
     ///           leaf (RECTANGLE 60,60 30x30)
     fn fixture_tree() -> CacheNode {
-        let leaf = node("1:4", "RECTANGLE", "leaf", Some(b(60.0, 60.0, 30.0, 30.0)), vec![]);
-        let inner = node("1:3", "FRAME", "inner", Some(b(50.0, 50.0, 100.0, 100.0)), vec![leaf]);
-        let outer = node("1:2", "FRAME", "outer", Some(b(0.0, 0.0, 200.0, 200.0)), vec![inner]);
+        let leaf = node(
+            "1:4",
+            "RECTANGLE",
+            "leaf",
+            Some(b(60.0, 60.0, 30.0, 30.0)),
+            vec![],
+        );
+        let inner = node(
+            "1:3",
+            "FRAME",
+            "inner",
+            Some(b(50.0, 50.0, 100.0, 100.0)),
+            vec![leaf],
+        );
+        let outer = node(
+            "1:2",
+            "FRAME",
+            "outer",
+            Some(b(0.0, 0.0, 200.0, 200.0)),
+            vec![inner],
+        );
         let page = node("0:1", "CANVAS", "Page 1", None, vec![outer]);
         node("0:0", "DOCUMENT", "doc", None, vec![page])
     }
@@ -607,8 +636,20 @@ mod tests {
             bounds: Some(b(60.0, 60.0, 30.0, 30.0)),
             children: vec![],
         };
-        let inner = node("inner", "FRAME", "inner", Some(b(50.0, 50.0, 100.0, 100.0)), vec![leaf]);
-        let root = node("root", "FRAME", "root", Some(b(0.0, 0.0, 200.0, 200.0)), vec![inner]);
+        let inner = node(
+            "inner",
+            "FRAME",
+            "inner",
+            Some(b(50.0, 50.0, 100.0, 100.0)),
+            vec![leaf],
+        );
+        let root = node(
+            "root",
+            "FRAME",
+            "root",
+            Some(b(0.0, 0.0, 200.0, 200.0)),
+            vec![inner],
+        );
 
         let c = make_comment(
             "c1",

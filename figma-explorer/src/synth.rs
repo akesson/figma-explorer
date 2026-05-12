@@ -81,10 +81,9 @@ impl SynthState {
         if !path.exists() {
             return Ok(Self::default());
         }
-        let s = fs::read_to_string(&path)
-            .with_context(|| format!("reading {}", path.display()))?;
-        let state: SynthState = serde_json::from_str(&s)
-            .with_context(|| format!("parsing {}", path.display()))?;
+        let s = fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+        let state: SynthState =
+            serde_json::from_str(&s).with_context(|| format!("parsing {}", path.display()))?;
         if state.version != SYNTH_SCHEMA_VERSION {
             anyhow::bail!(
                 "synth schema mismatch: file is v{}, build supports v{}. \
@@ -281,7 +280,7 @@ mod tests {
         s.intern_file("a"); // 1
         s.intern_file("b"); // 2
         s.intern_file("c"); // 3
-        // Simulate deletion of file b.
+                            // Simulate deletion of file b.
         s.files.remove("b");
         // New file should claim 4, not reuse 2.
         assert_eq!(s.intern_file("d"), 4);
@@ -342,7 +341,7 @@ mod tests {
         s.intern_comment(1, "a"); // 1
         s.intern_comment(1, "b"); // 2
         s.intern_comment(1, "c"); // 3
-        // Simulate deletion of comment b under file 1.
+                                  // Simulate deletion of comment b under file 1.
         s.comments.get_mut(&1).unwrap().remove("b");
         assert_eq!(s.intern_comment(1, "d"), 4);
     }
@@ -424,7 +423,11 @@ mod tests {
         }
         all.sort_unstable();
         let unique_count = all.iter().collect::<std::collections::HashSet<_>>().len();
-        assert_eq!(unique_count, all.len(), "duplicate synth assignments: {all:?}");
+        assert_eq!(
+            unique_count,
+            all.len(),
+            "duplicate synth assignments: {all:?}"
+        );
 
         // Final state on disk should have all 20 files.
         let state = SynthState::load(&cache).unwrap();

@@ -58,7 +58,9 @@ pub async fn render_node(
         contents_only: None,
         use_absolute_bounds: None,
     };
-    let resp = files_api::get_images(cfg, params).await.map_err(into_anyhow)?;
+    let resp = files_api::get_images(cfg, params)
+        .await
+        .map_err(into_anyhow)?;
     let url = resp.images.get(node_id).cloned().ok_or_else(|| {
         anyhow!(
             "Figma returned no image URL for node {} (the node may not be exportable)",
@@ -105,6 +107,8 @@ pub async fn render_urls(
         contents_only: None,
         use_absolute_bounds: None,
     };
-    let resp = files_api::get_images(cfg, params).await.map_err(into_anyhow)?;
+    let resp = files_api::get_images(cfg, params)
+        .await
+        .map_err(into_anyhow)?;
     Ok(resp.images)
 }

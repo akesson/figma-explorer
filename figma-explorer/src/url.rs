@@ -42,15 +42,12 @@ pub fn parse(url: &str) -> Result<ParsedUrl> {
         .ok_or_else(|| anyhow!("could not extract file key from URL: {}", url))?
         .to_owned();
 
-    let node_id = url
-        .split_once('?')
-        .map(|(_, q)| q)
-        .and_then(|q| {
-            q.split('&').find_map(|kv| {
-                let (k, v) = kv.split_once('=')?;
-                (k == "node-id" || k == "node_id").then(|| decode_node_id(v))
-            })
-        });
+    let node_id = url.split_once('?').map(|(_, q)| q).and_then(|q| {
+        q.split('&').find_map(|kv| {
+            let (k, v) = kv.split_once('=')?;
+            (k == "node-id" || k == "node_id").then(|| decode_node_id(v))
+        })
+    });
 
     Ok(ParsedUrl { file_key, node_id })
 }

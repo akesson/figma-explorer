@@ -199,9 +199,8 @@ pub async fn extract(
     }
 
     // Render URLs in two batches (icons → SVG, images+composites → PNG).
-    let (icon_specs, raster_specs): (Vec<_>, Vec<_>) = specs
-        .iter()
-        .partition(|s| s.kind == AssetKind::Icon);
+    let (icon_specs, raster_specs): (Vec<_>, Vec<_>) =
+        specs.iter().partition(|s| s.kind == AssetKind::Icon);
 
     let icon_ids: Vec<String> = icon_specs.iter().map(|s| s.node_id.clone()).collect();
     let raster_ids: Vec<String> = raster_specs.iter().map(|s| s.node_id.clone()).collect();

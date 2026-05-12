@@ -29,8 +29,7 @@ pub async fn build(
     frame: &Value,
     out_dir: &Path,
 ) -> Result<Value> {
-    std::fs::create_dir_all(out_dir)
-        .with_context(|| format!("creating {}", out_dir.display()))?;
+    std::fs::create_dir_all(out_dir).with_context(|| format!("creating {}", out_dir.display()))?;
     std::fs::create_dir_all(out_dir.join("styles"))?;
     std::fs::create_dir_all(out_dir.join("assets"))?;
 
@@ -45,14 +44,8 @@ pub async fn build(
 
     // screenshot.png (scale=2 by default, good balance of size and clarity)
     let frame_id = crate::node::id(frame).context("frame has no id")?;
-    let shot = screenshot::render_node(
-        cfg,
-        file_key,
-        frame_id,
-        2.0,
-        screenshot::Format::Png,
-    )
-    .await?;
+    let shot =
+        screenshot::render_node(cfg, file_key, frame_id, 2.0, screenshot::Format::Png).await?;
     std::fs::write(out_dir.join("screenshot.png"), &shot.bytes)?;
 
     // styles in all three formats.
