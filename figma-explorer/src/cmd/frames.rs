@@ -5,9 +5,8 @@ use serde_json::{json, Map, Value};
 
 use crate::cache;
 use crate::cmd::LocatorArgs;
-use crate::node::{bounds, children, id, is_visible, name};
-use crate::resolve::resolve_page;
-use crate::tree::format_node_line;
+use crate::resolve::resolve_page_cache;
+use crate::tree::format_cache_node_line;
 use crate::{print, Output};
 
 /// List the top-level frames on a given page.
@@ -24,15 +23,15 @@ pub struct Args {
 impl Args {
     pub async fn run(self, cfg: &Configuration, format: Output) -> Result<()> {
         let (file_key, _) = self.locator.resolve()?;
-        let file = cache::load_file_doc(cfg, &file_key).await?;
-        let doc = &file["document"];
-        let page = resolve_page(doc, &self.page)
+        let file = cache::load_file(cfg, &file_key).await?;
+        let page = resolve_page_cache(&file.document, &self.page)
             .ok_or_else(|| anyhow!("no page matching {:?}", self.page))?;
-        let frames: Vec<&Value> = children(page).iter().filter(|n| is_visible(n)).collect();
+        let frames: Vec<&cache::CacheNode> =
+            page.children.iter().filter(|n| n.visible).collect();
 
         let value = match format {
             Output::Yaml => {
-                let lines: Vec<String> = frames.iter().map(|f| format_node_line(f)).collect();
+                let lines: Vec<String> = frames.iter().map(|f| format_cache_node_line(f)).collect();
                 json!(lines)
             }
             Output::Json => {
@@ -40,15 +39,10 @@ impl Args {
                     .iter()
                     .map(|f| {
                         let mut obj = Map::new();
-                        if let Some(nid) = id(f) {
-                            obj.insert("node_id".into(), json!(nid));
-                        }
-                        obj.insert("name".into(), json!(name(f).unwrap_or("")));
-                        obj.insert(
-                            "type".into(),
-                            json!(f.get("type").and_then(|v| v.as_str()).unwrap_or("")),
-                        );
-                        if let Some(b) = bounds(f) {
+                        obj.insert("node_id".into(), json!(f.id));
+                        obj.insert("name".into(), json!(f.name));
+                        obj.insert("type".into(), json!(f.type_));
+                        if let Some(b) = f.bounds {
                             obj.insert("bounds".into(), json!(b.to_string()));
                         }
                         Value::Object(obj)
@@ -56,7 +50,7 @@ impl Args {
                     .collect();
                 json!({
                     "file_key": file_key,
-                    "page": name(page).unwrap_or(""),
+                    "page": page.name,
                     "frames": frame_objs,
                 })
             }

@@ -27,9 +27,8 @@ pub struct Args {
 impl Args {
     pub async fn run(self, cfg: &Configuration, format: Output) -> Result<()> {
         let (file_key, _) = self.locator.resolve()?;
-        let file = cache::load_file_doc(cfg, &file_key).await?;
-        let doc = &file["document"];
-        let hits = resolve::fuzzy_search(doc, &self.query, self.limit);
+        let file = cache::load_file(cfg, &file_key).await?;
+        let hits = resolve::fuzzy_search_cache(&file.document, &self.query, self.limit);
 
         let value = match format {
             Output::Yaml => {

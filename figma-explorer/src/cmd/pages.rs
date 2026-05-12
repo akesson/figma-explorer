@@ -5,8 +5,7 @@ use serde_json::json;
 
 use crate::cache;
 use crate::cmd::LocatorArgs;
-use crate::node::{children, is_visible};
-use crate::tree::format_node_line;
+use crate::tree::format_cache_node_line;
 use crate::{print, Output};
 
 /// List every top-level page (CANVAS node) in a file.
@@ -19,22 +18,21 @@ pub struct Args {
 impl Args {
     pub async fn run(self, cfg: &Configuration, format: Output) -> Result<()> {
         let (file_key, _) = self.locator.resolve()?;
-        let file = cache::load_file_doc(cfg, &file_key).await?;
-        let doc = &file["document"];
-        let pages: Vec<&serde_json::Value> =
-            children(doc).iter().filter(|p| is_visible(p)).collect();
+        let file = cache::load_file(cfg, &file_key).await?;
+        let pages: Vec<&cache::CacheNode> =
+            file.document.children.iter().filter(|p| p.visible).collect();
 
         let value = match format {
             Output::Yaml => {
-                let lines: Vec<String> = pages.iter().map(|p| format_node_line(p)).collect();
+                let lines: Vec<String> = pages.iter().map(|p| format_cache_node_line(p)).collect();
                 json!(lines)
             }
             Output::Json => json!({
                 "file_key": file_key,
-                "file_name": file.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+                "file_name": file.name,
                 "pages": pages.iter().map(|p| json!({
-                    "node_id": crate::node::id(p),
-                    "name": crate::node::name(p).unwrap_or(""),
+                    "node_id": p.id,
+                    "name": p.name,
                 })).collect::<Vec<_>>(),
             }),
         };

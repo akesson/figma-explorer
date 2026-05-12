@@ -49,7 +49,17 @@ pub fn bounds(node: &Value) -> Option<Bounds> {
     })
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    rkyv::Archive,
+    rkyv::Serialize,
+    rkyv::Deserialize,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub struct Bounds {
     pub x: f64,
     pub y: f64,

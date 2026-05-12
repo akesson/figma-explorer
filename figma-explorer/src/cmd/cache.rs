@@ -8,7 +8,7 @@ use figma_api::apis::configuration::Configuration;
 use futures::stream::{self, StreamExt};
 use serde_json::json;
 
-use crate::cache::{self, CacheDir, EntryStatus, FileRef, Manifest, ManifestEntry};
+use crate::cache::{self, build_cached_file, CacheDir, EntryStatus, FileRef, Manifest, ManifestEntry};
 use crate::cmd::fetch_file_json;
 use crate::{print, Output};
 
@@ -96,18 +96,9 @@ impl Args {
                 let started = Instant::now();
                 match fetch_file_json(cfg, &f.file_key, None).await {
                     Ok(file) => {
-                        let stripped = cache::strip_node(&file["document"]);
-                        let node_count = cache::count_nodes(&stripped);
-                        let payload = json!({
-                            "file_key": f.file_key,
-                            "name": f.name,
-                            "project_id": f.project_id,
-                            "project_name": f.project_name,
-                            "last_modified": f.last_modified,
-                            "cached_at_epoch": cache::now_epoch(),
-                            "node_count": node_count,
-                            "document": stripped,
-                        });
+                        let now = cache::now_epoch();
+                        let payload = build_cached_file(&f, &file["document"], now);
+                        let node_count = payload.node_count as usize;
                         let cache = CacheDir::new(&cache_root);
                         let bytes = cache.write_file(&f.file_key, &payload)?;
                         let secs = started.elapsed().as_secs_f64();
@@ -125,7 +116,7 @@ impl Args {
                             project_id: f.project_id,
                             project_name: f.project_name,
                             last_modified: f.last_modified,
-                            cached_at_epoch: cache::now_epoch(),
+                            cached_at_epoch: now,
                             status: EntryStatus::Ok,
                             error: None,
                             node_count: Some(node_count),

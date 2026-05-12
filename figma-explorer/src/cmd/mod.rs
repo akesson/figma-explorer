@@ -12,6 +12,7 @@ pub mod find;
 pub mod frames;
 pub mod pages;
 pub mod screenshot;
+pub mod search;
 pub mod styles;
 pub mod tree;
 
@@ -27,6 +28,8 @@ pub enum Command {
     Tree(tree::Args),
     /// Fuzzy-search for a node by name across the whole file.
     Find(find::Args),
+    /// Locate nodes by a multi-token ancestor-chain hint (e.g. "wallchart grid filter button").
+    Search(search::Args),
     /// Export a node as PNG/JPG/SVG/PDF.
     Screenshot(screenshot::Args),
     /// Export every icon/image/composite below a frame into a directory.
@@ -47,6 +50,7 @@ impl Command {
             Self::Frames(a) => a.run(cfg, format).await,
             Self::Tree(a) => a.run(cfg, format).await,
             Self::Find(a) => a.run(cfg, format).await,
+            Self::Search(a) => a.run(cfg, format).await,
             Self::Screenshot(a) => a.run(cfg, format).await,
             Self::ExtractAssets(a) => a.run(cfg, format).await,
             Self::Styles(a) => a.run(cfg, format).await,

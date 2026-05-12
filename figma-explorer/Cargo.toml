@@ -25,3 +25,5 @@ serde_yaml_ng = "0.10"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 futures = "0.3"
 nucleo-matcher = "0.3"
+rkyv = "0.8"
+memmap2 = "0.9"

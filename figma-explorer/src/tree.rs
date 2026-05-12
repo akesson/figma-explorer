@@ -3,10 +3,19 @@
 //! Output is purely text — one node per line, with box-drawing characters
 //! for the structure and a short payload (type, name, dimensions, primary
 //! color when applicable). Invisible nodes are skipped.
+//!
+//! Two parallel rendering APIs live here:
+//! - `&serde_json::Value` paths (`render`, `render_compact`, `render_structured`,
+//!   `format_node_line`) for live-data consumers like `context`, which need
+//!   access to fills/strokes for the color suffix.
+//! - `_cache` suffixed paths over `&CacheNode` for the cached structural
+//!   commands (`tree`, `pages`, `frames`, `search`). These drop the color
+//!   suffix because the projection doesn't carry fills.
 
 use serde_json::{json, Map, Value};
 use std::fmt::Write;
 
+use crate::cache::CacheNode;
 use crate::node::{bounds, children, id, is_visible, name, primary_solid_hex, type_str};
 
 /// Render `root` as a tree, traversing at most `max_depth` levels of children
@@ -135,6 +144,80 @@ pub fn format_node_line(node: &Value) -> String {
     if let Some(nid) = id(node) {
         let _ = write!(s, " id:{}", nid);
     }
+    s
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CacheNode-typed renderers (cache consumers)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Render a `CacheNode` as a compact YAML-friendly tree. Mirrors
+/// `render_compact` over `&Value` but operates on the typed projection;
+/// drops the color suffix because the cache doesn't carry fills.
+pub fn render_compact_cache(root: &CacheNode, max_depth: usize) -> Value {
+    fn build(node: &CacheNode, max_depth: usize, depth: usize) -> Value {
+        let line = format_cache_node_line(node);
+        let kids: Vec<&CacheNode> = node.children.iter().filter(|n| n.visible).collect();
+        if kids.is_empty() {
+            return Value::String(line);
+        }
+        if depth >= max_depth {
+            return Value::String(format!("{} [+{} children]", line, kids.len()));
+        }
+        let rendered: Vec<Value> = kids
+            .iter()
+            .map(|c| build(c, max_depth, depth + 1))
+            .collect();
+        let mut obj = Map::new();
+        obj.insert(line, Value::Array(rendered));
+        Value::Object(obj)
+    }
+    if !root.visible {
+        return Value::Null;
+    }
+    build(root, max_depth, 0)
+}
+
+/// Render a `CacheNode` as a nested JSON tree (one object per visible node,
+/// child arrays). Truncates at `max_depth` with a `truncated` marker.
+pub fn render_structured_cache(root: &CacheNode, max_depth: usize) -> Value {
+    fn build(node: &CacheNode, max_depth: usize, depth: usize) -> Value {
+        let mut obj = Map::new();
+        obj.insert("id".into(), json!(node.id));
+        obj.insert("type".into(), json!(node.type_));
+        obj.insert("name".into(), json!(node.name));
+        if let Some(b) = node.bounds {
+            obj.insert("bounds".into(), json!(b.to_string()));
+        }
+        let kids: Vec<&CacheNode> = node.children.iter().filter(|n| n.visible).collect();
+        if !kids.is_empty() {
+            if depth >= max_depth {
+                obj.insert("truncated".into(), json!({ "children": kids.len() }));
+            } else {
+                let rendered: Vec<Value> = kids
+                    .iter()
+                    .map(|c| build(c, max_depth, depth + 1))
+                    .collect();
+                obj.insert("children".into(), Value::Array(rendered));
+            }
+        }
+        Value::Object(obj)
+    }
+    if !root.visible {
+        return Value::Null;
+    }
+    build(root, max_depth, 0)
+}
+
+/// Single-line summary of a `CacheNode`: `TYPE "name" (bounds) id:nid`.
+/// No color suffix — fills aren't in the cache projection.
+pub fn format_cache_node_line(node: &CacheNode) -> String {
+    let kind = if node.type_.is_empty() { "?" } else { node.type_.as_str() };
+    let mut s = format!("{} \"{}\"", kind, node.name);
+    if let Some(b) = node.bounds {
+        let _ = write!(s, " ({})", b);
+    }
+    let _ = write!(s, " id:{}", node.id);
     s
 }
 
