@@ -28,14 +28,18 @@
 //! is single-user and local; we don't try to support shared/transferred
 //! cache directories across machines.
 
+use std::collections::hash_map::DefaultHasher;
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
+use figma_api::apis::comments_api;
 use figma_api::apis::configuration::Configuration;
 use figma_api::apis::projects_api as api;
+use figma_api::models::Comment;
 use memmap2::Mmap;
 use rkyv::rancor;
 use serde::{Deserialize, Serialize};
@@ -290,6 +294,20 @@ pub struct FileMeta {
     pub node_count: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bytes: Option<u64>,
+    /// Epoch seconds of the last successful comments fetch for this file. None
+    /// when comments have never been fetched (predates the feature, or never
+    /// polled). Drives the `comments --max-age-secs` decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comments_fetched_at_epoch: Option<u64>,
+    /// Stable fingerprint of the comments sidecar (sorted ids + per-comment
+    /// signature). Lets future tooling cheaply answer "did anything change
+    /// since the last poll?" without re-diffing the file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comments_fingerprint: Option<String>,
+    /// Set when the most recent comments fetch failed but the tree refresh
+    /// succeeded. Persists until a subsequent fetch clears it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comments_error: Option<String>,
 }
 
 impl FileMeta {
@@ -311,6 +329,9 @@ impl FileMeta {
             error: None,
             node_count: Some(payload.node_count as usize),
             bytes: Some(bytes),
+            comments_fetched_at_epoch: None,
+            comments_fingerprint: None,
+            comments_error: None,
         }
     }
 }
@@ -342,6 +363,36 @@ impl CacheDir {
         self.files_dir().join(format!("{file_key}.meta.json"))
     }
 
+    pub fn comments_path(&self, file_key: &str) -> PathBuf {
+        self.files_dir().join(format!("{file_key}.comments.json"))
+    }
+
+    /// Read the comments sidecar for `file_key`. `Ok(None)` when the sidecar
+    /// doesn't exist (file never polled for comments).
+    pub fn read_comments(&self, file_key: &str) -> Result<Option<Vec<Comment>>> {
+        let p = self.comments_path(file_key);
+        if !p.exists() {
+            return Ok(None);
+        }
+        let s = fs::read_to_string(&p).with_context(|| format!("reading {}", p.display()))?;
+        let v = serde_json::from_str(&s).with_context(|| format!("parsing {}", p.display()))?;
+        Ok(Some(v))
+    }
+
+    pub fn write_comments(&self, file_key: &str, comments: &[Comment]) -> Result<()> {
+        let path = self.comments_path(file_key);
+        let bytes = serde_json::to_vec_pretty(comments)?;
+        atomic_write(&path, &bytes)
+    }
+
+    pub fn delete_comments(&self, file_key: &str) -> Result<()> {
+        let p = self.comments_path(file_key);
+        if p.exists() {
+            fs::remove_file(&p).with_context(|| format!("removing {}", p.display()))?;
+        }
+        Ok(())
+    }
+
     pub fn read_meta(&self, file_key: &str) -> Result<Option<FileMeta>> {
         let p = self.meta_path(file_key);
         if !p.exists() {
@@ -358,12 +409,14 @@ impl CacheDir {
         atomic_write(&path, &bytes)
     }
 
-    /// Delete `{file_key}.meta.json` first, then `{file_key}.rkyv`. The
-    /// ordering matters: readers seeing no meta treat the entry as uncached,
-    /// so a transient "meta gone but rkyv lingers" window is benign.
+    /// Delete `{file_key}.meta.json` first, then `{file_key}.rkyv` and the
+    /// `{file_key}.comments.json` sidecar. The meta-first ordering matters:
+    /// readers seeing no meta treat the entry as uncached, so a transient
+    /// "meta gone but other files linger" window is benign.
     pub fn delete_entry(&self, file_key: &str) -> Result<()> {
         let meta = self.meta_path(file_key);
         let payload = self.file_path(file_key);
+        let comments = self.comments_path(file_key);
         if meta.exists() {
             fs::remove_file(&meta)
                 .with_context(|| format!("removing {}", meta.display()))?;
@@ -371,6 +424,10 @@ impl CacheDir {
         if payload.exists() {
             fs::remove_file(&payload)
                 .with_context(|| format!("removing {}", payload.display()))?;
+        }
+        if comments.exists() {
+            fs::remove_file(&comments)
+                .with_context(|| format!("removing {}", comments.display()))?;
         }
         Ok(())
     }
@@ -646,13 +703,17 @@ async fn try_refresh_single(
     let payload_readable = matches!(cache.read_file(file_key), Ok(Some(_)));
 
     if cached_unchanged && cached_status == EntryStatus::Ok && payload_readable {
-        // Bump last_listed_at to reset TTL window.
+        // Bump last_listed_at to reset TTL window. Even though the document
+        // is unchanged we still re-fetch comments — Figma's `lastModified`
+        // doesn't tick for comment activity, so this is the only path that
+        // observes new comments on otherwise-stable files.
         if let Some(m) = meta {
             let mut updated = m.clone();
             updated.last_listed_at_epoch = now;
             // Keep project info fresh from the listing in case it drifted.
             updated.project_name = current.project_name.clone();
             updated.name = current.name.clone();
+            fetch_comments_into_meta(cfg, cache, file_key, now, &mut updated).await;
             let _ = cache.write_meta(&updated);
         }
         return cache
@@ -710,7 +771,11 @@ async fn fetch_and_cache(
             };
             let payload = build_cached_file(&synthetic_ref, &file["document"], now);
             let bytes = cache.write_file(file_key, &payload)?;
-            let meta = FileMeta::from_success(&synthetic_ref, &payload, bytes, now);
+            let mut meta = FileMeta::from_success(&synthetic_ref, &payload, bytes, now);
+            // Fetch comments alongside the structural payload — same cadence,
+            // best-effort. A failure flips `meta.comments_error` but does not
+            // poison the tree refresh.
+            fetch_comments_into_meta(cfg, cache, file_key, now, &mut meta).await;
             cache.write_meta(&meta)?;
             // Intern synth IDs so downstream commands (`ls`, etc.) can render
             // qualified `file:N:x:y` lines for this freshly cached file.
@@ -756,6 +821,9 @@ async fn fetch_and_cache(
                 error: Some(msg.clone()),
                 node_count: None,
                 bytes: None,
+                comments_fetched_at_epoch: None,
+                comments_fingerprint: None,
+                comments_error: None,
             };
             // Also drop any stale payload — meta-first ordering.
             let _ = cache.delete_entry(file_key);
@@ -763,6 +831,107 @@ async fn fetch_and_cache(
             Err(e)
         }
     }
+}
+
+/// Stable signature over the comment set so future polling tooling can answer
+/// "did anything change?" without re-diffing. Captures id, message text,
+/// resolution state, and reaction count — the fields that change in practice.
+/// Sorted by id first to be insensitive to API response ordering.
+pub fn fingerprint_comments(comments: &[Comment]) -> String {
+    let mut entries: Vec<(&str, &str, &str, usize)> = comments
+        .iter()
+        .map(|c| {
+            let resolved = c
+                .resolved_at
+                .as_ref()
+                .and_then(|outer| outer.as_deref())
+                .unwrap_or("");
+            (
+                c.id.as_str(),
+                c.message.as_str(),
+                resolved,
+                c.reactions.len(),
+            )
+        })
+        .collect();
+    entries.sort_by_key(|e| e.0);
+    let mut h = DefaultHasher::new();
+    for (id, msg, resolved, n) in entries {
+        id.hash(&mut h);
+        msg.hash(&mut h);
+        resolved.hash(&mut h);
+        n.hash(&mut h);
+    }
+    format!("{:016x}", h.finish())
+}
+
+/// Fetch comments for `file_key` and update `meta` in place. On success:
+/// writes the `.comments.json` sidecar, sets `comments_fetched_at_epoch` +
+/// `comments_fingerprint`, clears `comments_error`. On failure: leaves any
+/// prior sidecar untouched, sets `comments_error`, logs to stderr.
+///
+/// Best-effort: returns `Ok(())` even on API failure. The error is reflected
+/// in `meta.comments_error` so the caller can write the updated meta and
+/// downstream tooling can surface staleness.
+pub async fn fetch_comments_into_meta(
+    cfg: &Configuration,
+    cache: &CacheDir,
+    file_key: &str,
+    now: u64,
+    meta: &mut FileMeta,
+) {
+    let params = comments_api::GetCommentsParams {
+        file_key: file_key.to_owned(),
+        as_md: None,
+    };
+    match comments_api::get_comments(cfg, params).await {
+        Ok(resp) => {
+            let comments = resp.comments;
+            let fp = fingerprint_comments(&comments);
+            match cache.write_comments(file_key, &comments) {
+                Ok(()) => {
+                    meta.comments_fetched_at_epoch = Some(now);
+                    meta.comments_fingerprint = Some(fp);
+                    meta.comments_error = None;
+                }
+                Err(e) => {
+                    let msg = format!("write_comments: {e:#}");
+                    eprintln!("comments: {file_key}: {msg}");
+                    meta.comments_error = Some(msg);
+                }
+            }
+        }
+        Err(e) => {
+            let msg = format!("{:?}", e);
+            eprintln!("comments: fetch failed for {file_key}: {msg}");
+            meta.comments_error = Some(msg);
+        }
+    }
+}
+
+/// Public entry point used by the `comments` subcommand's `--max-age-secs 0`
+/// path: force-refresh comments for a file that already has a cached tree.
+/// Returns the freshly-fetched comments on success, or an error explaining
+/// why a refresh couldn't happen (e.g. no cached file yet).
+pub async fn refresh_comments(cfg: &Configuration, file_key: &str) -> Result<Vec<Comment>> {
+    let cache = CacheDir::new(default_dir());
+    cache.ensure()?;
+    let now = now_epoch();
+    let mut meta = cache
+        .read_meta(file_key)?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no cached metadata for {file_key}; run `cache prefetch` or pass a URL first"
+            )
+        })?;
+    fetch_comments_into_meta(cfg, &cache, file_key, now, &mut meta).await;
+    cache.write_meta(&meta)?;
+    if let Some(err) = &meta.comments_error {
+        anyhow::bail!("comments fetch failed: {err}");
+    }
+    cache
+        .read_comments(file_key)?
+        .ok_or_else(|| anyhow::anyhow!("comments fetch reported success but no sidecar on disk"))
 }
 
 /// Cache-first loader for the structural commands.
@@ -944,6 +1113,9 @@ mod tests {
             error: None,
             node_count: Some(1),
             bytes: Some(100),
+            comments_fetched_at_epoch: None,
+            comments_fingerprint: None,
+            comments_error: None,
         }
     }
 
@@ -1100,6 +1272,9 @@ mod tests {
             error: None,
             node_count: Some(1),
             bytes: Some(1),
+            comments_fetched_at_epoch: None,
+            comments_fingerprint: None,
+            comments_error: None,
         }
     }
 

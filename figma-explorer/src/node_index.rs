@@ -207,6 +207,9 @@ mod tests {
             error: Some("transient".into()),
             node_count: None,
             bytes: None,
+            comments_fetched_at_epoch: None,
+            comments_fingerprint: None,
+            comments_error: None,
         };
         cache.write_meta(&meta).unwrap();
 

@@ -8,7 +8,8 @@ use futures::stream::{self, StreamExt};
 use serde_json::json;
 
 use crate::cache::{
-    self, build_cached_file, default_dir, CacheDir, EntryStatus, FileMeta, FileRef,
+    self, build_cached_file, default_dir, fetch_comments_into_meta, CacheDir, EntryStatus,
+    FileMeta, FileRef,
 };
 use crate::cmd::fetch_file_json;
 use crate::{print, Globals, Output};
@@ -93,6 +94,10 @@ impl PrefetchArgs {
         let now_pre = cache::now_epoch();
         let mut pruned = 0usize;
         let mut upgraded = 0usize;
+        // Files whose document is unchanged + Ok — we still want to poll their
+        // comments because Figma's `lastModified` doesn't tick for comment
+        // activity. Refreshed concurrently after the main fetch pass.
+        let mut to_refresh_comments: Vec<(FileMeta, FileRef)> = Vec::new();
         for m in &metas_on_disk {
             let in_jurisdiction = configured.contains(&m.project_id);
             let upgradable = m.project_id.is_empty() && listing_keys.contains(&m.file_key);
@@ -117,15 +122,18 @@ impl PrefetchArgs {
                     pruned += 1;
                 }
                 Some(current) if unchanged && payload_ok => {
-                    let mut updated = m.clone();
+                    let mut staged = m.clone();
                     if upgradable {
-                        updated.project_id = current.project_id.clone();
+                        staged.project_id = current.project_id.clone();
                         upgraded += 1;
                     }
-                    updated.last_listed_at_epoch = now_pre;
-                    updated.project_name = current.project_name.clone();
-                    updated.name = current.name.clone();
-                    let _ = cache_dir.write_meta(&updated);
+                    staged.last_listed_at_epoch = now_pre;
+                    staged.project_name = current.project_name.clone();
+                    staged.name = current.name.clone();
+                    // Defer the write until after the comments fetch so we
+                    // capture comments_fetched_at_epoch + fingerprint in a
+                    // single meta update.
+                    to_refresh_comments.push((staged, current.clone()));
                 }
                 Some(_) if unchanged && m.status == EntryStatus::NotExportable => {
                     let mut updated = m.clone();
@@ -188,7 +196,7 @@ impl PrefetchArgs {
                                     return;
                                 }
                             };
-                            let meta = FileMeta {
+                            let mut meta = FileMeta {
                                 file_key: f.file_key.clone(),
                                 name: f.name.clone(),
                                 project_id: f.project_id.clone(),
@@ -200,7 +208,14 @@ impl PrefetchArgs {
                                 error: None,
                                 node_count: Some(node_count),
                                 bytes: Some(bytes),
+                                comments_fetched_at_epoch: None,
+                                comments_fingerprint: None,
+                                comments_error: None,
                             };
+                            // Fetch comments alongside the document. Best-effort:
+                            // failures flip `meta.comments_error` but don't fail
+                            // the entry.
+                            fetch_comments_into_meta(cfg, &cache, &f.file_key, now, &mut meta).await;
                             if let Err(e) = cache.write_meta(&meta) {
                                 eprintln!("cache: write_meta failed for {}: {e:#}", f.file_key);
                             }
@@ -248,6 +263,9 @@ impl PrefetchArgs {
                                 error: Some(msg.clone()),
                                 node_count: None,
                                 bytes: None,
+                                comments_fetched_at_epoch: None,
+                                comments_fingerprint: None,
+                                comments_error: None,
                             };
                             let _ = cache.write_meta(&marker);
                         }
@@ -257,6 +275,33 @@ impl PrefetchArgs {
             .buffer_unordered(self.concurrency)
             .fold(0usize, |n, _| async move { n + 1 })
             .await;
+
+        // (3b) Refresh comments for files whose document was unchanged. Figma's
+        // `lastModified` doesn't tick for comment activity, so without this
+        // step prefetch would never observe new comments on stable files.
+        let n_comments_only = to_refresh_comments.len();
+        let cache_root = cache_dir.root.clone();
+        let comments_refreshed = stream::iter(to_refresh_comments.into_iter().map(|(staged, _current)| {
+                let cache_root = cache_root.clone();
+                async move {
+                    let cache = CacheDir::new(&cache_root);
+                    let now = cache::now_epoch();
+                    let mut updated = staged;
+                    let file_key = updated.file_key.clone();
+                    fetch_comments_into_meta(cfg, &cache, &file_key, now, &mut updated).await;
+                    if let Err(e) = cache.write_meta(&updated) {
+                        eprintln!("cache: write_meta failed for {file_key}: {e:#}");
+                    }
+                }
+            }))
+            .buffer_unordered(self.concurrency)
+            .fold(0usize, |n, _| async move { n + 1 })
+            .await;
+        if n_comments_only > 0 {
+            eprintln!(
+                "cache: comments-only refresh complete: {comments_refreshed}/{n_comments_only}"
+            );
+        }
 
         // (4a) Intern synth IDs for every project + every successfully-cached
         //      file. One lock-protected pass at the end so prefetch's worker
@@ -319,6 +364,7 @@ impl PrefetchArgs {
             "failed": failed,
             "cache_bytes": cache_bytes,
             "total_nodes": total_nodes,
+            "comments_refreshed": comments_refreshed,
         });
         print(&summary, format)
     }
