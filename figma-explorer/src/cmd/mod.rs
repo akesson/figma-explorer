@@ -8,6 +8,7 @@ pub mod assets;
 pub mod cache;
 pub mod context;
 pub mod find;
+pub mod library;
 pub mod ls;
 pub mod node_info;
 pub mod screenshot;
@@ -19,6 +20,10 @@ pub enum Command {
     Ls(ls::Args),
     /// Locate nodes by a multi-token ancestor-chain query.
     Find(find::Args),
+    /// Search the published team-library catalog (components, component sets,
+    /// styles) by name. Unlike `find`, this spans the whole team library
+    /// rather than one cached file.
+    Library(library::Args),
     /// Export a node as PNG/JPG/SVG/PDF.
     Screenshot(screenshot::Args),
     /// Extract design tokens (colors, fonts, sizes, spacing, …).
@@ -41,6 +46,7 @@ impl Command {
         match self {
             Self::Ls(a) => a.run(cfg, globals).await,
             Self::Find(a) => a.run(cfg, globals).await,
+            Self::Library(a) => a.run(cfg, globals).await,
             Self::Screenshot(a) => a.run(cfg, globals).await,
             Self::Tokens(a) => a.run(cfg, globals).await,
             Self::Assets(a) => a.run(cfg, globals).await,

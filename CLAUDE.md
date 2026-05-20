@@ -21,7 +21,7 @@ cargo fmt
 cargo run -p figma-explorer -- <subcommand>  # run the CLI locally
 ```
 
-The repo auto-loads `.env` via `dotenvy`, walking from cwd up to the filesystem root. The closest `.env` wins; ancestors fill in keys it didn't define. Required: `FIGMA_TOKEN`. Cache prefetch needs `FIGMA_PROJECTS_IDS` (comma-separated project IDs). Cache location override: `FIGMA_EXPLORER_CACHE_DIR` (else `dirs::cache_dir()`).
+The repo auto-loads `.env` via `dotenvy`, walking from cwd up to the filesystem root. The closest `.env` wins; ancestors fill in keys it didn't define. Required: `FIGMA_TOKEN`. Cache prefetch needs `FIGMA_PROJECTS_IDS` (comma-separated project IDs); `library search` and the `cache prefetch` catalog warm need `FIGMA_TEAM_ID`. Cache location override: `FIGMA_EXPLORER_CACHE_DIR` (else `dirs::cache_dir()`).
 
 ## Architecture — figma-explorer
 
@@ -36,6 +36,8 @@ Three sidecars live next to each file's rkyv payload:
 - `{file_key}.full.json.gz` — full raw `/v1/files/{key}` body, gzipped (`src/full_cache.rs`). Read by `node-info` so it works offline without the rkyv projection dropping fields it needs. Stamped via `FULL_SCHEMA_VERSION` on the meta. Disable with `cache prefetch --no-full`.
 - `{file_key}.variables.json` — local variables (`/v1/files/{key}/variables/local`). Paid-tier endpoint; `cache prefetch` auto-disables further variables fetches after 3 consecutive 403s in a single run and records the error on the meta. Disable with `--no-variables` or `FIGMA_EXPLORER_FETCH_VARIABLES=0`.
 
+One **team-scoped** sidecar lives outside `files/`: `teams/{team_id}.catalog.json.gz` — the published team-library catalog (components, component sets, styles) aggregated from `/v1/teams/{team_id}/{components,component_sets,styles}`, gzipped, versioned via `CATALOG_SCHEMA_VERSION`. It sits in `teams/` (parallel to `files/`) because it is keyed by team, not file. `src/team_catalog.rs` owns its model, projection, paginated fetch, and tolerant sidecar I/O; `library search` writes it lazily and `cache prefetch` warms it (`--no-catalog` to skip). Variables are absent — the Variables REST API is Enterprise-gated, so the catalog covers components/sets/styles but not color tokens. A full `cache clear` sweeps `teams/` alongside `files/`; `synth.json` is preserved.
+
 **Untyped JSON reads** (`src/cmd/mod.rs::fetch_file_json`): commands hit Figma's REST endpoint directly with `serde_json::Value` rather than going through `figma-api`'s typed deserializer, because real files routinely contain nodes the OpenAPI spec doesn't model. The cache projection (`CacheNode`) drops fields the structural commands don't need; live-data commands (`context`, `styles`, `screenshot`, `extract_assets`) still walk raw `Value` for access to `fills`/`strokes`/`characters`. `node-info` reads `fills`/`strokes`/`style`/etc. from the `.full.json.gz` sidecar instead of refetching live on every call.
 
 **Resolve-then-fetch pattern.** Every subcommand follows the same two-step shape:
@@ -48,9 +50,10 @@ Which lane each subcommand uses:
 - *Resolve, then fetch live*: `tokens`, `assets`, `screenshot`, `context`.
 - *Resolve, then read sidecar (with live fetch as fallback)*: `node-info` (consumes `.full.json.gz` for offline-correct paint/text/effect data; only fetches live when the sidecar is absent and `--cache-only` is not set).
 - *Cache plane*: `cache prefetch` bypasses the resolver entirely and writes meta+payload+sidecars by walking project listings.
+- *Team-catalog plane*: `library search` also bypasses the resolver — it takes no tagged ID. It reads the team-scoped catalog sidecar, lazily fetching from the team-library endpoints when the sidecar is absent or older than `CATALOG_TTL_SECS` (24h; `--refresh` forces it).
 
 New subcommands should pick one of these lanes deliberately rather than hand-rolling a third path.
 
 **Global flags** (`Globals` struct in `lib.rs`) are threaded through every subcommand: `--json` (else compact YAML), `--cache-only` (refuse live API fallback), `--in <ID>` (scope override for bare-id resolution; only `ls` and `find` consume it).
 
-**Subcommands** live in `src/cmd/{ls,find,screenshot,tokens,assets,context,node_info,cache}.rs`. `context` is the aggregate — tree + screenshot + tokens + assets for a node. `node-info` is the curated single-target view designed for Claude Code agents implementing designs in code: layout/fills/strokes/effects/text/component/prototype, with referenced variables and named styles hoisted to top-level blocks so descendants don't duplicate token data. View shaping lives in `src/node_view.rs`. `node-info` is also the sole consumer of comment ids (`file:N:comm:M`) — it dumps a single thread (parent + replies) and inlines anchored comments under any node/file target.
+**Subcommands** live in `src/cmd/{ls,find,library,screenshot,tokens,assets,context,node_info,cache}.rs`. `context` is the aggregate — tree + screenshot + tokens + assets for a node. `node-info` is the curated single-target view designed for Claude Code agents implementing designs in code: layout/fills/strokes/effects/text/component/prototype, with referenced variables and named styles hoisted to top-level blocks so descendants don't duplicate token data. View shaping lives in `src/node_view.rs`. `node-info` is also the sole consumer of comment ids (`file:N:comm:M`) — it dumps a single thread (parent + replies) and inlines anchored comments under any node/file target. `library search` is the team-catalog plane — fuzzy text search across the published team library (components, component sets, styles), parity with the Figma MCP's `search_design_system`; each hit carries the component key and a paste-ready `file:N:x:y` when the source file is interned in `synth.json`.
