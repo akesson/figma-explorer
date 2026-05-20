@@ -21,6 +21,7 @@ pub mod resolver;
 pub mod screenshot;
 pub mod styles;
 pub mod synth;
+pub mod team_catalog;
 pub mod tree;
 pub mod url;
 

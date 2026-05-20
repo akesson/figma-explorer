@@ -15,6 +15,7 @@ use crate::cache::{
 };
 use crate::cmd::{fetch_file_json, fetch_local_variables, is_variables_forbidden_error};
 use crate::full_cache;
+use crate::team_catalog;
 use crate::{print, Globals, Output};
 
 /// After this many consecutive 403s on `/variables/local`, disable further
@@ -40,7 +41,8 @@ pub enum CacheCommand {
     /// Pre-fetch every file in the configured projects, invalidating stale
     /// entries first. Opt-in; structural commands do not require this.
     Prefetch(PrefetchArgs),
-    /// Delete cached entries. Without --file-key, wipes the cache directory.
+    /// Delete cached entries. Without --file-key, clears all cached files
+    /// and team catalogs (synth IDs are preserved).
     Clear(ClearArgs),
 }
 
@@ -76,11 +78,23 @@ pub struct PrefetchArgs {
     /// every file, so the adaptive guard kicks in after 3 strikes anyway.
     #[arg(long)]
     pub no_variables: bool,
+
+    /// Figma team id for warming the team-library catalog. Falls back to
+    /// FIGMA_TEAM_ID. When no team id is available the catalog warm is
+    /// skipped silently — prefetch's core contract is project-based.
+    #[arg(long, env = "FIGMA_TEAM_ID", hide_env_values = true)]
+    pub team_id: Option<String>,
+
+    /// Skip warming the team-library catalog sidecar. Default: warm it when a
+    /// team id is available, so `library search --cache-only` works offline.
+    #[arg(long)]
+    pub no_catalog: bool,
 }
 
 #[derive(ClapArgs, Debug)]
 pub struct ClearArgs {
-    /// Clear only this file_key. Omit to clear the entire cache directory.
+    /// Clear only this file_key. Omit to clear all cached files and team
+    /// catalogs (synth IDs are preserved).
     #[arg(long)]
     pub file_key: Option<String>,
 }
@@ -485,7 +499,13 @@ impl PrefetchArgs {
             eprintln!("cache: synth intern failed: {e:#}");
         }
 
-        // (4b) Tally summary from disk so we capture both newly-fetched and
+        // (4b) Warm the team-library catalog so `library search --cache-only`
+        //      works offline. Best-effort — a failure here never aborts the
+        //      prefetch; the file work above is the core contract.
+        let team_catalog_summary =
+            warm_team_catalog(cfg, &cache_dir, self.team_id.as_deref(), self.no_catalog).await;
+
+        // (4c) Tally summary from disk so we capture both newly-fetched and
         //      previously-cached entries within jurisdiction.
         let ok = metas_after
             .iter()
@@ -543,6 +563,7 @@ impl PrefetchArgs {
             "variables_disabled": variables_disabled.load(Ordering::Relaxed),
             "total_nodes": total_nodes,
             "comments_refreshed": comments_refreshed,
+            "team_catalog": team_catalog_summary,
         });
         print(&summary, format)
     }
@@ -551,7 +572,6 @@ impl PrefetchArgs {
 impl ClearArgs {
     pub fn run(self, format: Output) -> Result<()> {
         let cache_dir = CacheDir::new(default_dir());
-        let files_dir = cache_dir.files_dir();
 
         let mut deleted = 0usize;
         let mut errors = 0usize;
@@ -566,35 +586,26 @@ impl ClearArgs {
                 deleted,
                 if deleted == 1 { "y" } else { "ies" }
             );
-        } else if files_dir.exists() {
-            // Walk and delete every meta + payload (and any orphans).
-            for entry in std::fs::read_dir(&files_dir)? {
-                let entry = match entry {
-                    Ok(e) => e,
-                    Err(_) => {
-                        errors += 1;
-                        continue;
-                    }
-                };
-                let path = entry.path();
-                if path.is_file() {
-                    if let Err(e) = std::fs::remove_file(&path) {
-                        eprintln!("cache: failed to remove {}: {e}", path.display());
-                        errors += 1;
-                    } else {
-                        deleted += 1;
-                    }
-                }
-            }
-            eprintln!(
-                "cache: cleared {deleted} files under {} ({errors} errors)",
-                files_dir.display()
-            );
         } else {
-            eprintln!(
-                "cache: nothing to clear (no cache directory at {})",
-                files_dir.display()
-            );
+            // Full clear: sweep every per-file sidecar AND every team-scoped
+            // catalog. `synth.json` is left intact so synth IDs stay stable.
+            let files_dir = cache_dir.files_dir();
+            let teams_dir = cache_dir.teams_dir();
+            if files_dir.exists() || teams_dir.exists() {
+                let (d, e) = clear_all_sidecars(&cache_dir)?;
+                deleted = d;
+                errors = e;
+                eprintln!(
+                    "cache: cleared {deleted} files under {} + {} ({errors} errors)",
+                    files_dir.display(),
+                    teams_dir.display(),
+                );
+            } else {
+                eprintln!(
+                    "cache: nothing to clear (no cache directory at {})",
+                    cache_dir.root.display()
+                );
+            }
         }
 
         let summary = json!({
@@ -607,6 +618,82 @@ impl ClearArgs {
     }
 }
 
+/// Sweep every per-file sidecar and every team-scoped catalog sidecar from
+/// the cache. `synth.json` is intentionally left intact so synth IDs stay
+/// stable across a clear. Returns `(deleted, errors)`.
+fn clear_all_sidecars(cache_dir: &CacheDir) -> Result<(usize, usize)> {
+    let mut deleted = 0usize;
+    let mut errors = 0usize;
+    for dir in [cache_dir.files_dir(), cache_dir.teams_dir()] {
+        if !dir.exists() {
+            continue;
+        }
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => {
+                    errors += 1;
+                    continue;
+                }
+            };
+            let path = entry.path();
+            if path.is_file() {
+                if let Err(e) = std::fs::remove_file(&path) {
+                    eprintln!("cache: failed to remove {}: {e}", path.display());
+                    errors += 1;
+                } else {
+                    deleted += 1;
+                }
+            }
+        }
+    }
+    Ok((deleted, errors))
+}
+
+/// Best-effort warm of the team-library catalog during `cache prefetch`.
+/// Returns a JSON value describing the outcome for the prefetch summary.
+/// Never errors — a catalog failure must not abort the prefetch.
+async fn warm_team_catalog(
+    cfg: &Configuration,
+    cache_dir: &CacheDir,
+    team_id: Option<&str>,
+    no_catalog: bool,
+) -> serde_json::Value {
+    if no_catalog {
+        return json!("skipped (--no-catalog)");
+    }
+    let Some(team_id) = team_id else {
+        return json!("skipped (no team id)");
+    };
+    match team_catalog::fetch_team_catalog(cfg, team_id).await {
+        Ok(mut catalog) => match team_catalog::write_catalog(cache_dir, &mut catalog) {
+            Ok(bytes) => {
+                eprintln!(
+                    "cache: team catalog warmed — {} entries ({} KB)",
+                    catalog.total(),
+                    bytes / 1024,
+                );
+                json!({
+                    "components": catalog.components.len(),
+                    "component_sets": catalog.component_sets.len(),
+                    "styles": catalog.styles.len(),
+                    "bytes": bytes,
+                })
+            }
+            Err(e) => {
+                let msg = format!("write failed: {e:#}");
+                eprintln!("cache: team catalog {msg}");
+                json!({ "error": msg })
+            }
+        },
+        Err(e) => {
+            let msg = format!("{e:#}");
+            eprintln!("cache: team catalog fetch failed: {msg}");
+            json!({ "error": msg })
+        }
+    }
+}
+
 fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_owned();
@@ -614,4 +701,30 @@ fn truncate(s: &str, max: usize) -> String {
     let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
     out.push('…');
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn clear_all_sidecars_sweeps_files_and_teams() {
+        let td = TempDir::new().unwrap();
+        let cache = CacheDir::new(td.path());
+        cache.ensure().unwrap();
+        std::fs::write(cache.meta_path("abc"), b"{}").unwrap();
+        std::fs::write(cache.file_path("abc"), b"payload").unwrap();
+        std::fs::write(cache.catalog_path("99"), b"catalog").unwrap();
+
+        let (deleted, errors) = clear_all_sidecars(&cache).unwrap();
+        assert_eq!(errors, 0);
+        assert_eq!(deleted, 3, "both per-file sidecars and the team catalog");
+        assert!(!cache.meta_path("abc").exists());
+        assert!(!cache.file_path("abc").exists());
+        assert!(!cache.catalog_path("99").exists());
+        // The directories themselves survive — only their contents go.
+        assert!(cache.files_dir().exists());
+        assert!(cache.teams_dir().exists());
+    }
 }

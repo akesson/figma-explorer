@@ -70,6 +70,17 @@ pub const FULL_SCHEMA_VERSION: u32 = 1;
 /// shape.
 pub const VARIABLES_SCHEMA_VERSION: u32 = 1;
 
+/// Schema version for the team-library catalog sidecar
+/// (`teams/{team_id}.catalog.json.gz`). Bumped when `TeamCatalog`'s on-disk
+/// shape changes; a mismatched sidecar is treated as missing → refetched.
+pub const CATALOG_SCHEMA_VERSION: u32 = 1;
+
+/// Refresh interval for the team-library catalog. Far longer than the
+/// per-file [`DEFAULT_TTL_SECS`]: a design system changes slowly and a full
+/// catalog refetch is several paginated requests. `library search`
+/// auto-refetches a catalog older than this; `--refresh` overrides it.
+pub const CATALOG_TTL_SECS: u64 = 86_400;
+
 /// 4-byte magic prefix on every `.rkyv` cache file. Distinguishes a cache
 /// file from arbitrary bytes (truncated downloads, accidental replacement).
 pub const CACHE_MAGIC: [u8; 4] = *b"FXC\0";
@@ -430,6 +441,8 @@ impl CacheDir {
     pub fn ensure(&self) -> Result<()> {
         fs::create_dir_all(self.files_dir())
             .with_context(|| format!("creating {}", self.files_dir().display()))?;
+        fs::create_dir_all(self.teams_dir())
+            .with_context(|| format!("creating {}", self.teams_dir().display()))?;
         Ok(())
     }
 
@@ -461,6 +474,18 @@ impl CacheDir {
     /// body, plaintext JSON).
     pub fn variables_path(&self, file_key: &str) -> PathBuf {
         self.files_dir().join(format!("{file_key}.variables.json"))
+    }
+
+    /// Directory holding team-scoped sidecars. Parallel to `files/`: team
+    /// data is keyed by `team_id`, not `file_key`, so it lives separately.
+    pub fn teams_dir(&self) -> PathBuf {
+        self.root.join("teams")
+    }
+
+    /// Path of the gzipped team-library catalog sidecar — the published
+    /// components, component sets, and styles across a team's libraries.
+    pub fn catalog_path(&self, team_id: &str) -> PathBuf {
+        self.teams_dir().join(format!("{team_id}.catalog.json.gz"))
     }
 
     /// Read the comments sidecar for `file_key`. `Ok(None)` when the sidecar
@@ -1261,6 +1286,16 @@ mod tests {
     use super::*;
     use serde_json::json;
     use tempfile::TempDir;
+
+    #[test]
+    fn teams_dir_and_catalog_path_layout() {
+        let cache = CacheDir::new("/tmp/fx-cache");
+        assert_eq!(cache.teams_dir(), PathBuf::from("/tmp/fx-cache/teams"));
+        assert_eq!(
+            cache.catalog_path("651911646771145269"),
+            PathBuf::from("/tmp/fx-cache/teams/651911646771145269.catalog.json.gz"),
+        );
+    }
 
     #[test]
     fn project_keeps_structural_fields_drops_paint() {
