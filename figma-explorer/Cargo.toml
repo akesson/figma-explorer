@@ -5,6 +5,10 @@ description = "High-level CLI on top of the Figma REST API: name-based navigatio
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage = "https://github.com/akesson/figma-explorer"
+readme = "../README.md"
+keywords = ["figma", "cli", "design", "design-tokens"]
+categories = ["command-line-utilities"]
 
 [[bin]]
 name = "figma-explorer"

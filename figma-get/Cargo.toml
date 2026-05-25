@@ -5,6 +5,7 @@ description = "Command-line tool for read-only access to the Figma REST API."
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+publish = false
 
 [[bin]]
 name = "figma-get"
