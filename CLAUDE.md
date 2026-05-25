@@ -54,6 +54,19 @@ Which lane each subcommand uses:
 
 New subcommands should pick one of these lanes deliberately rather than hand-rolling a third path.
 
+## Releases
+
+Tag-driven via [cargo-dist](https://opensource.axo.dev/cargo-dist/) (`dist` v0.31). Config lives in `[workspace.metadata.dist]` and `[profile.dist]` in the root `Cargo.toml`; the workflow at `.github/workflows/release.yml` is **generated** — re-run `dist init` and `dist generate` rather than hand-editing it.
+
+- **Tag = version.** Pushing `vX.Y.Z` triggers the release; the tag must match `figma-explorer/Cargo.toml`'s `version` exactly or the workflow refuses. Bump the version, refresh `Cargo.lock`, merge, then tag.
+- **Cargo.lock is committed** (binary distribution needs reproducible builds — do not re-add it to `.gitignore`).
+- **Only `figma-explorer` ships.** `figma-get` and `figma-api` are `publish = false`.
+- **Targets**: macOS arm64, Linux x86_64 (musl, static), Linux aarch64, Windows x86_64.
+- **Channels**: GitHub Releases (always), Homebrew tap (`akesson/homebrew-tap`), npm (`@akesson/figma-explorer`), shell + PowerShell installer scripts. The tap repo needs at least one commit (a `main` branch) to exist or the publish job fails on first push.
+- **macOS notarization is NOT wired yet** even though all Apple secrets (`APPLE_*`, `MACOS_*`, `NOTARY_*`) are pre-staged in the repo. cargo-dist 0.31 has no built-in signing — signing/notarization steps need to be added to `release.yml` as custom steps (queued for v0.2.0). Unsigned macOS binaries trigger Gatekeeper on direct download; Homebrew users are unaffected (brew strips quarantine).
+- **`NPM_TOKEN` quirks**: must be a *granular* token created with `--bypass-2fa` (npm killed classic tokens Dec 2025). The token expires every 90 days max — rotate via `npm token create --name=... --packages-and-scopes-permission=read-write --scopes=@akesson --bypass-2fa --expires=90` and update the GitHub secret. Long term, migrate to npm Trusted Publishing (OIDC) to drop the rotation burden.
+- **PR sanity check**: `pr-run-mode = "plan"` runs `dist plan` as a check on every PR — surfaces config drift before it hits a tag.
+
 **Global flags** (`Globals` struct in `lib.rs`) are threaded through every subcommand: `--json` (else compact YAML), `--cache-only` (refuse live API fallback), `--in <ID>` (scope override for bare-id resolution; only `ls` and `find` consume it).
 
 **Subcommands** live in `src/cmd/{ls,find,library,screenshot,tokens,assets,context,node_info,cache}.rs`. `context` is the aggregate — tree + screenshot + tokens + assets for a node. `node-info` is the curated single-target view designed for Claude Code agents implementing designs in code: layout/fills/strokes/effects/text/component/prototype, with referenced variables and named styles hoisted to top-level blocks so descendants don't duplicate token data. View shaping lives in `src/node_view.rs`. `node-info` is also the sole consumer of comment ids (`file:N:comm:M`) — it dumps a single thread (parent + replies) and inlines anchored comments under any node/file target. `library search` is the team-catalog plane — fuzzy text search across the published team library (components, component sets, styles), parity with the Figma MCP's `search_design_system`; each hit carries the component key and a paste-ready `file:N:x:y` when the source file is interned in `synth.json`.
