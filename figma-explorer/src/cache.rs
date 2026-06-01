@@ -28,7 +28,6 @@
 //! is single-user and local; we don't try to support shared/transferred
 //! cache directories across machines.
 
-use std::collections::hash_map::DefaultHasher;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io::Write;
@@ -39,6 +38,7 @@ use anyhow::{Context, Result};
 use figma_api::apis::configuration::Configuration;
 use figma_api::apis::projects_api as api;
 use figma_api::models::Comment;
+use figma_common::StableHasher;
 use memmap2::Mmap;
 use rkyv::rancor;
 use serde::{Deserialize, Serialize};
@@ -1029,7 +1029,7 @@ pub fn fingerprint_comments(comments: &[Comment]) -> String {
         })
         .collect();
     entries.sort_by_key(|e| e.0);
-    let mut h = DefaultHasher::new();
+    let mut h = StableHasher::default();
     for (id, msg, resolved, n) in entries {
         id.hash(&mut h);
         msg.hash(&mut h);

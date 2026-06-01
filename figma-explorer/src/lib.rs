@@ -24,6 +24,7 @@ pub mod synth;
 pub mod team_catalog;
 pub mod tree;
 pub mod url;
+pub mod util;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Output {

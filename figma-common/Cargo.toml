@@ -1,0 +1,15 @@
+[package]
+name = "figma-common"
+version = "0.1.0"
+description = "Shared helpers for the figma-explorer workspace: .env discovery, authenticated HTTP, stable hashing."
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+figma-api.workspace = true
+reqwest.workspace = true
+dotenvy.workspace = true
+anyhow.workspace = true
+twox-hash.workspace = true

@@ -330,27 +330,9 @@ fn _ensure_compile() {
     let _: HashMap<String, String> = HashMap::new();
 }
 
+/// Asset filenames fall back to `asset` when a node name slugifies to empty.
 fn slugify(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut prev_dash = false;
-    for ch in s.chars() {
-        if ch.is_alphanumeric() {
-            for c in ch.to_lowercase() {
-                out.push(c);
-            }
-            prev_dash = false;
-        } else if !prev_dash && !out.is_empty() {
-            out.push('-');
-            prev_dash = true;
-        }
-    }
-    while out.ends_with('-') {
-        out.pop();
-    }
-    if out.is_empty() {
-        out.push_str("asset");
-    }
-    out
+    crate::util::slugify(s, "asset")
 }
 
 #[cfg(test)]

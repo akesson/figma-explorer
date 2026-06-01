@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["figma-api", "figma-explorer", "figma-get"]
+members = ["figma-api", "figma-common", "figma-explorer", "figma-get"]
 
 [workspace.package]
 edition = "2021"
@@ -34,6 +34,7 @@ install-updater = false
 
 [workspace.dependencies]
 figma-api = { path = "figma-api" }
+figma-common = { path = "figma-common" }
 clap = { version = "4", features = ["derive", "env"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 anyhow = "1"
@@ -54,6 +55,7 @@ tempfile = "3"
 thiserror = "2"
 fs2 = "0.4"
 flate2 = "1"
+twox-hash = { version = "2", features = ["xxhash64"] }
 
 # The profile that 'dist' will build with
 [profile.dist]

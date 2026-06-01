@@ -19,13 +19,13 @@
 //! On-disk layout mirrors the structural cache:
 //! `[4-byte magic "FXN\0"][u32 LE schema version][rkyv body]`.
 
-use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use figma_common::StableHasher;
 use rkyv::rancor;
 
 use crate::cache::{self, CacheDir, CacheNode, EntryStatus, FileMeta};
@@ -172,7 +172,7 @@ fn compute_fingerprint(metas: &[FileMeta], synth: &SynthState) -> u64 {
         })
         .collect();
     entries.sort();
-    let mut hasher = DefaultHasher::new();
+    let mut hasher = StableHasher::default();
     NODE_INDEX_SCHEMA_VERSION.hash(&mut hasher);
     for (k, s, lm) in entries {
         k.hash(&mut hasher);
