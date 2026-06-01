@@ -25,7 +25,8 @@ use crate::comment_assoc::AssociatedComment;
 use crate::id::Id;
 use crate::resolver::{parse_id, render_resolve_error, ResolvedTarget, Resolver};
 use crate::tree::{
-    collect_visible, render_flat_with_comments, truncate_display, CommentRow, NAME_DISPLAY_MAX,
+    collect_visible, comment_row_json, group_comments, render_flat_with_comments,
+    render_subtree_json_with_comments, truncate_display, CommentRow, NAME_DISPLAY_MAX,
 };
 use crate::{print, Globals, Output};
 
@@ -408,15 +409,7 @@ fn append_descent_rows(
     };
     let synthetic = synthesize_file_root(fm, &cached.document, show_all, hidden);
     let comment_rows = load_comment_rows(resolver, &fm.file_key, file_synth, resolved_filter);
-    let mut by_node: std::collections::HashMap<&str, Vec<&CommentRow>> =
-        std::collections::HashMap::new();
-    let mut canvas: Vec<&CommentRow> = Vec::new();
-    for row in &comment_rows {
-        match row.anchor_node_id.as_deref() {
-            Some(nid) => by_node.entry(nid).or_default().push(row),
-            None => canvas.push(row),
-        }
-    }
+    let (by_node, canvas) = group_comments(&comment_rows);
 
     // The synthesized root itself represents the FILE row, already emitted
     // by the caller; descend its children up to `depth - file_depth` levels.
@@ -805,75 +798,6 @@ pub fn synthesize_file_root(
     }
 }
 
-/// JSON tree builder. Attaches a `comments` array per node from the
-/// pre-associated `comment_rows` slice; canvas-level threads are handled by
-/// the caller and not emitted on individual nodes.
-fn render_subtree_json_with_comments(
-    file_synth: u32,
-    node: &CacheNode,
-    max_depth: usize,
-    comment_rows: &[CommentRow],
-) -> Value {
-    let by_node: std::collections::HashMap<&str, Vec<&CommentRow>> = {
-        let mut m: std::collections::HashMap<&str, Vec<&CommentRow>> =
-            std::collections::HashMap::new();
-        for row in comment_rows {
-            if let Some(nid) = row.anchor_node_id.as_deref() {
-                m.entry(nid).or_default().push(row);
-            }
-        }
-        m
-    };
-    fn build(
-        node: &CacheNode,
-        file_synth: u32,
-        depth: usize,
-        max_depth: usize,
-        by_node: &std::collections::HashMap<&str, Vec<&CommentRow>>,
-    ) -> Value {
-        let mut obj = serde_json::Map::new();
-        let id_str = if node.id.is_empty() {
-            format!("file:{file_synth}")
-        } else {
-            format!("file:{file_synth}:{}", node.id)
-        };
-        obj.insert("id".into(), json!(id_str));
-        obj.insert("type".into(), json!(node.type_));
-        obj.insert("name".into(), json!(node.name));
-        if let Some(b) = node.bounds {
-            obj.insert("bounds".into(), json!(b.compact()));
-        }
-        if let Some(rows) = by_node.get(node.id.as_str()) {
-            let comments: Vec<Value> = rows.iter().map(|r| comment_row_json(r)).collect();
-            obj.insert("comments".into(), Value::Array(comments));
-        }
-        let kids: Vec<&CacheNode> = node.children.iter().filter(|c| c.visible).collect();
-        if !kids.is_empty() {
-            if depth >= max_depth {
-                obj.insert("truncated".into(), json!({ "children": kids.len() }));
-            } else {
-                let rendered: Vec<Value> = kids
-                    .iter()
-                    .map(|c| build(c, file_synth, depth + 1, max_depth, by_node))
-                    .collect();
-                obj.insert("children".into(), Value::Array(rendered));
-            }
-        }
-        Value::Object(obj)
-    }
-    build(node, file_synth, 0, max_depth, &by_node)
-}
-
-/// Serialize a `CommentRow` for the JSON output. Currently includes id and
-/// display; the row's `anchor_node_id` is implied by its position in the
-/// parent node's `comments` array (or `canvas_comments` at the file root).
-fn comment_row_json(row: &CommentRow) -> Value {
-    json!({
-        "id": row.id,
-        "display": row.display,
-    })
-}
-
 /// If `--in <ID>` named a file scope and the user passed a bare native id,
 /// rewrite the bare id as a qualified `file:N:x:y`. All other id shapes pass
 /// through unchanged (an explicit qualifier wins over `--in`).
@@ -1146,5 +1070,58 @@ mod tests {
             children: vec![],
         };
         assert_eq!(ignored_canvas_label(&n), Some("Cover"));
+    }
+
+    fn leaf_node(id: &str, type_: &str, name: &str, children: Vec<CacheNode>) -> CacheNode {
+        CacheNode {
+            id: id.into(),
+            type_: type_.into(),
+            name: name.into(),
+            visible: true,
+            bounds: None,
+            children,
+        }
+    }
+
+    /// Characterization guard for the comment-aware JSON subtree renderer:
+    /// id formatting, per-node comment attachment, canvas-level exclusion, and
+    /// depth truncation. Locks behavior across the group_comments rewire + the
+    /// relocation of this function into `tree.rs`.
+    #[test]
+    fn render_subtree_json_attaches_comments_and_truncates() {
+        let leaf = leaf_node("1:3", "RECTANGLE", "leaf", vec![]);
+        let mid = leaf_node("1:2", "FRAME", "mid", vec![leaf]);
+        let root = leaf_node("0:1", "CANVAS", "Page", vec![mid]);
+        let comment_rows = vec![
+            CommentRow {
+                id: "file:1:comm:1".into(),
+                anchor_node_id: Some("1:2".into()),
+                display: "\"hi\"  by @a".into(),
+            },
+            CommentRow {
+                id: "file:1:comm:2".into(),
+                anchor_node_id: None,
+                display: "\"canvas\"  by @b".into(),
+            },
+        ];
+
+        // depth 0 → root only, children collapsed into a truncated marker.
+        let v0 = render_subtree_json_with_comments(1, &root, 0, &comment_rows);
+        assert_eq!(v0["id"], "file:1:0:1");
+        assert_eq!(v0["truncated"]["children"], 1);
+        assert!(v0.get("children").is_none());
+
+        // depth 5 → full tree; the anchored comment attaches to 1:2, the
+        // canvas-level comment (anchor None) attaches to no node.
+        let v = render_subtree_json_with_comments(1, &root, 5, &comment_rows);
+        let frame = &v["children"][0];
+        assert_eq!(frame["id"], "file:1:1:2");
+        assert_eq!(frame["comments"][0]["id"], "file:1:comm:1");
+        assert_eq!(frame["comments"].as_array().unwrap().len(), 1);
+        let leaf_out = &frame["children"][0];
+        assert_eq!(leaf_out["id"], "file:1:1:3");
+        assert!(leaf_out.get("comments").is_none());
+        // Canvas-level thread never appears in the per-node tree.
+        assert!(!serde_json::to_string(&v).unwrap().contains("comm:2"));
     }
 }
