@@ -10,13 +10,14 @@ pub mod cache;
 pub mod cmd;
 pub mod comment_assoc;
 pub mod context;
+pub mod file_summary;
 pub mod full_cache;
 pub mod geometry;
 pub mod id;
 pub mod node;
 pub mod node_index;
+pub mod node_search;
 pub mod node_view;
-pub mod resolve;
 pub mod resolver;
 pub mod screenshot;
 pub mod styles;
@@ -24,6 +25,7 @@ pub mod synth;
 pub mod team_catalog;
 pub mod tree;
 pub mod url;
+pub mod util;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Output {

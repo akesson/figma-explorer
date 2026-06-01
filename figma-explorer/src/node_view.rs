@@ -207,7 +207,52 @@ fn build_view_recursive(
     // the node lacks an `id` (rare; defensive against bad input).
     let node_id = node.get("id").and_then(Value::as_str).unwrap_or("");
 
-    // ── Identity ───────────────────────────────────────────────────────────
+    // Each `add_*` helper appends its section to `out` in source order; the
+    // order of these calls IS the output key order (serde_json Map is
+    // insertion-ordered). `depth` is threaded where the `depth == 0` gates
+    // live (effects, layout grids).
+    add_identity_and_modifiers(&mut out, node);
+    add_geometry(&mut out, node);
+    add_corner(&mut out, node);
+    add_paint_layers(&mut out, node, collector, node_id, depth);
+    add_layout(&mut out, node, collector, node_id, depth);
+    add_text(&mut out, node, opts, collector);
+    add_component(&mut out, node);
+    add_prototype(&mut out, node, opts);
+    add_meta(&mut out, node, opts);
+    add_styles_and_variables(&mut out, node, collector, node_id);
+
+    // ── Children ───────────────────────────────────────────────────────────
+    // Stays inline: it recurses into build_view_recursive and its collector
+    // bookkeeping (emitted_descendants increment, omitted_ids push, the cap
+    // check) is order-critical against the recursion.
+    let allow_deeper = opts.depth.is_none_or(|d| depth < d);
+    if allow_deeper {
+        if let Some(arr) = node.get("children").and_then(Value::as_array) {
+            let mut out_children: Vec<Value> = Vec::new();
+            for child in arr {
+                if collector.emitted_descendants >= opts.max_nodes {
+                    if let Some(id) = child.get("id").and_then(Value::as_str) {
+                        collector.omitted_ids.push(id.to_owned());
+                    }
+                    continue;
+                }
+                collector.emitted_descendants += 1;
+                let v = build_view_recursive(child, opts, collector, depth + 1);
+                out_children.push(v);
+            }
+            if !out_children.is_empty() {
+                out.insert("children".into(), Value::Array(out_children));
+            }
+        }
+    }
+
+    Value::Object(out)
+}
+
+/// Identity (id/type/name) plus the common modifier flags that are emitted
+/// only when they differ from their defaults.
+fn add_identity_and_modifiers(out: &mut Map<String, Value>, node: &Value) {
     if let Some(v) = node.get("id") {
         out.insert("id".into(), v.clone());
     }
@@ -217,8 +262,6 @@ fn build_view_recursive(
     if let Some(v) = node.get("name") {
         out.insert("name".into(), v.clone());
     }
-
-    // ── Common modifiers (omit defaults) ───────────────────────────────────
     if let Some(Value::Bool(false)) = node.get("visible") {
         out.insert("visible".into(), json!(false));
     }
@@ -249,8 +292,11 @@ fn build_view_recursive(
             out.insert("mask_type".into(), mt.clone());
         }
     }
+}
 
-    // ── Geometry ───────────────────────────────────────────────────────────
+/// Bounds, size, non-identity transform, constraints, and responsive size
+/// constraints.
+fn add_geometry(out: &mut Map<String, Value>, node: &Value) {
     if let Some(b) = node.get("absoluteBoundingBox") {
         out.insert("bounds".into(), b.clone());
     }
@@ -268,19 +314,21 @@ fn build_view_recursive(
     }
     // Size constraints (used in responsive auto-layout).
     if let Some(min_w) = node.get("minWidth") {
-        merge_size_constraint(&mut out, "min_width", min_w);
+        merge_size_constraint(out, "min_width", min_w);
     }
     if let Some(max_w) = node.get("maxWidth") {
-        merge_size_constraint(&mut out, "max_width", max_w);
+        merge_size_constraint(out, "max_width", max_w);
     }
     if let Some(min_h) = node.get("minHeight") {
-        merge_size_constraint(&mut out, "min_height", min_h);
+        merge_size_constraint(out, "min_height", min_h);
     }
     if let Some(max_h) = node.get("maxHeight") {
-        merge_size_constraint(&mut out, "max_height", max_h);
+        merge_size_constraint(out, "max_height", max_h);
     }
+}
 
-    // ── Corner radius ──────────────────────────────────────────────────────
+/// Corner radii (uniform or per-corner) and the clip flag.
+fn add_corner(out: &mut Map<String, Value>, node: &Value) {
     if let Some(arr) = node.get("rectangleCornerRadii").and_then(Value::as_array) {
         out.insert(
             "corner".into(),
@@ -294,8 +342,17 @@ fn build_view_recursive(
     if let Some(Value::Bool(true)) = node.get("clipsContent") {
         out.insert("clips_content".into(), json!(true));
     }
+}
 
-    // ── Fills / strokes / effects ──────────────────────────────────────────
+/// Fills, strokes (+ companion stroke block), and effects. Effects are noise
+/// for non-target depths, so they're emitted only at `depth == 0`.
+fn add_paint_layers(
+    out: &mut Map<String, Value>,
+    node: &Value,
+    collector: &mut Collector,
+    node_id: &str,
+    depth: usize,
+) {
     if let Some(arr) = node.get("fills").and_then(Value::as_array) {
         let paints = build_paints(arr, collector, node_id);
         if !paints.is_empty() {
@@ -313,8 +370,6 @@ fn build_view_recursive(
             }
         }
     }
-
-    // Effects are noise for non-target depths. Keep on target, drop deeper.
     if depth == 0 {
         if let Some(arr) = node.get("effects").and_then(Value::as_array) {
             let effects = build_effects(arr, collector, node_id);
@@ -323,8 +378,17 @@ fn build_view_recursive(
             }
         }
     }
+}
 
-    // ── Layout (auto-layout) ───────────────────────────────────────────────
+/// Auto-layout container settings, this node's own layout-child settings, and
+/// layout grids (grids only at `depth == 0`).
+fn add_layout(
+    out: &mut Map<String, Value>,
+    node: &Value,
+    collector: &mut Collector,
+    node_id: &str,
+    depth: usize,
+) {
     if let Some(mode) = node.get("layoutMode").and_then(Value::as_str) {
         if mode != "NONE" {
             out.insert("layout".into(), build_layout(node, collector, node_id));
@@ -339,15 +403,24 @@ fn build_view_recursive(
             out.insert("layout_grids".into(), Value::Array(grids.clone()));
         }
     }
+}
 
-    // ── Text ────────────────────────────────────────────────────────────────
+/// TEXT node content block.
+fn add_text(
+    out: &mut Map<String, Value>,
+    node: &Value,
+    opts: &ViewOptions,
+    collector: &mut Collector,
+) {
     if node.get("type").and_then(Value::as_str) == Some("TEXT") {
         if let Some(text) = build_text(node, opts, collector) {
             out.insert("text".into(), text);
         }
     }
+}
 
-    // ── Component / instance metadata ──────────────────────────────────────
+/// Component / instance metadata and component-property references.
+fn add_component(out: &mut Map<String, Value>, node: &Value) {
     let component = build_component(node);
     if !component.is_empty() {
         out.insert("component".into(), Value::Object(component));
@@ -357,8 +430,11 @@ fn build_view_recursive(
             out.insert("property_refs".into(), refs.clone());
         }
     }
+}
 
-    // ── Prototype (opt-in, but always emit when this node starts a flow) ───
+/// Prototype interactions — opt-in, but always emitted when this node starts a
+/// flow.
+fn add_prototype(out: &mut Map<String, Value>, node: &Value, opts: &ViewOptions) {
     if opts.prototype || node.get("prototypeStartNodeID").is_some() {
         if let Some(proto) = build_prototype(node, opts.prototype) {
             if !proto.as_object().is_none_or(Map::is_empty) {
@@ -366,8 +442,10 @@ fn build_view_recursive(
             }
         }
     }
+}
 
-    // ── Meta (dev status, annotations, export settings) — opt-in ───────────
+/// Dev status, annotations, and export settings — opt-in (`--meta`).
+fn add_meta(out: &mut Map<String, Value>, node: &Value, opts: &ViewOptions) {
     if opts.meta {
         if let Some(ds) = node.get("devStatus") {
             if !ds.is_null() {
@@ -385,8 +463,17 @@ fn build_view_recursive(
             }
         }
     }
+}
 
-    // ── Style + variable references ────────────────────────────────────────
+/// Named-style references and bound/explicit variable modes. Mutates the
+/// collector (style ids, variable ids) as a side channel so the top-level
+/// `styles_index` / `variables` blocks can resolve them.
+fn add_styles_and_variables(
+    out: &mut Map<String, Value>,
+    node: &Value,
+    collector: &mut Collector,
+    node_id: &str,
+) {
     if let Some(styles_map) = node.get("styles").and_then(Value::as_object) {
         // Pass the styles map through as-is (small) and collect ids so the
         // top-level `styles_index` block resolves them.
@@ -419,30 +506,6 @@ fn build_view_recursive(
             out.insert("explicit_variable_modes".into(), emodes.clone());
         }
     }
-
-    // ── Children ───────────────────────────────────────────────────────────
-    let allow_deeper = opts.depth.is_none_or(|d| depth < d);
-    if allow_deeper {
-        if let Some(arr) = node.get("children").and_then(Value::as_array) {
-            let mut out_children: Vec<Value> = Vec::new();
-            for child in arr {
-                if collector.emitted_descendants >= opts.max_nodes {
-                    if let Some(id) = child.get("id").and_then(Value::as_str) {
-                        collector.omitted_ids.push(id.to_owned());
-                    }
-                    continue;
-                }
-                collector.emitted_descendants += 1;
-                let v = build_view_recursive(child, opts, collector, depth + 1);
-                out_children.push(v);
-            }
-            if !out_children.is_empty() {
-                out.insert("children".into(), Value::Array(out_children));
-            }
-        }
-    }
-
-    Value::Object(out)
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -1103,15 +1166,35 @@ pub fn build_variables_block(
     let variables = meta.get("variables").and_then(Value::as_object);
     let collections = meta.get("variableCollections").and_then(Value::as_object);
 
-    let mut out = Map::new();
-    for id in refs {
-        let Some(v) = variables.and_then(|m| m.get(id)) else {
+    // Worklist over the closure of `refs` under alias edges: building a
+    // variable entry can record alias-target ids into `collector.variables`
+    // (see `resolve_variable_value`), and those targets need their own entries
+    // too. We can't just iterate `refs` because it's an immutable snapshot
+    // taken before any entry was built. Accumulate into a BTreeMap so the
+    // output stays sorted regardless of discovery order.
+    let mut entries: BTreeMap<String, Value> = BTreeMap::new();
+    let mut seen: BTreeSet<String> = refs.iter().cloned().collect();
+    let mut queue: Vec<String> = refs.iter().cloned().collect();
+    while let Some(id) = queue.pop() {
+        let Some(v) = variables.and_then(|m| m.get(&id)) else {
             continue;
         };
-        out.insert(
-            id.clone(),
-            build_variable_entry(v, collections, collector, id),
-        );
+        let entry = build_variable_entry(v, collections, collector, &id);
+        entries.insert(id, entry);
+        let new_ids: Vec<String> = collector
+            .variables
+            .iter()
+            .filter(|v| !seen.contains(*v))
+            .cloned()
+            .collect();
+        for nid in new_ids {
+            seen.insert(nid.clone());
+            queue.push(nid);
+        }
+    }
+    let mut out = Map::new();
+    for (id, entry) in entries {
+        out.insert(id, entry);
     }
     Value::Object(out)
 }
@@ -1213,10 +1296,15 @@ fn resolve_variable_value(
     collector: &mut Collector,
     subject: &str,
 ) -> Value {
-    // Alias indirection: {"type": "VARIABLE_ALIAS", "id": "..."}.
+    // Alias indirection: {"type": "VARIABLE_ALIAS", "id": "..."}. Record the
+    // aliased variable id so `build_variables_block` pulls its definition into
+    // the output too — otherwise the value references an id with no entry.
     if let Some(obj) = raw.as_object() {
         if obj.get("type").and_then(Value::as_str) == Some("VARIABLE_ALIAS") {
             if let Some(id) = obj.get("id") {
+                if let Some(id_str) = id.as_str() {
+                    collector.variables.insert(id_str.to_owned());
+                }
                 return json!({ "alias": id.clone() });
             }
         }
@@ -1267,177 +1355,6 @@ pub fn build_styles_index_block(file_root: &Value, refs: &BTreeSet<String>) -> V
 // ───────────────────────────────────────────────────────────────────────────
 // File-level summaries (used by node-info on file:N targets)
 // ───────────────────────────────────────────────────────────────────────────
-
-/// Build the `file_summary` block for a file target: counts, page list,
-/// components, component sets, styles, variable collections, recent
-/// comments.
-///
-/// `pages_cap` / `components_cap` / `styles_cap` cap each list to a
-/// reasonable size; the JSON contains the totals in `counts`.
-pub fn build_file_summary(
-    file_root: &Value,
-    vars_root: Option<&Value>,
-    comments_count: usize,
-    recent_comments: Option<Value>,
-) -> Value {
-    let pages: Vec<Value> = file_root
-        .get("document")
-        .and_then(|d| d.get("children"))
-        .and_then(Value::as_array)
-        .map(|arr| {
-            arr.iter()
-                .map(|p| {
-                    json!({
-                        "id": p.get("id").cloned().unwrap_or(Value::Null),
-                        "name": p.get("name").cloned().unwrap_or(Value::Null),
-                        "child_count": p.get("children").and_then(Value::as_array).map(Vec::len).unwrap_or(0),
-                    })
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let components = file_root
-        .get("components")
-        .and_then(Value::as_object)
-        .map(|m| {
-            let entries: Vec<Value> = m
-                .iter()
-                .take(50)
-                .map(|(id, v)| {
-                    json!({
-                        "id": id,
-                        "key": v.get("key").cloned().unwrap_or(Value::Null),
-                        "name": v.get("name").cloned().unwrap_or(Value::Null),
-                        "description": v.get("description").cloned().unwrap_or(Value::Null),
-                        "component_set_id": v.get("componentSetId").cloned().unwrap_or(Value::Null),
-                        "remote": v.get("remote").cloned().unwrap_or(Value::Null),
-                    })
-                })
-                .collect();
-            (m.len(), entries)
-        })
-        .unwrap_or((0, Vec::new()));
-
-    let component_sets = file_root
-        .get("componentSets")
-        .and_then(Value::as_object)
-        .map(|m| {
-            let entries: Vec<Value> = m
-                .iter()
-                .take(50)
-                .map(|(id, v)| {
-                    json!({
-                        "id": id,
-                        "key": v.get("key").cloned().unwrap_or(Value::Null),
-                        "name": v.get("name").cloned().unwrap_or(Value::Null),
-                        "description": v.get("description").cloned().unwrap_or(Value::Null),
-                    })
-                })
-                .collect();
-            (m.len(), entries)
-        })
-        .unwrap_or((0, Vec::new()));
-
-    let styles = file_root
-        .get("styles")
-        .and_then(Value::as_object)
-        .map(|m| {
-            let entries: Vec<Value> = m
-                .iter()
-                .take(100)
-                .map(|(id, v)| {
-                    json!({
-                        "id": id,
-                        "key": v.get("key").cloned().unwrap_or(Value::Null),
-                        "name": v.get("name").cloned().unwrap_or(Value::Null),
-                        "type": v.get("styleType").cloned().unwrap_or(Value::Null),
-                    })
-                })
-                .collect();
-            (m.len(), entries)
-        })
-        .unwrap_or((0, Vec::new()));
-
-    let (variable_collections, variable_count) = vars_root
-        .and_then(|v| v.get("meta"))
-        .and_then(|m| m.as_object())
-        .map(|meta| {
-            let collections = meta
-                .get("variableCollections")
-                .and_then(Value::as_object)
-                .map(|cs| {
-                    cs.iter()
-                        .map(|(id, c)| {
-                            let modes = c.get("modes").and_then(Value::as_array);
-                            let default = c.get("defaultModeId").and_then(Value::as_str);
-                            let default_name = modes
-                                .and_then(|ms| {
-                                    ms.iter().find(|m| {
-                                        m.get("modeId").and_then(Value::as_str) == default
-                                    })
-                                })
-                                .and_then(|m| m.get("name").cloned());
-                            json!({
-                                "id": id,
-                                "name": c.get("name").cloned().unwrap_or(Value::Null),
-                                "modes": modes.cloned().map(Value::Array).unwrap_or(Value::Null),
-                                "default_mode": default_name.unwrap_or(Value::Null),
-                                "variable_count": c
-                                    .get("variableIds")
-                                    .and_then(Value::as_array)
-                                    .map(Vec::len)
-                                    .unwrap_or(0),
-                            })
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            let var_count = meta
-                .get("variables")
-                .and_then(Value::as_object)
-                .map(|m| m.len())
-                .unwrap_or(0);
-            (collections, var_count)
-        })
-        .unwrap_or_default();
-
-    let total_pages = pages.len();
-    // Node count is easier to take from the rkyv cache than the raw JSON;
-    // the caller passes the file-summary builder the meta, which already has
-    // node_count. But to keep this function self-contained, count from
-    // document for safety.
-    let total_nodes = count_nodes_value(file_root.get("document"));
-
-    json!({
-        "counts": {
-            "nodes": total_nodes,
-            "pages": total_pages,
-            "components": components.0,
-            "component_sets": component_sets.0,
-            "styles": styles.0,
-            "variables": variable_count,
-            "comments": comments_count,
-        },
-        "pages": pages,
-        "components": components.1,
-        "component_sets": component_sets.1,
-        "styles": styles.1,
-        "variable_collections": variable_collections,
-        "recent_comments": recent_comments.unwrap_or(Value::Array(Vec::new())),
-    })
-}
-
-fn count_nodes_value(node: Option<&Value>) -> usize {
-    let Some(n) = node else { return 0 };
-    let mut count = 1;
-    if let Some(arr) = n.get("children").and_then(Value::as_array) {
-        for c in arr {
-            count += count_nodes_value(Some(c));
-        }
-    }
-    count
-}
 
 // ───────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -1675,6 +1592,56 @@ mod tests {
     }
 
     #[test]
+    fn variables_block_pulls_in_aliased_variable() {
+        // A semantic COLOR variable whose value aliases a primitive variable.
+        // `refs` references only the semantic id; the block must still emit the
+        // aliased primitive so the `{alias: id}` value resolves to a definition.
+        let mut refs = BTreeSet::new();
+        refs.insert("VariableID:sem:1".to_owned());
+        let vars_root = json!({
+            "meta": {
+                "variables": {
+                    "VariableID:sem:1": {
+                        "name": "color/semantic/accent",
+                        "variableCollectionId": "VariableCollectionId:1:0",
+                        "resolvedType": "COLOR",
+                        "valuesByMode": {
+                            "1:0": {"type": "VARIABLE_ALIAS", "id": "VariableID:prim:1"},
+                        },
+                    },
+                    "VariableID:prim:1": {
+                        "name": "color/primitive/blue-500",
+                        "variableCollectionId": "VariableCollectionId:1:0",
+                        "resolvedType": "COLOR",
+                        "valuesByMode": {
+                            "1:0": {"r": 0.039, "g": 0.522, "b": 1.0, "a": 1.0},
+                        },
+                    }
+                },
+                "variableCollections": {
+                    "VariableCollectionId:1:0": {
+                        "name": "Tokens",
+                        "defaultModeId": "1:0",
+                        "modes": [{"modeId": "1:0", "name": "Light"}]
+                    }
+                }
+            }
+        });
+        let mut c = Collector::default();
+        let block = build_variables_block(Some(&vars_root), &refs, &mut c);
+        // The alias value surfaces the target id…
+        assert_eq!(
+            block["VariableID:sem:1"]["values_by_mode"]["Light"]["alias"],
+            "VariableID:prim:1"
+        );
+        // …and the aliased primitive is pulled into the block with its own def.
+        assert_eq!(
+            block["VariableID:prim:1"]["values_by_mode"]["Light"], "#0a85ff",
+            "aliased primitive must be pulled into the block"
+        );
+    }
+
+    #[test]
     fn styles_index_block_only_includes_referenced_entries() {
         let mut refs = BTreeSet::new();
         refs.insert("S:abc".to_owned());
@@ -1698,5 +1665,72 @@ mod tests {
         assert!(map.contains_key("S:abc"));
         assert!(!map.contains_key("S:zzz"));
         assert_eq!(map["S:abc"]["type"], "FILL");
+    }
+
+    /// Golden: a FRAME exercising (almost) every section plus a TEXT child at
+    /// depth 1. Locks byte-exact output key order AND the final collector
+    /// state, so the build_view_recursive split into add_* helpers is provably
+    /// behavior-preserving. The child also locks the depth==0 drops: its
+    /// `effects` / `layoutGrids` must NOT appear (depth 1).
+    #[test]
+    fn build_node_view_full_node_golden() {
+        let node = json!({
+            "id": "10:20",
+            "type": "FRAME",
+            "name": "Card",
+            "visible": false,
+            "locked": true,
+            "rotation": 0.5,
+            "opacity": 0.8,
+            "blendMode": "MULTIPLY",
+            "preserveRatio": true,
+            "isMask": true,
+            "maskType": "ALPHA",
+            "absoluteBoundingBox": {"x": 0.0, "y": 0.0, "width": 100.0, "height": 50.0},
+            "size": {"x": 100.0, "y": 50.0},
+            "relativeTransform": [[1.0, 0.0, 5.0], [0.0, 1.0, 7.0]],
+            "constraints": {"vertical": "TOP", "horizontal": "LEFT"},
+            "minWidth": 10.0,
+            "maxWidth": 200.0,
+            "rectangleCornerRadii": [4.0, 4.0, 0.0, 0.0],
+            "clipsContent": true,
+            "fills": [{"type": "SOLID", "color": {"r": 1.0, "g": 0.0, "b": 0.0, "a": 1.0}}],
+            "strokes": [{"type": "SOLID", "color": {"r": 0.0, "g": 0.0, "b": 0.0, "a": 1.0}}],
+            "strokeWeight": 2.0,
+            "effects": [{"type": "DROP_SHADOW", "color": {"r":0.0,"g":0.0,"b":0.0,"a":0.5}, "offset": {"x":0.0,"y":2.0}, "radius": 4.0, "visible": true}],
+            "layoutMode": "VERTICAL",
+            "layoutGrids": [{"pattern": "GRID", "sectionSize": 8.0}],
+            "componentPropertyReferences": {"characters": "prop1"},
+            "prototypeStartNodeID": "10:20",
+            "styles": {"fill": "S:1", "text": "S:2"},
+            "boundVariables": {"fills": [{"type": "VARIABLE_ALIAS", "id": "VariableID:9"}]},
+            "explicitVariableModes": {"VariableCollectionId:1": "mode1"},
+            "children": [
+                {"id": "10:21", "type": "TEXT", "name": "Label", "characters": "Hello",
+                 "effects": [{"type": "DROP_SHADOW"}], "layoutGrids": [{"pattern":"GRID"}]}
+            ]
+        });
+        let opts = ViewOptions {
+            depth: None,
+            max_nodes: 500,
+            prototype: false,
+            meta: true,
+            rich_text: false,
+        };
+        let mut c = Collector::default();
+        let view = build_node_view(&node, &opts, &mut c);
+        let got = serde_json::to_string(&view).unwrap();
+        let expected = r##"{"id":"10:20","type":"FRAME","name":"Card","visible":false,"locked":true,"rotation":0.5,"opacity":0.8,"blend_mode":"MULTIPLY","preserve_ratio":true,"is_mask":true,"mask_type":"ALPHA","bounds":{"x":0.0,"y":0.0,"width":100.0,"height":50.0},"size":{"x":100.0,"y":50.0},"relative_transform":[[1.0,0.0,5.0],[0.0,1.0,7.0]],"constraints":{"vertical":"TOP","horizontal":"LEFT"},"size_constraints":{"min_width":10.0,"max_width":200.0},"corner":{"rectangle_corner_radii":[4.0,4.0,0.0,0.0]},"clips_content":true,"fills":[{"type":"SOLID","color":{"r":1.0,"g":0.0,"b":0.0,"a":1.0},"hex":"#ff0000"}],"strokes":[{"type":"SOLID","color":{"r":0.0,"g":0.0,"b":0.0,"a":1.0},"hex":"#000000"}],"stroke":{"weight":2.0},"effects":[{"type":"DROP_SHADOW","color":{"r":0.0,"g":0.0,"b":0.0,"a":0.5},"offset":{"x":0.0,"y":2.0},"radius":4.0,"hex":"#00000080"}],"layout":{"mode":"VERTICAL"},"layout_grids":[{"pattern":"GRID","sectionSize":8.0}],"property_refs":{"characters":"prop1"},"prototype":{"is_flow_start":true},"styles":{"fill":"S:1","text":"S:2"},"bound_variables":{"fills[0]":"VariableID:9"},"explicit_variable_modes":{"VariableCollectionId:1":"mode1"},"children":[{"id":"10:21","type":"TEXT","name":"Label","text":{"characters":"Hello"}}]}"##;
+        assert_eq!(got, expected);
+        assert_eq!(
+            c.styles.iter().cloned().collect::<Vec<_>>(),
+            vec!["S:1", "S:2"]
+        );
+        assert_eq!(
+            c.variables.iter().cloned().collect::<Vec<_>>(),
+            vec!["VariableID:9"]
+        );
+        assert_eq!(c.emitted_descendants, 1);
+        assert!(c.omitted_ids.is_empty());
     }
 }

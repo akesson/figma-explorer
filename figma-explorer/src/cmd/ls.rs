@@ -25,7 +25,8 @@ use crate::comment_assoc::AssociatedComment;
 use crate::id::Id;
 use crate::resolver::{parse_id, render_resolve_error, ResolvedTarget, Resolver};
 use crate::tree::{
-    collect_visible, render_flat_with_comments, truncate_display, CommentRow, NAME_DISPLAY_MAX,
+    collect_visible, comment_row_json, group_comments, render_flat_with_comments,
+    render_subtree_json_with_comments, truncate_display, CommentRow, NAME_DISPLAY_MAX,
 };
 use crate::{print, Globals, Output};
 
@@ -180,6 +181,79 @@ impl Args {
     }
 }
 
+/// One project's listing data: synth, project id, display name, and its files
+/// paired with their file synths. Named to keep the `render_root` grouping
+/// vector readable (and clippy happy about nested generics).
+type ProjectGroup = (u32, String, String, Vec<(u32, FileMeta)>);
+
+/// Build the YAML rows for one project group: a PROJECT header, then a FILE
+/// header per file, descending into each file's tree when `depth >= 2`.
+/// Shared by `render_root` (called per project) and `render_project` (once).
+#[allow(clippy::too_many_arguments)]
+fn project_rows(
+    resolver: &Resolver,
+    project_synth: u32,
+    project_name: &str,
+    files: &[(u32, FileMeta)],
+    depth: usize,
+    show_all: bool,
+    hidden: &mut BTreeSet<&'static str>,
+    resolved_filter: Option<bool>,
+) -> Vec<Row> {
+    let mut rows = Vec::new();
+    rows.push(Row::header(
+        format!("proj:{project_synth}"),
+        0,
+        "PROJECT",
+        project_name.to_owned(),
+    ));
+    if depth >= 1 {
+        for (fs, fm) in files {
+            rows.push(Row::header(
+                format!("file:{fs}"),
+                1,
+                "FILE",
+                fm.name.clone(),
+            ));
+            if depth >= 2 {
+                append_descent_rows(
+                    resolver,
+                    *fs,
+                    fm,
+                    depth,
+                    1,
+                    &mut rows,
+                    show_all,
+                    hidden,
+                    resolved_filter,
+                );
+            }
+        }
+    }
+    rows
+}
+
+/// Build the JSON `files` array for one project group. Empty when `depth < 1`
+/// (listing projects only). Shared by `render_root` and `render_project`.
+fn project_files_json(
+    resolver: &Resolver,
+    files: &[(u32, FileMeta)],
+    depth: usize,
+    show_all: bool,
+    hidden: &mut BTreeSet<&'static str>,
+    resolved_filter: Option<bool>,
+) -> Vec<Value> {
+    if depth < 1 {
+        return Vec::new();
+    }
+    files
+        .iter()
+        .map(|(fs, fm)| {
+            build_file_json(resolver, *fs, fm, depth, show_all, hidden, resolved_filter)
+        })
+        .collect()
+}
+
 /// Root listing — projects + their files, recursing into each file's
 /// canvases/frames when `depth >= 2`. Reads structural data directly from
 /// the cache; files whose payload is missing or fails to decode are emitted
@@ -195,19 +269,17 @@ fn render_root(
     let synth = resolver.synth();
     let metas = resolver.cache().list_metas()?;
 
-    // Group OK files by project synth.
-    let mut groups: Vec<(u32, String, String, Vec<FileMeta>)> = Vec::new();
+    // Group OK files by project synth, pre-resolving each file's synth so the
+    // render helpers don't have to re-look-it-up (and so synth-less files are
+    // simply skipped rather than panicking).
+    let mut groups: Vec<ProjectGroup> = Vec::new();
     for (project_id, &project_synth) in &synth.projects {
-        let mut files: Vec<FileMeta> = metas
+        let mut files: Vec<(u32, FileMeta)> = metas
             .iter()
-            .filter(|m| {
-                m.status == EntryStatus::Ok
-                    && m.project_id == *project_id
-                    && synth.file_synth(&m.file_key).is_some()
-            })
-            .cloned()
+            .filter(|m| m.status == EntryStatus::Ok && m.project_id == *project_id)
+            .filter_map(|m| synth.file_synth(&m.file_key).map(|s| (s, m.clone())))
             .collect();
-        files.sort_by_key(|f| f.name.to_lowercase());
+        files.sort_by_key(|(_, m)| m.name.to_lowercase());
         let project_name = derive_project_name(&metas, project_id);
         groups.push((project_synth, project_id.clone(), project_name, files));
     }
@@ -219,36 +291,16 @@ fn render_root(
         Output::Yaml => {
             let mut rows: Vec<Row> = Vec::new();
             for (psynth, _pid, pname, files) in &groups {
-                rows.push(Row::header(
-                    format!("proj:{psynth}"),
-                    0,
-                    "PROJECT",
-                    pname.clone(),
+                rows.extend(project_rows(
+                    resolver,
+                    *psynth,
+                    pname,
+                    files,
+                    depth,
+                    show_all,
+                    &mut hidden,
+                    resolved_filter,
                 ));
-                if depth >= 1 {
-                    for fm in files {
-                        let fsynth = synth.file_synth(&fm.file_key).expect("filtered above");
-                        rows.push(Row::header(
-                            format!("file:{fsynth}"),
-                            1,
-                            "FILE",
-                            fm.name.clone(),
-                        ));
-                        if depth >= 2 {
-                            append_descent_rows(
-                                resolver,
-                                fsynth,
-                                fm,
-                                depth,
-                                1,
-                                &mut rows,
-                                show_all,
-                                &mut hidden,
-                                resolved_filter,
-                            );
-                        }
-                    }
-                }
             }
             print_hidden_comment(&hidden);
             print!("{}", format_rows(&rows));
@@ -258,30 +310,13 @@ fn render_root(
             let projects: Vec<Value> = groups
                 .iter()
                 .map(|(ps, pid, pname, files)| {
-                    let file_jsons: Vec<Value> = if depth >= 1 {
-                        files
-                            .iter()
-                            .map(|fm| {
-                                let fs = synth.file_synth(&fm.file_key).expect("filtered above");
-                                build_file_json(
-                                    resolver,
-                                    fs,
-                                    fm,
-                                    depth,
-                                    show_all,
-                                    &mut hidden,
-                                    resolved_filter,
-                                )
-                            })
-                            .collect()
-                    } else {
-                        Vec::new()
-                    };
                     json!({
                         "id": format!("proj:{ps}"),
                         "project_id": pid,
                         "name": pname,
-                        "files": file_jsons,
+                        "files": project_files_json(
+                            resolver, files, depth, show_all, &mut hidden, resolved_filter,
+                        ),
                     })
                 })
                 .collect();
@@ -408,15 +443,7 @@ fn append_descent_rows(
     };
     let synthetic = synthesize_file_root(fm, &cached.document, show_all, hidden);
     let comment_rows = load_comment_rows(resolver, &fm.file_key, file_synth, resolved_filter);
-    let mut by_node: std::collections::HashMap<&str, Vec<&CommentRow>> =
-        std::collections::HashMap::new();
-    let mut canvas: Vec<&CommentRow> = Vec::new();
-    for row in &comment_rows {
-        match row.anchor_node_id.as_deref() {
-            Some(nid) => by_node.entry(nid).or_default().push(row),
-            None => canvas.push(row),
-        }
-    }
+    let (by_node, canvas) = group_comments(&comment_rows);
 
     // The synthesized root itself represents the FILE row, already emitted
     // by the caller; descend its children up to `depth - file_depth` levels.
@@ -619,55 +646,29 @@ fn render_project(
 
     match format {
         Output::Yaml => {
-            let mut rows: Vec<Row> = Vec::new();
-            rows.push(Row::header(
-                format!("proj:{project_synth}"),
-                0,
-                "PROJECT",
-                project_name.clone(),
-            ));
-            if depth >= 1 {
-                for (fs, fm) in &files {
-                    rows.push(Row::header(
-                        format!("file:{fs}"),
-                        1,
-                        "FILE",
-                        fm.name.clone(),
-                    ));
-                    if depth >= 2 {
-                        append_descent_rows(
-                            resolver,
-                            *fs,
-                            fm,
-                            depth,
-                            1,
-                            &mut rows,
-                            show_all,
-                            &mut hidden,
-                            resolved_filter,
-                        );
-                    }
-                }
-            }
+            let rows = project_rows(
+                resolver,
+                project_synth,
+                &project_name,
+                &files,
+                depth,
+                show_all,
+                &mut hidden,
+                resolved_filter,
+            );
             print_hidden_comment(&hidden);
             print!("{}", format_rows(&rows));
             Ok(())
         }
         Output::Json => {
-            let mut file_jsons: Vec<Value> = Vec::new();
-            if depth >= 1 {
-                for (fs, fm) in &files {
-                    file_jsons.push(build_file_json(
-                        resolver,
-                        *fs,
-                        fm,
-                        depth,
-                        show_all,
-                        &mut hidden,
-                        resolved_filter,
-                    ));
-                }
-            }
+            let file_jsons = project_files_json(
+                resolver,
+                &files,
+                depth,
+                show_all,
+                &mut hidden,
+                resolved_filter,
+            );
             print(
                 &json!({
                     "id": format!("proj:{project_synth}"),
@@ -803,75 +804,6 @@ pub fn synthesize_file_root(
         bounds: None,
         children,
     }
-}
-
-/// JSON tree builder. Attaches a `comments` array per node from the
-/// pre-associated `comment_rows` slice; canvas-level threads are handled by
-/// the caller and not emitted on individual nodes.
-fn render_subtree_json_with_comments(
-    file_synth: u32,
-    node: &CacheNode,
-    max_depth: usize,
-    comment_rows: &[CommentRow],
-) -> Value {
-    let by_node: std::collections::HashMap<&str, Vec<&CommentRow>> = {
-        let mut m: std::collections::HashMap<&str, Vec<&CommentRow>> =
-            std::collections::HashMap::new();
-        for row in comment_rows {
-            if let Some(nid) = row.anchor_node_id.as_deref() {
-                m.entry(nid).or_default().push(row);
-            }
-        }
-        m
-    };
-    fn build(
-        node: &CacheNode,
-        file_synth: u32,
-        depth: usize,
-        max_depth: usize,
-        by_node: &std::collections::HashMap<&str, Vec<&CommentRow>>,
-    ) -> Value {
-        let mut obj = serde_json::Map::new();
-        let id_str = if node.id.is_empty() {
-            format!("file:{file_synth}")
-        } else {
-            format!("file:{file_synth}:{}", node.id)
-        };
-        obj.insert("id".into(), json!(id_str));
-        obj.insert("type".into(), json!(node.type_));
-        obj.insert("name".into(), json!(node.name));
-        if let Some(b) = node.bounds {
-            obj.insert("bounds".into(), json!(b.compact()));
-        }
-        if let Some(rows) = by_node.get(node.id.as_str()) {
-            let comments: Vec<Value> = rows.iter().map(|r| comment_row_json(r)).collect();
-            obj.insert("comments".into(), Value::Array(comments));
-        }
-        let kids: Vec<&CacheNode> = node.children.iter().filter(|c| c.visible).collect();
-        if !kids.is_empty() {
-            if depth >= max_depth {
-                obj.insert("truncated".into(), json!({ "children": kids.len() }));
-            } else {
-                let rendered: Vec<Value> = kids
-                    .iter()
-                    .map(|c| build(c, file_synth, depth + 1, max_depth, by_node))
-                    .collect();
-                obj.insert("children".into(), Value::Array(rendered));
-            }
-        }
-        Value::Object(obj)
-    }
-    build(node, file_synth, 0, max_depth, &by_node)
-}
-
-/// Serialize a `CommentRow` for the JSON output. Currently includes id and
-/// display; the row's `anchor_node_id` is implied by its position in the
-/// parent node's `comments` array (or `canvas_comments` at the file root).
-fn comment_row_json(row: &CommentRow) -> Value {
-    json!({
-        "id": row.id,
-        "display": row.display,
-    })
 }
 
 /// If `--in <ID>` named a file scope and the user passed a bare native id,
@@ -1146,5 +1078,117 @@ mod tests {
             children: vec![],
         };
         assert_eq!(ignored_canvas_label(&n), Some("Cover"));
+    }
+
+    fn leaf_node(id: &str, type_: &str, name: &str, children: Vec<CacheNode>) -> CacheNode {
+        CacheNode {
+            id: id.into(),
+            type_: type_.into(),
+            name: name.into(),
+            visible: true,
+            bounds: None,
+            children,
+        }
+    }
+
+    /// Characterization guard for the comment-aware JSON subtree renderer:
+    /// id formatting, per-node comment attachment, canvas-level exclusion, and
+    /// depth truncation. Locks behavior across the group_comments rewire + the
+    /// relocation of this function into `tree.rs`.
+    #[test]
+    fn render_subtree_json_attaches_comments_and_truncates() {
+        let leaf = leaf_node("1:3", "RECTANGLE", "leaf", vec![]);
+        let mid = leaf_node("1:2", "FRAME", "mid", vec![leaf]);
+        let root = leaf_node("0:1", "CANVAS", "Page", vec![mid]);
+        let comment_rows = vec![
+            CommentRow {
+                id: "file:1:comm:1".into(),
+                anchor_node_id: Some("1:2".into()),
+                display: "\"hi\"  by @a".into(),
+            },
+            CommentRow {
+                id: "file:1:comm:2".into(),
+                anchor_node_id: None,
+                display: "\"canvas\"  by @b".into(),
+            },
+        ];
+
+        // depth 0 → root only, children collapsed into a truncated marker.
+        let v0 = render_subtree_json_with_comments(1, &root, 0, &comment_rows);
+        assert_eq!(v0["id"], "file:1:0:1");
+        assert_eq!(v0["truncated"]["children"], 1);
+        assert!(v0.get("children").is_none());
+
+        // depth 5 → full tree; the anchored comment attaches to 1:2, the
+        // canvas-level comment (anchor None) attaches to no node.
+        let v = render_subtree_json_with_comments(1, &root, 5, &comment_rows);
+        let frame = &v["children"][0];
+        assert_eq!(frame["id"], "file:1:1:2");
+        assert_eq!(frame["comments"][0]["id"], "file:1:comm:1");
+        assert_eq!(frame["comments"].as_array().unwrap().len(), 1);
+        let leaf_out = &frame["children"][0];
+        assert_eq!(leaf_out["id"], "file:1:1:3");
+        assert!(leaf_out.get("comments").is_none());
+        // Canvas-level thread never appears in the per-node tree.
+        assert!(!serde_json::to_string(&v).unwrap().contains("comm:2"));
+    }
+
+    /// Guard for the `project_rows` helper shared by render_root/render_project:
+    /// PROJECT header, FILE header, and descent into the file tree.
+    #[tokio::test]
+    async fn project_rows_emits_headers_and_descent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = CacheDir::new(tmp.path());
+        cache.ensure().unwrap();
+        let doc = json!({
+            "id": "0:0", "name": "doc", "type": "DOCUMENT",
+            "children": [
+                { "id": "0:1", "name": "Home", "type": "CANVAS",
+                  "children": [{ "id": "1:2", "name": "Header", "type": "FRAME",
+                                 "absoluteBoundingBox": { "x": 0.0, "y": 0.0, "width": 100.0, "height": 40.0 } }] }
+            ],
+        });
+        let file_ref = FileRef {
+            file_key: "abc".into(),
+            name: "Demo".into(),
+            last_modified: "2026-01-01".into(),
+            project_id: "p1".into(),
+            project_name: "Proj".into(),
+        };
+        let payload = build_cached_file(&file_ref, &doc, 0);
+        cache.write_file("abc", &payload).unwrap();
+        cache
+            .write_meta(&FileMeta::from_success(&file_ref, &payload, 0, 0))
+            .unwrap();
+        crate::synth::with_lock(&cache, |s| {
+            s.intern_project("p1");
+            s.intern_file("abc");
+        })
+        .unwrap();
+
+        let resolver = Resolver::from_cache(CacheDir::new(tmp.path()), true).unwrap();
+        let synth = resolver.synth();
+        let psynth = *synth.projects.get("p1").unwrap();
+        let fsynth = synth.file_synth("abc").unwrap();
+        let meta = resolver.cache().read_meta("abc").unwrap().unwrap();
+
+        let mut hidden = BTreeSet::new();
+        // depth 3: projects(0) -> files(1) -> canvases(2) -> frames(3).
+        let rows = project_rows(
+            &resolver,
+            psynth,
+            "Proj",
+            &[(fsynth, meta)],
+            3,
+            false,
+            &mut hidden,
+            None,
+        );
+        let out = format_rows(&rows);
+        assert!(out.contains(&format!("proj:{psynth}")), "{out}");
+        assert!(out.contains("PROJECT  \"Proj\""), "{out}");
+        assert!(out.contains(&format!("file:{fsynth}")), "{out}");
+        assert!(out.contains("FILE  \"Demo\""), "{out}");
+        assert!(out.contains("FRAME  \"Header\""), "{out}");
     }
 }

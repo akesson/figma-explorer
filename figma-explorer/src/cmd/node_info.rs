@@ -26,12 +26,12 @@ use serde_json::{json, Map, Value};
 
 use crate::cache::{self, CacheDir, CacheNode, EntryStatus, FileMeta};
 use crate::comment_assoc::AssociatedComment;
+use crate::file_summary::build_file_summary;
 use crate::full_cache;
+use crate::node_search::resolve_node_id;
 use crate::node_view::{
-    build_file_summary, build_node_view, build_styles_index_block, build_variables_block,
-    Collector, ViewOptions,
+    build_node_view, build_styles_index_block, build_variables_block, Collector, ViewOptions,
 };
-use crate::resolve::resolve_node_id;
 use crate::resolver::{parse_id, render_resolve_error, ResolvedTarget, Resolver};
 use crate::synth::SynthState;
 use crate::{print, Globals};
@@ -528,14 +528,19 @@ async fn load_full(
     }
     // Cold path: live-fetch and write the sidecar so future calls are offline.
     let v = crate::cmd::fetch_file_json(cfg, file_key, None).await?;
-    if let Err(e) = full_cache::write_full(cache, file_key, &v) {
-        eprintln!("node-info: write_full failed for {file_key}: {e:#}");
-    } else if let Ok(Some(mut meta)) = cache.read_meta(file_key) {
-        let n = full_cache::write_full(cache, file_key, &v).unwrap_or(0);
-        meta.full_fetched_at_epoch = Some(cache::now_epoch());
-        meta.full_bytes = Some(n);
-        meta.full_schema_version = Some(cache::FULL_SCHEMA_VERSION);
-        let _ = cache.write_meta(&meta);
+    // Write the sidecar once and reuse the returned byte count for the meta —
+    // an earlier version called write_full twice (once to write, once to learn
+    // the size), doubling the gzip + I/O on every cold fetch.
+    match full_cache::write_full(cache, file_key, &v) {
+        Err(e) => eprintln!("node-info: write_full failed for {file_key}: {e:#}"),
+        Ok(n) => {
+            if let Ok(Some(mut meta)) = cache.read_meta(file_key) {
+                meta.full_fetched_at_epoch = Some(cache::now_epoch());
+                meta.full_bytes = Some(n);
+                meta.full_schema_version = Some(cache::FULL_SCHEMA_VERSION);
+                let _ = cache.write_meta(&meta);
+            }
+        }
     }
     Ok(v)
 }

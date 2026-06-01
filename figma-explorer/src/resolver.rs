@@ -377,6 +377,13 @@ fn narrow_to_node_if_requested(
 /// DFS for an exact-match node id within a (potentially huge) cache tree.
 /// Returns an owned clone — callers want an independent subtree they can
 /// hold past the lifetime of `root`.
+///
+/// Deliberately separate from [`crate::node_search::resolve_node_id`], which
+/// is the same DFS over the raw `serde_json::Value` document and returns a
+/// borrow. The split is by type and ownership, not an oversight: this one
+/// walks the structural `CacheNode` projection and yields an owned subtree;
+/// the other walks the full untyped JSON (for fields the cache drops) and
+/// yields a borrow. Two ~8-line functions aren't worth a generic over both.
 fn find_node(root: &CacheNode, target_id: &str) -> Option<CacheNode> {
     if root.id == target_id {
         return Some(root.clone());

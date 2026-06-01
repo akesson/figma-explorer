@@ -37,7 +37,7 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    load_envs();
+    figma_common::load_envs();
     let cli = Cli::parse();
     let cfg = build_config(cli.token.as_deref())?;
     let globals = Globals {
@@ -46,24 +46,4 @@ async fn main() -> anyhow::Result<()> {
         scope: cli.scope,
     };
     cli.command.run(&cfg, &globals).await
-}
-
-/// Walk from cwd up to the filesystem root, loading every `.env` we find.
-/// `dotenvy::from_path` does not override already-set vars, so the closest
-/// `.env` wins and ancestors fill in any keys it didn't define.
-fn load_envs() {
-    let Ok(start) = std::env::current_dir() else {
-        return;
-    };
-    let mut dir = start.as_path();
-    loop {
-        let candidate = dir.join(".env");
-        if candidate.is_file() {
-            let _ = dotenvy::from_path(&candidate);
-        }
-        match dir.parent() {
-            Some(p) => dir = p,
-            None => break,
-        }
-    }
 }

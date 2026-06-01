@@ -19,6 +19,12 @@ use crate::node::{children, id};
 
 /// Find a node by exact node id anywhere in the tree. Node ids are stable
 /// identifiers; we don't filter on visibility here.
+///
+/// Counterpart to [`crate::resolver::find_node`], which is the same DFS over
+/// the structural `CacheNode` projection and returns an owned clone. This one
+/// walks the raw `serde_json::Value` document (so live-data commands can reach
+/// fields the cache drops) and returns a borrow. The duplication is
+/// intentional — different node type, different ownership.
 pub fn resolve_node_id<'a>(doc: &'a Value, node_id: &str) -> Option<&'a Value> {
     fn find<'a>(n: &'a Value, target: &str) -> Option<&'a Value> {
         if id(n) == Some(target) {

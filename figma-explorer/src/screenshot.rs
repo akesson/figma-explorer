@@ -82,8 +82,14 @@ pub async fn render_node(
     })
 }
 
-/// Render multiple nodes in one API call. Returns a map of node_id → URL
-/// (caller is responsible for downloading bytes).
+/// Max node ids per `/images` request. Figma silently truncates (or 414s) on
+/// very large `ids` lists, so callers' nodes would go missing and surface as
+/// "no render URL returned by Figma". We chunk and merge instead.
+const IMAGE_BATCH: usize = 100;
+
+/// Render multiple nodes. Returns a map of node_id → URL (caller is
+/// responsible for downloading bytes). Requests are chunked at `IMAGE_BATCH`
+/// and the per-chunk maps are merged.
 pub async fn render_urls(
     cfg: &Configuration,
     file_key: &str,
@@ -94,21 +100,25 @@ pub async fn render_urls(
     if node_ids.is_empty() {
         return Ok(Default::default());
     }
-    let params = files_api::GetImagesParams {
-        file_key: file_key.to_owned(),
-        ids: node_ids.join(","),
-        version: None,
-        scale: Some(scale),
-        format: Some(format.as_str().to_owned()),
-        svg_outline_text: None,
-        svg_include_id: None,
-        svg_include_node_id: None,
-        svg_simplify_stroke: None,
-        contents_only: None,
-        use_absolute_bounds: None,
-    };
-    let resp = files_api::get_images(cfg, params)
-        .await
-        .map_err(into_anyhow)?;
-    Ok(resp.images)
+    let mut out = std::collections::HashMap::new();
+    for chunk in node_ids.chunks(IMAGE_BATCH) {
+        let params = files_api::GetImagesParams {
+            file_key: file_key.to_owned(),
+            ids: chunk.join(","),
+            version: None,
+            scale: Some(scale),
+            format: Some(format.as_str().to_owned()),
+            svg_outline_text: None,
+            svg_include_id: None,
+            svg_include_node_id: None,
+            svg_simplify_stroke: None,
+            contents_only: None,
+            use_absolute_bounds: None,
+        };
+        let resp = files_api::get_images(cfg, params)
+            .await
+            .map_err(into_anyhow)?;
+        out.extend(resp.images);
+    }
+    Ok(out)
 }

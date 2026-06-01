@@ -285,6 +285,31 @@ pub struct CommentRow {
     pub display: String,
 }
 
+/// Partition comment rows into (anchored-by-node, canvas-level). Anchored rows
+/// are keyed by `anchor_node_id` for O(1) lookup during render; `None`-anchored
+/// rows collect into the canvas vec. The returned maps borrow from `rows`.
+///
+/// Single home for a partition that every comment-aware renderer needs (flat
+/// YAML, JSON subtree, and `ls`'s row builder). Callers that don't surface
+/// canvas-level comments themselves can ignore the second element.
+pub(crate) fn group_comments(
+    rows: &[CommentRow],
+) -> (
+    std::collections::HashMap<&str, Vec<&CommentRow>>,
+    Vec<&CommentRow>,
+) {
+    let mut by_node: std::collections::HashMap<&str, Vec<&CommentRow>> =
+        std::collections::HashMap::new();
+    let mut canvas: Vec<&CommentRow> = Vec::new();
+    for row in rows {
+        match row.anchor_node_id.as_deref() {
+            Some(nid) => by_node.entry(nid).or_default().push(row),
+            None => canvas.push(row),
+        }
+    }
+    (by_node, canvas)
+}
+
 /// Like [`render_flat`] but interleaves comment rows under their anchor
 /// nodes. Canvas-level (`anchor_node_id == None`) rows emit as a trailing
 /// block at depth 1, after every node row. The column-alignment pass
@@ -302,15 +327,7 @@ pub fn render_flat_with_comments(
     }
 
     // Group comments by anchor node id for O(1) lookup at render time.
-    let mut by_node: std::collections::HashMap<&str, Vec<&CommentRow>> =
-        std::collections::HashMap::new();
-    let mut canvas: Vec<&CommentRow> = Vec::new();
-    for row in comment_rows {
-        match row.anchor_node_id.as_deref() {
-            Some(nid) => by_node.entry(nid).or_default().push(row),
-            None => canvas.push(row),
-        }
-    }
+    let (by_node, canvas) = group_comments(comment_rows);
 
     // Width pass — id and bounds widths span node + comment rows.
     let node_id_widths = items.iter().map(|(n, _, _)| {
@@ -371,82 +388,66 @@ pub fn format_comment_line(row: &CommentRow, depth: usize, ctx: &FormatCtx) -> S
     )
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// CacheNode-typed renderers (legacy nested cache consumers, to be retired)
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Render a `CacheNode` as a compact YAML-friendly tree. Mirrors
-/// `render_compact` over `&Value` but operates on the typed projection;
-/// drops the color suffix because the cache doesn't carry fills.
-pub fn render_compact_cache(root: &CacheNode, max_depth: usize) -> Value {
-    fn build(node: &CacheNode, max_depth: usize, depth: usize) -> Value {
-        let line = format_cache_node_line(node);
-        let kids: Vec<&CacheNode> = node.children.iter().filter(|n| n.visible).collect();
-        if kids.is_empty() {
-            return Value::String(line);
-        }
-        if depth >= max_depth {
-            return Value::String(format!("{} [+{} children]", line, kids.len()));
-        }
-        let rendered: Vec<Value> = kids
-            .iter()
-            .map(|c| build(c, max_depth, depth + 1))
-            .collect();
+/// JSON tree builder. Attaches a `comments` array per node from the
+/// pre-associated `comment_rows` slice; canvas-level threads are handled by
+/// the caller and not emitted on individual nodes.
+pub(crate) fn render_subtree_json_with_comments(
+    file_synth: u32,
+    node: &CacheNode,
+    max_depth: usize,
+    comment_rows: &[CommentRow],
+) -> Value {
+    // Only the anchored half is used here; canvas-level threads are emitted by
+    // the caller at the file root.
+    let (by_node, _canvas) = group_comments(comment_rows);
+    fn build(
+        node: &CacheNode,
+        file_synth: u32,
+        depth: usize,
+        max_depth: usize,
+        by_node: &std::collections::HashMap<&str, Vec<&CommentRow>>,
+    ) -> Value {
         let mut obj = Map::new();
-        obj.insert(line, Value::Array(rendered));
-        Value::Object(obj)
-    }
-    if !root.visible {
-        return Value::Null;
-    }
-    build(root, max_depth, 0)
-}
-
-/// Render a `CacheNode` as a nested JSON tree (one object per visible node,
-/// child arrays). Truncates at `max_depth` with a `truncated` marker.
-pub fn render_structured_cache(root: &CacheNode, max_depth: usize) -> Value {
-    fn build(node: &CacheNode, max_depth: usize, depth: usize) -> Value {
-        let mut obj = Map::new();
-        obj.insert("id".into(), json!(node.id));
+        let id_str = if node.id.is_empty() {
+            format!("file:{file_synth}")
+        } else {
+            format!("file:{file_synth}:{}", node.id)
+        };
+        obj.insert("id".into(), json!(id_str));
         obj.insert("type".into(), json!(node.type_));
         obj.insert("name".into(), json!(node.name));
         if let Some(b) = node.bounds {
-            obj.insert("bounds".into(), json!(b.to_string()));
+            obj.insert("bounds".into(), json!(b.compact()));
         }
-        let kids: Vec<&CacheNode> = node.children.iter().filter(|n| n.visible).collect();
+        if let Some(rows) = by_node.get(node.id.as_str()) {
+            let comments: Vec<Value> = rows.iter().map(|r| comment_row_json(r)).collect();
+            obj.insert("comments".into(), Value::Array(comments));
+        }
+        let kids: Vec<&CacheNode> = node.children.iter().filter(|c| c.visible).collect();
         if !kids.is_empty() {
             if depth >= max_depth {
                 obj.insert("truncated".into(), json!({ "children": kids.len() }));
             } else {
                 let rendered: Vec<Value> = kids
                     .iter()
-                    .map(|c| build(c, max_depth, depth + 1))
+                    .map(|c| build(c, file_synth, depth + 1, max_depth, by_node))
                     .collect();
                 obj.insert("children".into(), Value::Array(rendered));
             }
         }
         Value::Object(obj)
     }
-    if !root.visible {
-        return Value::Null;
-    }
-    build(root, max_depth, 0)
+    build(node, file_synth, 0, max_depth, &by_node)
 }
 
-/// Single-line summary of a `CacheNode`: `TYPE "name" (bounds) id:nid`.
-/// No color suffix — fills aren't in the cache projection.
-pub fn format_cache_node_line(node: &CacheNode) -> String {
-    let kind = if node.type_.is_empty() {
-        "?"
-    } else {
-        node.type_.as_str()
-    };
-    let mut s = format!("{} \"{}\"", kind, node.name);
-    if let Some(b) = node.bounds {
-        let _ = write!(s, " ({})", b);
-    }
-    let _ = write!(s, " id:{}", node.id);
-    s
+/// Serialize a `CommentRow` for the JSON output. Currently includes id and
+/// display; the row's `anchor_node_id` is implied by its position in the
+/// parent node's `comments` array (or `canvas_comments` at the file root).
+pub(crate) fn comment_row_json(row: &CommentRow) -> Value {
+    json!({
+        "id": row.id,
+        "display": row.display,
+    })
 }
 
 #[cfg(test)]

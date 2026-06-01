@@ -330,27 +330,9 @@ fn render_tailwind(tokens: &Tokens) -> Value {
     })
 }
 
+/// Token names fall back to `x` when a name slugifies to empty.
 fn slugify(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut prev_dash = false;
-    for ch in s.chars() {
-        if ch.is_alphanumeric() {
-            for c in ch.to_lowercase() {
-                out.push(c);
-            }
-            prev_dash = false;
-        } else if !prev_dash && !out.is_empty() {
-            out.push('-');
-            prev_dash = true;
-        }
-    }
-    while out.ends_with('-') {
-        out.pop();
-    }
-    if out.is_empty() {
-        out.push('x');
-    }
-    out
+    crate::util::slugify(s, "x")
 }
 
 #[cfg(test)]

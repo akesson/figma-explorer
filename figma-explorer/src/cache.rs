@@ -28,7 +28,6 @@
 //! is single-user and local; we don't try to support shared/transferred
 //! cache directories across machines.
 
-use std::collections::hash_map::DefaultHasher;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io::Write;
@@ -39,6 +38,7 @@ use anyhow::{Context, Result};
 use figma_api::apis::configuration::Configuration;
 use figma_api::apis::projects_api as api;
 use figma_api::models::Comment;
+use figma_common::StableHasher;
 use memmap2::Mmap;
 use rkyv::rancor;
 use serde::{Deserialize, Serialize};
@@ -414,6 +414,48 @@ impl FileMeta {
             error: None,
             node_count: Some(payload.node_count as usize),
             bytes: Some(bytes),
+            comments_fetched_at_epoch: None,
+            comments_fingerprint: None,
+            comments_error: None,
+            comments_schema_version: None,
+            full_fetched_at_epoch: None,
+            full_bytes: None,
+            full_schema_version: None,
+            variables_fetched_at_epoch: None,
+            variables_bytes: None,
+            variables_error: None,
+            variables_schema_version: None,
+        }
+    }
+
+    /// Marker meta for a file that failed to fetch/project (`NotExportable`
+    /// or `Failed`). Records identity + status + error so subsequent loads
+    /// don't keep retrying; all sidecar fields are left unset. Single source
+    /// of truth so adding a new `FileMeta` field can't silently drift a
+    /// hand-rolled failure literal.
+    #[allow(clippy::too_many_arguments)]
+    pub fn failure_marker(
+        file_key: String,
+        name: String,
+        project_id: String,
+        project_name: String,
+        last_modified: String,
+        status: EntryStatus,
+        error: String,
+        now: u64,
+    ) -> Self {
+        FileMeta {
+            file_key,
+            name,
+            project_id,
+            project_name,
+            last_modified,
+            cached_at_epoch: now,
+            last_listed_at_epoch: now,
+            status,
+            error: Some(error),
+            node_count: None,
+            bytes: None,
             comments_fetched_at_epoch: None,
             comments_fingerprint: None,
             comments_error: None,
@@ -975,30 +1017,16 @@ async fn fetch_and_cache(
                     )
                 })
                 .unwrap_or_default();
-            let marker = FileMeta {
-                file_key: file_key.to_owned(),
+            let marker = FileMeta::failure_marker(
+                file_key.to_owned(),
                 name,
                 project_id,
                 project_name,
                 last_modified,
-                cached_at_epoch: now,
-                last_listed_at_epoch: now,
                 status,
-                error: Some(msg.clone()),
-                node_count: None,
-                bytes: None,
-                comments_fetched_at_epoch: None,
-                comments_fingerprint: None,
-                comments_error: None,
-                comments_schema_version: None,
-                full_fetched_at_epoch: None,
-                full_bytes: None,
-                full_schema_version: None,
-                variables_fetched_at_epoch: None,
-                variables_bytes: None,
-                variables_error: None,
-                variables_schema_version: None,
-            };
+                msg.clone(),
+                now,
+            );
             // Also drop any stale payload — meta-first ordering.
             let _ = cache.delete_entry(file_key);
             let _ = cache.write_meta(&marker);
@@ -1029,7 +1057,7 @@ pub fn fingerprint_comments(comments: &[Comment]) -> String {
         })
         .collect();
     entries.sort_by_key(|e| e.0);
-    let mut h = DefaultHasher::new();
+    let mut h = StableHasher::default();
     for (id, msg, resolved, n) in entries {
         id.hash(&mut h);
         msg.hash(&mut h);

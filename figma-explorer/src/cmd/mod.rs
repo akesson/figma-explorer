@@ -104,28 +104,10 @@ pub fn is_variables_forbidden_error(err: &str) -> bool {
 
 /// Issue a GET against the Figma REST API with the configuration's auth and
 /// decode the body as JSON. Bypasses figma-api's typed deserialization;
-/// see `fetch_file_json` for the rationale.
+/// see `fetch_file_json` for the rationale. The auth + transport lives in
+/// `figma_common::get_text`; this layer only adds strict JSON parsing.
 pub async fn get_json(cfg: &Configuration, url: &str) -> Result<serde_json::Value> {
-    use anyhow::{anyhow, Context};
-    let mut req = cfg.client.get(url);
-    if let Some(ua) = &cfg.user_agent {
-        req = req.header("user-agent", ua.clone());
-    }
-    if let Some(token) = &cfg.oauth_access_token {
-        req = req.bearer_auth(token);
-    }
-    if let Some(apikey) = &cfg.api_key {
-        let value = match &apikey.prefix {
-            Some(prefix) => format!("{} {}", prefix, apikey.key),
-            None => apikey.key.clone(),
-        };
-        req = req.header("X-Figma-Token", value);
-    }
-    let resp = req.send().await.context("HTTP request failed")?;
-    let status = resp.status();
-    let body = resp.text().await.context("reading response body")?;
-    if !status.is_success() {
-        return Err(anyhow!("figma API error ({status}): {body}"));
-    }
+    use anyhow::Context;
+    let body = figma_common::get_text(cfg, url).await?;
     serde_json::from_str(&body).with_context(|| format!("parsing response from {url}"))
 }
