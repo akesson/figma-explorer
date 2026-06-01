@@ -262,30 +262,7 @@ impl PrefetchArgs {
                                     return;
                                 }
                             };
-                            let mut meta = FileMeta {
-                                file_key: f.file_key.clone(),
-                                name: f.name.clone(),
-                                project_id: f.project_id.clone(),
-                                project_name: f.project_name.clone(),
-                                last_modified: f.last_modified.clone(),
-                                cached_at_epoch: now,
-                                last_listed_at_epoch: now,
-                                status: EntryStatus::Ok,
-                                error: None,
-                                node_count: Some(node_count),
-                                bytes: Some(bytes),
-                                comments_fetched_at_epoch: None,
-                                comments_fingerprint: None,
-                                comments_error: None,
-                                comments_schema_version: None,
-                                full_fetched_at_epoch: None,
-                                full_bytes: None,
-                                full_schema_version: None,
-                                variables_fetched_at_epoch: None,
-                                variables_bytes: None,
-                                variables_error: None,
-                                variables_schema_version: None,
-                            };
+                            let mut meta = FileMeta::from_success(&f, &payload, bytes, now);
                             // Fetch comments alongside the document. Best-effort:
                             // failures flip `meta.comments_error` but don't fail
                             // the entry.
@@ -394,30 +371,16 @@ impl PrefetchArgs {
                             // whole entry, full + variables included.
                             let _ = cache.delete_entry(&f.file_key);
                             let _ = full_cache::delete_sidecars(&cache, &f.file_key);
-                            let marker = FileMeta {
-                                file_key: f.file_key.clone(),
-                                name: f.name.clone(),
-                                project_id: f.project_id.clone(),
-                                project_name: f.project_name.clone(),
-                                last_modified: f.last_modified.clone(),
-                                cached_at_epoch: now,
-                                last_listed_at_epoch: now,
+                            let marker = FileMeta::failure_marker(
+                                f.file_key.clone(),
+                                f.name.clone(),
+                                f.project_id.clone(),
+                                f.project_name.clone(),
+                                f.last_modified.clone(),
                                 status,
-                                error: Some(msg.clone()),
-                                node_count: None,
-                                bytes: None,
-                                comments_fetched_at_epoch: None,
-                                comments_fingerprint: None,
-                                comments_error: None,
-                                comments_schema_version: None,
-                                full_fetched_at_epoch: None,
-                                full_bytes: None,
-                                full_schema_version: None,
-                                variables_fetched_at_epoch: None,
-                                variables_bytes: None,
-                                variables_error: None,
-                                variables_schema_version: None,
-                            };
+                                msg,
+                                now,
+                            );
                             let _ = cache.write_meta(&marker);
                         }
                     }

@@ -427,6 +427,48 @@ impl FileMeta {
             variables_schema_version: None,
         }
     }
+
+    /// Marker meta for a file that failed to fetch/project (`NotExportable`
+    /// or `Failed`). Records identity + status + error so subsequent loads
+    /// don't keep retrying; all sidecar fields are left unset. Single source
+    /// of truth so adding a new `FileMeta` field can't silently drift a
+    /// hand-rolled failure literal.
+    #[allow(clippy::too_many_arguments)]
+    pub fn failure_marker(
+        file_key: String,
+        name: String,
+        project_id: String,
+        project_name: String,
+        last_modified: String,
+        status: EntryStatus,
+        error: String,
+        now: u64,
+    ) -> Self {
+        FileMeta {
+            file_key,
+            name,
+            project_id,
+            project_name,
+            last_modified,
+            cached_at_epoch: now,
+            last_listed_at_epoch: now,
+            status,
+            error: Some(error),
+            node_count: None,
+            bytes: None,
+            comments_fetched_at_epoch: None,
+            comments_fingerprint: None,
+            comments_error: None,
+            comments_schema_version: None,
+            full_fetched_at_epoch: None,
+            full_bytes: None,
+            full_schema_version: None,
+            variables_fetched_at_epoch: None,
+            variables_bytes: None,
+            variables_error: None,
+            variables_schema_version: None,
+        }
+    }
 }
 
 pub struct CacheDir {
@@ -975,30 +1017,16 @@ async fn fetch_and_cache(
                     )
                 })
                 .unwrap_or_default();
-            let marker = FileMeta {
-                file_key: file_key.to_owned(),
+            let marker = FileMeta::failure_marker(
+                file_key.to_owned(),
                 name,
                 project_id,
                 project_name,
                 last_modified,
-                cached_at_epoch: now,
-                last_listed_at_epoch: now,
                 status,
-                error: Some(msg.clone()),
-                node_count: None,
-                bytes: None,
-                comments_fetched_at_epoch: None,
-                comments_fingerprint: None,
-                comments_error: None,
-                comments_schema_version: None,
-                full_fetched_at_epoch: None,
-                full_bytes: None,
-                full_schema_version: None,
-                variables_fetched_at_epoch: None,
-                variables_bytes: None,
-                variables_error: None,
-                variables_schema_version: None,
-            };
+                msg.clone(),
+                now,
+            );
             // Also drop any stale payload — meta-first ordering.
             let _ = cache.delete_entry(file_key);
             let _ = cache.write_meta(&marker);

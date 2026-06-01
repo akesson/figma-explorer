@@ -10,6 +10,7 @@ pub mod cache;
 pub mod cmd;
 pub mod comment_assoc;
 pub mod context;
+pub mod file_summary;
 pub mod full_cache;
 pub mod geometry;
 pub mod id;
