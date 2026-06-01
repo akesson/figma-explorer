@@ -62,10 +62,10 @@ pub struct Tokens {
 
 /// Walk `target` and collect tokens from every visible descendant.
 pub fn collect_from_target(target: &Value, tokens: &mut Tokens) {
-    walk(target, tokens);
+    walk(target, tokens, 0);
 }
 
-fn walk(node: &Value, tokens: &mut Tokens) {
+fn walk(node: &Value, tokens: &mut Tokens, depth: usize) {
     if !is_visible(node) {
         return;
     }
@@ -162,8 +162,15 @@ fn walk(node: &Value, tokens: &mut Tokens) {
         }
     }
 
+    if depth >= crate::MAX_NODE_DEPTH {
+        eprintln!(
+            "styles: node tree exceeded max depth {}; truncating walk",
+            crate::MAX_NODE_DEPTH
+        );
+        return;
+    }
     for c in children(node) {
-        walk(c, tokens);
+        walk(c, tokens, depth + 1);
     }
 }
 

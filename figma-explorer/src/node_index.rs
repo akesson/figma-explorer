@@ -143,6 +143,8 @@ impl NodeIndex {
     }
 }
 
+// Unbounded recursion is safe: `CacheNode` trees come through
+// `cache::project_to_cache`, which caps depth at `MAX_NODE_DEPTH`.
 fn walk_collect(node: &CacheNode, file_synth: u32, out: &mut HashMap<String, Vec<u32>>) {
     if !node.id.is_empty() {
         let entry = out.entry(node.id.clone()).or_default();

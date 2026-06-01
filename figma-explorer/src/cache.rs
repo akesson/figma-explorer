@@ -201,7 +201,15 @@ pub struct CachedFile {
 /// Project a raw Figma API node tree into the typed cache shape. Equivalent
 /// to the previous `strip_node` Value → Value but materializes typed
 /// `CacheNode`s directly so the result is ready for rkyv serialization.
+///
+/// This is the single untrusted-`Value` → `CacheNode` ingestion point, so it
+/// enforces `MAX_NODE_DEPTH`. Every cached tree is therefore depth-bounded,
+/// which is what keeps the downstream `CacheNode` walkers safe.
 pub fn project_to_cache(node: &Value) -> CacheNode {
+    project_rec(node, 0)
+}
+
+fn project_rec(node: &Value, depth: usize) -> CacheNode {
     let id = node
         .get("id")
         .and_then(Value::as_str)
@@ -220,11 +228,18 @@ pub fn project_to_cache(node: &Value) -> CacheNode {
     // Figma omits `visible` when the node is visible; missing → true.
     let visible = !matches!(node.get("visible"), Some(Value::Bool(false)));
     let bounds = node.get("absoluteBoundingBox").and_then(parse_bounds);
-    let children = node
-        .get("children")
-        .and_then(Value::as_array)
-        .map(|arr| arr.iter().map(project_to_cache).collect())
-        .unwrap_or_default();
+    let children = if depth >= crate::MAX_NODE_DEPTH {
+        eprintln!(
+            "cache: node tree exceeded max depth {}; truncating children of {id}",
+            crate::MAX_NODE_DEPTH
+        );
+        Vec::new()
+    } else {
+        node.get("children")
+            .and_then(Value::as_array)
+            .map(|arr| arr.iter().map(|c| project_rec(c, depth + 1)).collect())
+            .unwrap_or_default()
+    };
     CacheNode {
         id,
         type_,
@@ -245,7 +260,9 @@ fn parse_bounds(v: &Value) -> Option<Bounds> {
     })
 }
 
-/// Count `node` plus all its descendants (visible and hidden).
+/// Count `node` plus all its descendants (visible and hidden). Unbounded
+/// recursion is safe here: every `CacheNode` came through `project_to_cache`,
+/// which caps depth at `MAX_NODE_DEPTH`.
 pub fn count_nodes(node: &CacheNode) -> usize {
     let mut n = 1usize;
     for c in &node.children {
@@ -1345,6 +1362,37 @@ mod tests {
             cache.catalog_path("651911646771145269"),
             PathBuf::from("/tmp/fx-cache/teams/651911646771145269.catalog.json.gz"),
         );
+    }
+
+    #[test]
+    fn project_to_cache_caps_depth_on_deep_tree() {
+        // Run on a large-stack thread: the input Value is deeper than the cap,
+        // and serde_json's `Value` has a recursive `Drop`, so tearing it down
+        // would overflow the default ~2MB test-thread stack regardless of our
+        // guard. The guard is what bounds `project_to_cache`'s own recursion.
+        std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024)
+            .spawn(|| {
+                let mut node = json!({ "id": "leaf", "type": "FRAME", "name": "leaf" });
+                for i in 0..(crate::MAX_NODE_DEPTH + 50) {
+                    node = json!({ "id": format!("n{i}"), "type": "FRAME", "name": "n", "children": [node] });
+                }
+                let projected = project_to_cache(&node);
+
+                // Measure the (linear) chain depth iteratively.
+                let mut depth = 1usize;
+                let mut cur = &projected;
+                while let Some(child) = cur.children.first() {
+                    depth += 1;
+                    cur = child;
+                }
+                // Root at depth 0 … node at depth MAX_NODE_DEPTH keeps no
+                // children, so the chain is exactly MAX_NODE_DEPTH + 1 nodes.
+                assert_eq!(depth, crate::MAX_NODE_DEPTH + 1);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]

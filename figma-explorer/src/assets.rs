@@ -89,11 +89,11 @@ pub struct FailureEntry {
 pub fn classify(frame: &Value) -> Vec<AssetSpec> {
     let mut out: Vec<AssetSpec> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
-    walk(frame, &mut out, &mut seen);
+    walk(frame, &mut out, &mut seen, 0);
     out
 }
 
-fn walk(node: &Value, out: &mut Vec<AssetSpec>, seen: &mut HashSet<String>) {
+fn walk(node: &Value, out: &mut Vec<AssetSpec>, seen: &mut HashSet<String>, depth: usize) {
     if !is_visible(node) {
         return;
     }
@@ -116,8 +116,15 @@ fn walk(node: &Value, out: &mut Vec<AssetSpec>, seen: &mut HashSet<String>) {
         }
     }
 
+    if depth >= crate::MAX_NODE_DEPTH {
+        eprintln!(
+            "assets: node tree exceeded max depth {}; truncating walk",
+            crate::MAX_NODE_DEPTH
+        );
+        return;
+    }
     for c in children(node) {
-        walk(c, out, seen);
+        walk(c, out, seen, depth + 1);
     }
 }
 

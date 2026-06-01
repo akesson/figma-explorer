@@ -158,6 +158,8 @@ fn build_index(root: &CacheNode) -> HashMap<&str, IndexEntry<'_>> {
     out
 }
 
+// Unbounded recursion is safe: `CacheNode` trees come through
+// `cache::project_to_cache`, which caps depth at `MAX_NODE_DEPTH`.
 fn walk<'a>(
     node: &'a CacheNode,
     path_names: &mut Vec<String>,

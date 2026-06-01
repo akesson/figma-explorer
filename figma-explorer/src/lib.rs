@@ -27,6 +27,16 @@ pub mod tree;
 pub mod url;
 pub mod util;
 
+/// Hard recursion backstop for walks over a Figma node tree. The tree's depth
+/// is driven by untrusted remote data, and unbounded recursion can overflow
+/// the stack (an uncatchable abort in Rust). This is purely a safety ceiling:
+/// real files nest only a few dozen levels, so it never affects normal output;
+/// it sits far below the ~thousands of frames needed to overflow. Distinct from
+/// `node_view`'s display-depth default (10), which is a presentation choice.
+/// The single untrusted-`Value` → `CacheNode` ingestion point (`cache::project_to_cache`)
+/// enforces this, so every downstream `CacheNode` walk is bounded transitively.
+pub const MAX_NODE_DEPTH: usize = 1024;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Output {
     /// Compact YAML (default): node-list commands emit a sequence of one-liner

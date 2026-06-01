@@ -167,12 +167,49 @@ pub fn build_file_summary(
 }
 
 fn count_nodes_value(node: Option<&Value>) -> usize {
+    count_nodes_value_rec(node, 0)
+}
+
+fn count_nodes_value_rec(node: Option<&Value>, depth: usize) -> usize {
     let Some(n) = node else { return 0 };
+    if depth >= crate::MAX_NODE_DEPTH {
+        eprintln!(
+            "file_summary: node tree exceeded max depth {}; truncating count",
+            crate::MAX_NODE_DEPTH
+        );
+        return 1;
+    }
     let mut count = 1;
     if let Some(arr) = n.get("children").and_then(Value::as_array) {
         for c in arr {
-            count += count_nodes_value(Some(c));
+            count += count_nodes_value_rec(Some(c), depth + 1);
         }
     }
     count
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn count_nodes_value_caps_depth_on_deep_tree() {
+        // Large-stack thread: the deep input Value's recursive `Drop` would
+        // otherwise overflow the ~2MB test-thread stack. The cap is what
+        // bounds the count's own recursion; the assertion proves it engages.
+        std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024)
+            .spawn(|| {
+                let mut node = json!({ "id": "leaf", "type": "FRAME" });
+                for _ in 0..(crate::MAX_NODE_DEPTH + 50) {
+                    node = json!({ "id": "n", "type": "FRAME", "children": [node] });
+                }
+                // Root at depth 0 … the node at depth MAX_NODE_DEPTH counts
+                // itself but descends no further: MAX_NODE_DEPTH + 1 counted.
+                assert_eq!(count_nodes_value(Some(&node)), crate::MAX_NODE_DEPTH + 1);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
 }
