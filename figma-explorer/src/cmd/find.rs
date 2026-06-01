@@ -16,7 +16,7 @@ use figma_api::apis::configuration::Configuration;
 use serde_json::{json, Value};
 
 use crate::cache::EntryStatus;
-use crate::resolve::{multi_token_search, SearchHit};
+use crate::node_search::{multi_token_search, SearchHit};
 use crate::resolver::{parse_id, render_resolve_error, ResolvedTarget, Resolver};
 use crate::tree::{truncate_display, NAME_DISPLAY_MAX};
 use crate::{print, Globals, Output};

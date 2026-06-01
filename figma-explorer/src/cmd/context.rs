@@ -12,7 +12,7 @@ use clap::Args as ClapArgs;
 use figma_api::apis::configuration::Configuration;
 
 use crate::cmd::fetch_file_json;
-use crate::resolve;
+use crate::node_search;
 use crate::resolver::{parse_id, render_resolve_error, ResolvedTarget, Resolver};
 use crate::{context as ctx, print, Globals};
 
@@ -66,7 +66,7 @@ impl Args {
         let doc = &file["document"];
 
         let target_value = match &node_id {
-            Some(nid) => resolve::resolve_node_id(doc, nid)
+            Some(nid) => node_search::resolve_node_id(doc, nid)
                 .ok_or_else(|| anyhow!("no node with id {nid}"))?,
             None => doc,
         };

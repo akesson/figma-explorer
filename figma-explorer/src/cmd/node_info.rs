@@ -28,10 +28,10 @@ use crate::cache::{self, CacheDir, CacheNode, EntryStatus, FileMeta};
 use crate::comment_assoc::AssociatedComment;
 use crate::file_summary::build_file_summary;
 use crate::full_cache;
+use crate::node_search::resolve_node_id;
 use crate::node_view::{
     build_node_view, build_styles_index_block, build_variables_block, Collector, ViewOptions,
 };
-use crate::resolve::resolve_node_id;
 use crate::resolver::{parse_id, render_resolve_error, ResolvedTarget, Resolver};
 use crate::synth::SynthState;
 use crate::{print, Globals};
