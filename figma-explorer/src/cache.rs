@@ -898,7 +898,9 @@ async fn try_refresh_single(
             updated.project_name = current.project_name.clone();
             updated.name = current.name.clone();
             fetch_comments_into_meta(cfg, cache, file_key, now, &mut updated).await;
-            let _ = cache.write_meta(&updated);
+            if let Err(e) = cache.write_meta(&updated) {
+                eprintln!("cache: write_meta failed for {file_key}: {e:#}");
+            }
             // Register comm synths for any newly-arrived comments — the
             // file synth was already interned on the previous fetch path,
             // so it's safe to look up directly here.
@@ -921,7 +923,9 @@ async fn try_refresh_single(
         if let Some(m) = meta {
             let mut updated = m.clone();
             updated.last_listed_at_epoch = now;
-            let _ = cache.write_meta(&updated);
+            if let Err(e) = cache.write_meta(&updated) {
+                eprintln!("cache: write_meta failed for {file_key}: {e:#}");
+            }
         }
         anyhow::bail!("file {file_key} is not exportable (cached marker, unchanged on Figma)");
     }
@@ -1047,7 +1051,9 @@ fn record_fetch_failure(
         now,
     );
     let _ = cache.delete_entry(file_key);
-    let _ = cache.write_meta(&marker);
+    if let Err(we) = cache.write_meta(&marker) {
+        eprintln!("cache: write_meta failed for {file_key}: {we:#}");
+    }
     Err(e)
 }
 

@@ -538,7 +538,9 @@ async fn load_full(
                 meta.full_fetched_at_epoch = Some(cache::now_epoch());
                 meta.full_bytes = Some(n);
                 meta.full_schema_version = Some(cache::FULL_SCHEMA_VERSION);
-                let _ = cache.write_meta(&meta);
+                if let Err(e) = cache.write_meta(&meta) {
+                    eprintln!("node-info: write_meta failed for {file_key}: {e:#}");
+                }
             }
         }
     }

@@ -184,7 +184,9 @@ impl PrefetchArgs {
                 Some(_) if unchanged && m.status == EntryStatus::NotExportable => {
                     let mut updated = m.clone();
                     updated.last_listed_at_epoch = now_pre;
-                    let _ = cache_dir.write_meta(&updated);
+                    if let Err(e) = cache_dir.write_meta(&updated) {
+                        eprintln!("cache: write_meta failed for {}: {e:#}", m.file_key);
+                    }
                 }
                 Some(_) => {
                     // Stale or transient-failed — drop and refetch below.
@@ -391,7 +393,9 @@ impl PrefetchArgs {
                                 msg,
                                 now,
                             );
-                            let _ = cache.write_meta(&marker);
+                            if let Err(e) = cache.write_meta(&marker) {
+                                eprintln!("cache: write_meta failed for {}: {e:#}", f.file_key);
+                            }
                         }
                     }
                 }
