@@ -209,7 +209,8 @@ pub async fn extract(
     let png_urls =
         screenshot::render_urls(cfg, file_key, &raster_ids, 2.0, screenshot::Format::Png).await?;
 
-    let client = reqwest::Client::new();
+    // Reuse the configured client so CDN downloads inherit the shared timeouts.
+    let client = cfg.client.clone();
     let mut tasks: FuturesUnordered<_> = FuturesUnordered::new();
     for spec in &specs {
         let urls = if spec.kind == AssetKind::Icon {

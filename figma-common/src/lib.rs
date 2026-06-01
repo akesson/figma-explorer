@@ -3,8 +3,28 @@
 //! `.env` discovery, an authenticated Figma HTTP GET, and the one stable-hash
 //! choice used for persisted fingerprints.
 
+use std::time::Duration;
+
 use anyhow::{anyhow, Context, Result};
 use figma_api::apis::configuration::Configuration;
+
+/// Max time to establish a TCP/TLS connection before giving up. Kills the
+/// classic "dead host hangs the CLI forever" failure mode.
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Per-read inactivity timeout. Kills a stalled stream without aborting a
+/// legitimate large-but-steady download (a hard total timeout would).
+pub const READ_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The shared HTTP client for all Figma API and image-CDN traffic. Defined in
+/// one place so every request path inherits the same timeouts; the generated
+/// `Configuration::default` client (`reqwest::Client::new()`, no timeout) must
+/// not be hand-edited, so callers assign this to `cfg.client` instead.
+pub fn http_client() -> reqwest::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .read_timeout(READ_TIMEOUT)
+        .build()
+}
 
 /// The hasher used for any fingerprint that is written to disk and compared
 /// across runs. `std::collections::hash_map::DefaultHasher` is explicitly not
@@ -59,4 +79,16 @@ pub async fn get_text(cfg: &Configuration, url: &str) -> Result<String> {
         return Err(anyhow!("figma API error ({status}): {body}"));
     }
     Ok(body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn http_client_builds_with_timeouts() {
+        // The builder only fails on invalid TLS/proxy config; this guards
+        // against a future timeout/option combination that won't build.
+        assert!(http_client().is_ok());
+    }
 }
