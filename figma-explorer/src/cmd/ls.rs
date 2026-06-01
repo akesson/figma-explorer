@@ -181,6 +181,79 @@ impl Args {
     }
 }
 
+/// One project's listing data: synth, project id, display name, and its files
+/// paired with their file synths. Named to keep the `render_root` grouping
+/// vector readable (and clippy happy about nested generics).
+type ProjectGroup = (u32, String, String, Vec<(u32, FileMeta)>);
+
+/// Build the YAML rows for one project group: a PROJECT header, then a FILE
+/// header per file, descending into each file's tree when `depth >= 2`.
+/// Shared by `render_root` (called per project) and `render_project` (once).
+#[allow(clippy::too_many_arguments)]
+fn project_rows(
+    resolver: &Resolver,
+    project_synth: u32,
+    project_name: &str,
+    files: &[(u32, FileMeta)],
+    depth: usize,
+    show_all: bool,
+    hidden: &mut BTreeSet<&'static str>,
+    resolved_filter: Option<bool>,
+) -> Vec<Row> {
+    let mut rows = Vec::new();
+    rows.push(Row::header(
+        format!("proj:{project_synth}"),
+        0,
+        "PROJECT",
+        project_name.to_owned(),
+    ));
+    if depth >= 1 {
+        for (fs, fm) in files {
+            rows.push(Row::header(
+                format!("file:{fs}"),
+                1,
+                "FILE",
+                fm.name.clone(),
+            ));
+            if depth >= 2 {
+                append_descent_rows(
+                    resolver,
+                    *fs,
+                    fm,
+                    depth,
+                    1,
+                    &mut rows,
+                    show_all,
+                    hidden,
+                    resolved_filter,
+                );
+            }
+        }
+    }
+    rows
+}
+
+/// Build the JSON `files` array for one project group. Empty when `depth < 1`
+/// (listing projects only). Shared by `render_root` and `render_project`.
+fn project_files_json(
+    resolver: &Resolver,
+    files: &[(u32, FileMeta)],
+    depth: usize,
+    show_all: bool,
+    hidden: &mut BTreeSet<&'static str>,
+    resolved_filter: Option<bool>,
+) -> Vec<Value> {
+    if depth < 1 {
+        return Vec::new();
+    }
+    files
+        .iter()
+        .map(|(fs, fm)| {
+            build_file_json(resolver, *fs, fm, depth, show_all, hidden, resolved_filter)
+        })
+        .collect()
+}
+
 /// Root listing — projects + their files, recursing into each file's
 /// canvases/frames when `depth >= 2`. Reads structural data directly from
 /// the cache; files whose payload is missing or fails to decode are emitted
@@ -196,19 +269,17 @@ fn render_root(
     let synth = resolver.synth();
     let metas = resolver.cache().list_metas()?;
 
-    // Group OK files by project synth.
-    let mut groups: Vec<(u32, String, String, Vec<FileMeta>)> = Vec::new();
+    // Group OK files by project synth, pre-resolving each file's synth so the
+    // render helpers don't have to re-look-it-up (and so synth-less files are
+    // simply skipped rather than panicking).
+    let mut groups: Vec<ProjectGroup> = Vec::new();
     for (project_id, &project_synth) in &synth.projects {
-        let mut files: Vec<FileMeta> = metas
+        let mut files: Vec<(u32, FileMeta)> = metas
             .iter()
-            .filter(|m| {
-                m.status == EntryStatus::Ok
-                    && m.project_id == *project_id
-                    && synth.file_synth(&m.file_key).is_some()
-            })
-            .cloned()
+            .filter(|m| m.status == EntryStatus::Ok && m.project_id == *project_id)
+            .filter_map(|m| synth.file_synth(&m.file_key).map(|s| (s, m.clone())))
             .collect();
-        files.sort_by_key(|f| f.name.to_lowercase());
+        files.sort_by_key(|(_, m)| m.name.to_lowercase());
         let project_name = derive_project_name(&metas, project_id);
         groups.push((project_synth, project_id.clone(), project_name, files));
     }
@@ -220,36 +291,16 @@ fn render_root(
         Output::Yaml => {
             let mut rows: Vec<Row> = Vec::new();
             for (psynth, _pid, pname, files) in &groups {
-                rows.push(Row::header(
-                    format!("proj:{psynth}"),
-                    0,
-                    "PROJECT",
-                    pname.clone(),
+                rows.extend(project_rows(
+                    resolver,
+                    *psynth,
+                    pname,
+                    files,
+                    depth,
+                    show_all,
+                    &mut hidden,
+                    resolved_filter,
                 ));
-                if depth >= 1 {
-                    for fm in files {
-                        let fsynth = synth.file_synth(&fm.file_key).expect("filtered above");
-                        rows.push(Row::header(
-                            format!("file:{fsynth}"),
-                            1,
-                            "FILE",
-                            fm.name.clone(),
-                        ));
-                        if depth >= 2 {
-                            append_descent_rows(
-                                resolver,
-                                fsynth,
-                                fm,
-                                depth,
-                                1,
-                                &mut rows,
-                                show_all,
-                                &mut hidden,
-                                resolved_filter,
-                            );
-                        }
-                    }
-                }
             }
             print_hidden_comment(&hidden);
             print!("{}", format_rows(&rows));
@@ -259,30 +310,13 @@ fn render_root(
             let projects: Vec<Value> = groups
                 .iter()
                 .map(|(ps, pid, pname, files)| {
-                    let file_jsons: Vec<Value> = if depth >= 1 {
-                        files
-                            .iter()
-                            .map(|fm| {
-                                let fs = synth.file_synth(&fm.file_key).expect("filtered above");
-                                build_file_json(
-                                    resolver,
-                                    fs,
-                                    fm,
-                                    depth,
-                                    show_all,
-                                    &mut hidden,
-                                    resolved_filter,
-                                )
-                            })
-                            .collect()
-                    } else {
-                        Vec::new()
-                    };
                     json!({
                         "id": format!("proj:{ps}"),
                         "project_id": pid,
                         "name": pname,
-                        "files": file_jsons,
+                        "files": project_files_json(
+                            resolver, files, depth, show_all, &mut hidden, resolved_filter,
+                        ),
                     })
                 })
                 .collect();
@@ -612,55 +646,29 @@ fn render_project(
 
     match format {
         Output::Yaml => {
-            let mut rows: Vec<Row> = Vec::new();
-            rows.push(Row::header(
-                format!("proj:{project_synth}"),
-                0,
-                "PROJECT",
-                project_name.clone(),
-            ));
-            if depth >= 1 {
-                for (fs, fm) in &files {
-                    rows.push(Row::header(
-                        format!("file:{fs}"),
-                        1,
-                        "FILE",
-                        fm.name.clone(),
-                    ));
-                    if depth >= 2 {
-                        append_descent_rows(
-                            resolver,
-                            *fs,
-                            fm,
-                            depth,
-                            1,
-                            &mut rows,
-                            show_all,
-                            &mut hidden,
-                            resolved_filter,
-                        );
-                    }
-                }
-            }
+            let rows = project_rows(
+                resolver,
+                project_synth,
+                &project_name,
+                &files,
+                depth,
+                show_all,
+                &mut hidden,
+                resolved_filter,
+            );
             print_hidden_comment(&hidden);
             print!("{}", format_rows(&rows));
             Ok(())
         }
         Output::Json => {
-            let mut file_jsons: Vec<Value> = Vec::new();
-            if depth >= 1 {
-                for (fs, fm) in &files {
-                    file_jsons.push(build_file_json(
-                        resolver,
-                        *fs,
-                        fm,
-                        depth,
-                        show_all,
-                        &mut hidden,
-                        resolved_filter,
-                    ));
-                }
-            }
+            let file_jsons = project_files_json(
+                resolver,
+                &files,
+                depth,
+                show_all,
+                &mut hidden,
+                resolved_filter,
+            );
             print(
                 &json!({
                     "id": format!("proj:{project_synth}"),
@@ -1123,5 +1131,64 @@ mod tests {
         assert!(leaf_out.get("comments").is_none());
         // Canvas-level thread never appears in the per-node tree.
         assert!(!serde_json::to_string(&v).unwrap().contains("comm:2"));
+    }
+
+    /// Guard for the `project_rows` helper shared by render_root/render_project:
+    /// PROJECT header, FILE header, and descent into the file tree.
+    #[tokio::test]
+    async fn project_rows_emits_headers_and_descent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = CacheDir::new(tmp.path());
+        cache.ensure().unwrap();
+        let doc = json!({
+            "id": "0:0", "name": "doc", "type": "DOCUMENT",
+            "children": [
+                { "id": "0:1", "name": "Home", "type": "CANVAS",
+                  "children": [{ "id": "1:2", "name": "Header", "type": "FRAME",
+                                 "absoluteBoundingBox": { "x": 0.0, "y": 0.0, "width": 100.0, "height": 40.0 } }] }
+            ],
+        });
+        let file_ref = FileRef {
+            file_key: "abc".into(),
+            name: "Demo".into(),
+            last_modified: "2026-01-01".into(),
+            project_id: "p1".into(),
+            project_name: "Proj".into(),
+        };
+        let payload = build_cached_file(&file_ref, &doc, 0);
+        cache.write_file("abc", &payload).unwrap();
+        cache
+            .write_meta(&FileMeta::from_success(&file_ref, &payload, 0, 0))
+            .unwrap();
+        crate::synth::with_lock(&cache, |s| {
+            s.intern_project("p1");
+            s.intern_file("abc");
+        })
+        .unwrap();
+
+        let resolver = Resolver::from_cache(CacheDir::new(tmp.path()), true).unwrap();
+        let synth = resolver.synth();
+        let psynth = *synth.projects.get("p1").unwrap();
+        let fsynth = synth.file_synth("abc").unwrap();
+        let meta = resolver.cache().read_meta("abc").unwrap().unwrap();
+
+        let mut hidden = BTreeSet::new();
+        // depth 3: projects(0) -> files(1) -> canvases(2) -> frames(3).
+        let rows = project_rows(
+            &resolver,
+            psynth,
+            "Proj",
+            &[(fsynth, meta)],
+            3,
+            false,
+            &mut hidden,
+            None,
+        );
+        let out = format_rows(&rows);
+        assert!(out.contains(&format!("proj:{psynth}")), "{out}");
+        assert!(out.contains("PROJECT  \"Proj\""), "{out}");
+        assert!(out.contains(&format!("file:{fsynth}")), "{out}");
+        assert!(out.contains("FILE  \"Demo\""), "{out}");
+        assert!(out.contains("FRAME  \"Header\""), "{out}");
     }
 }

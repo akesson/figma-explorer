@@ -207,7 +207,52 @@ fn build_view_recursive(
     // the node lacks an `id` (rare; defensive against bad input).
     let node_id = node.get("id").and_then(Value::as_str).unwrap_or("");
 
-    // ── Identity ───────────────────────────────────────────────────────────
+    // Each `add_*` helper appends its section to `out` in source order; the
+    // order of these calls IS the output key order (serde_json Map is
+    // insertion-ordered). `depth` is threaded where the `depth == 0` gates
+    // live (effects, layout grids).
+    add_identity_and_modifiers(&mut out, node);
+    add_geometry(&mut out, node);
+    add_corner(&mut out, node);
+    add_paint_layers(&mut out, node, collector, node_id, depth);
+    add_layout(&mut out, node, collector, node_id, depth);
+    add_text(&mut out, node, opts, collector);
+    add_component(&mut out, node);
+    add_prototype(&mut out, node, opts);
+    add_meta(&mut out, node, opts);
+    add_styles_and_variables(&mut out, node, collector, node_id);
+
+    // ── Children ───────────────────────────────────────────────────────────
+    // Stays inline: it recurses into build_view_recursive and its collector
+    // bookkeeping (emitted_descendants increment, omitted_ids push, the cap
+    // check) is order-critical against the recursion.
+    let allow_deeper = opts.depth.is_none_or(|d| depth < d);
+    if allow_deeper {
+        if let Some(arr) = node.get("children").and_then(Value::as_array) {
+            let mut out_children: Vec<Value> = Vec::new();
+            for child in arr {
+                if collector.emitted_descendants >= opts.max_nodes {
+                    if let Some(id) = child.get("id").and_then(Value::as_str) {
+                        collector.omitted_ids.push(id.to_owned());
+                    }
+                    continue;
+                }
+                collector.emitted_descendants += 1;
+                let v = build_view_recursive(child, opts, collector, depth + 1);
+                out_children.push(v);
+            }
+            if !out_children.is_empty() {
+                out.insert("children".into(), Value::Array(out_children));
+            }
+        }
+    }
+
+    Value::Object(out)
+}
+
+/// Identity (id/type/name) plus the common modifier flags that are emitted
+/// only when they differ from their defaults.
+fn add_identity_and_modifiers(out: &mut Map<String, Value>, node: &Value) {
     if let Some(v) = node.get("id") {
         out.insert("id".into(), v.clone());
     }
@@ -217,8 +262,6 @@ fn build_view_recursive(
     if let Some(v) = node.get("name") {
         out.insert("name".into(), v.clone());
     }
-
-    // ── Common modifiers (omit defaults) ───────────────────────────────────
     if let Some(Value::Bool(false)) = node.get("visible") {
         out.insert("visible".into(), json!(false));
     }
@@ -249,8 +292,11 @@ fn build_view_recursive(
             out.insert("mask_type".into(), mt.clone());
         }
     }
+}
 
-    // ── Geometry ───────────────────────────────────────────────────────────
+/// Bounds, size, non-identity transform, constraints, and responsive size
+/// constraints.
+fn add_geometry(out: &mut Map<String, Value>, node: &Value) {
     if let Some(b) = node.get("absoluteBoundingBox") {
         out.insert("bounds".into(), b.clone());
     }
@@ -268,19 +314,21 @@ fn build_view_recursive(
     }
     // Size constraints (used in responsive auto-layout).
     if let Some(min_w) = node.get("minWidth") {
-        merge_size_constraint(&mut out, "min_width", min_w);
+        merge_size_constraint(out, "min_width", min_w);
     }
     if let Some(max_w) = node.get("maxWidth") {
-        merge_size_constraint(&mut out, "max_width", max_w);
+        merge_size_constraint(out, "max_width", max_w);
     }
     if let Some(min_h) = node.get("minHeight") {
-        merge_size_constraint(&mut out, "min_height", min_h);
+        merge_size_constraint(out, "min_height", min_h);
     }
     if let Some(max_h) = node.get("maxHeight") {
-        merge_size_constraint(&mut out, "max_height", max_h);
+        merge_size_constraint(out, "max_height", max_h);
     }
+}
 
-    // ── Corner radius ──────────────────────────────────────────────────────
+/// Corner radii (uniform or per-corner) and the clip flag.
+fn add_corner(out: &mut Map<String, Value>, node: &Value) {
     if let Some(arr) = node.get("rectangleCornerRadii").and_then(Value::as_array) {
         out.insert(
             "corner".into(),
@@ -294,8 +342,17 @@ fn build_view_recursive(
     if let Some(Value::Bool(true)) = node.get("clipsContent") {
         out.insert("clips_content".into(), json!(true));
     }
+}
 
-    // ── Fills / strokes / effects ──────────────────────────────────────────
+/// Fills, strokes (+ companion stroke block), and effects. Effects are noise
+/// for non-target depths, so they're emitted only at `depth == 0`.
+fn add_paint_layers(
+    out: &mut Map<String, Value>,
+    node: &Value,
+    collector: &mut Collector,
+    node_id: &str,
+    depth: usize,
+) {
     if let Some(arr) = node.get("fills").and_then(Value::as_array) {
         let paints = build_paints(arr, collector, node_id);
         if !paints.is_empty() {
@@ -313,8 +370,6 @@ fn build_view_recursive(
             }
         }
     }
-
-    // Effects are noise for non-target depths. Keep on target, drop deeper.
     if depth == 0 {
         if let Some(arr) = node.get("effects").and_then(Value::as_array) {
             let effects = build_effects(arr, collector, node_id);
@@ -323,8 +378,17 @@ fn build_view_recursive(
             }
         }
     }
+}
 
-    // ── Layout (auto-layout) ───────────────────────────────────────────────
+/// Auto-layout container settings, this node's own layout-child settings, and
+/// layout grids (grids only at `depth == 0`).
+fn add_layout(
+    out: &mut Map<String, Value>,
+    node: &Value,
+    collector: &mut Collector,
+    node_id: &str,
+    depth: usize,
+) {
     if let Some(mode) = node.get("layoutMode").and_then(Value::as_str) {
         if mode != "NONE" {
             out.insert("layout".into(), build_layout(node, collector, node_id));
@@ -339,15 +403,24 @@ fn build_view_recursive(
             out.insert("layout_grids".into(), Value::Array(grids.clone()));
         }
     }
+}
 
-    // ── Text ────────────────────────────────────────────────────────────────
+/// TEXT node content block.
+fn add_text(
+    out: &mut Map<String, Value>,
+    node: &Value,
+    opts: &ViewOptions,
+    collector: &mut Collector,
+) {
     if node.get("type").and_then(Value::as_str) == Some("TEXT") {
         if let Some(text) = build_text(node, opts, collector) {
             out.insert("text".into(), text);
         }
     }
+}
 
-    // ── Component / instance metadata ──────────────────────────────────────
+/// Component / instance metadata and component-property references.
+fn add_component(out: &mut Map<String, Value>, node: &Value) {
     let component = build_component(node);
     if !component.is_empty() {
         out.insert("component".into(), Value::Object(component));
@@ -357,8 +430,11 @@ fn build_view_recursive(
             out.insert("property_refs".into(), refs.clone());
         }
     }
+}
 
-    // ── Prototype (opt-in, but always emit when this node starts a flow) ───
+/// Prototype interactions — opt-in, but always emitted when this node starts a
+/// flow.
+fn add_prototype(out: &mut Map<String, Value>, node: &Value, opts: &ViewOptions) {
     if opts.prototype || node.get("prototypeStartNodeID").is_some() {
         if let Some(proto) = build_prototype(node, opts.prototype) {
             if !proto.as_object().is_none_or(Map::is_empty) {
@@ -366,8 +442,10 @@ fn build_view_recursive(
             }
         }
     }
+}
 
-    // ── Meta (dev status, annotations, export settings) — opt-in ───────────
+/// Dev status, annotations, and export settings — opt-in (`--meta`).
+fn add_meta(out: &mut Map<String, Value>, node: &Value, opts: &ViewOptions) {
     if opts.meta {
         if let Some(ds) = node.get("devStatus") {
             if !ds.is_null() {
@@ -385,8 +463,17 @@ fn build_view_recursive(
             }
         }
     }
+}
 
-    // ── Style + variable references ────────────────────────────────────────
+/// Named-style references and bound/explicit variable modes. Mutates the
+/// collector (style ids, variable ids) as a side channel so the top-level
+/// `styles_index` / `variables` blocks can resolve them.
+fn add_styles_and_variables(
+    out: &mut Map<String, Value>,
+    node: &Value,
+    collector: &mut Collector,
+    node_id: &str,
+) {
     if let Some(styles_map) = node.get("styles").and_then(Value::as_object) {
         // Pass the styles map through as-is (small) and collect ids so the
         // top-level `styles_index` block resolves them.
@@ -419,30 +506,6 @@ fn build_view_recursive(
             out.insert("explicit_variable_modes".into(), emodes.clone());
         }
     }
-
-    // ── Children ───────────────────────────────────────────────────────────
-    let allow_deeper = opts.depth.is_none_or(|d| depth < d);
-    if allow_deeper {
-        if let Some(arr) = node.get("children").and_then(Value::as_array) {
-            let mut out_children: Vec<Value> = Vec::new();
-            for child in arr {
-                if collector.emitted_descendants >= opts.max_nodes {
-                    if let Some(id) = child.get("id").and_then(Value::as_str) {
-                        collector.omitted_ids.push(id.to_owned());
-                    }
-                    continue;
-                }
-                collector.emitted_descendants += 1;
-                let v = build_view_recursive(child, opts, collector, depth + 1);
-                out_children.push(v);
-            }
-            if !out_children.is_empty() {
-                out.insert("children".into(), Value::Array(out_children));
-            }
-        }
-    }
-
-    Value::Object(out)
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -1602,5 +1665,72 @@ mod tests {
         assert!(map.contains_key("S:abc"));
         assert!(!map.contains_key("S:zzz"));
         assert_eq!(map["S:abc"]["type"], "FILL");
+    }
+
+    /// Golden: a FRAME exercising (almost) every section plus a TEXT child at
+    /// depth 1. Locks byte-exact output key order AND the final collector
+    /// state, so the build_view_recursive split into add_* helpers is provably
+    /// behavior-preserving. The child also locks the depth==0 drops: its
+    /// `effects` / `layoutGrids` must NOT appear (depth 1).
+    #[test]
+    fn build_node_view_full_node_golden() {
+        let node = json!({
+            "id": "10:20",
+            "type": "FRAME",
+            "name": "Card",
+            "visible": false,
+            "locked": true,
+            "rotation": 0.5,
+            "opacity": 0.8,
+            "blendMode": "MULTIPLY",
+            "preserveRatio": true,
+            "isMask": true,
+            "maskType": "ALPHA",
+            "absoluteBoundingBox": {"x": 0.0, "y": 0.0, "width": 100.0, "height": 50.0},
+            "size": {"x": 100.0, "y": 50.0},
+            "relativeTransform": [[1.0, 0.0, 5.0], [0.0, 1.0, 7.0]],
+            "constraints": {"vertical": "TOP", "horizontal": "LEFT"},
+            "minWidth": 10.0,
+            "maxWidth": 200.0,
+            "rectangleCornerRadii": [4.0, 4.0, 0.0, 0.0],
+            "clipsContent": true,
+            "fills": [{"type": "SOLID", "color": {"r": 1.0, "g": 0.0, "b": 0.0, "a": 1.0}}],
+            "strokes": [{"type": "SOLID", "color": {"r": 0.0, "g": 0.0, "b": 0.0, "a": 1.0}}],
+            "strokeWeight": 2.0,
+            "effects": [{"type": "DROP_SHADOW", "color": {"r":0.0,"g":0.0,"b":0.0,"a":0.5}, "offset": {"x":0.0,"y":2.0}, "radius": 4.0, "visible": true}],
+            "layoutMode": "VERTICAL",
+            "layoutGrids": [{"pattern": "GRID", "sectionSize": 8.0}],
+            "componentPropertyReferences": {"characters": "prop1"},
+            "prototypeStartNodeID": "10:20",
+            "styles": {"fill": "S:1", "text": "S:2"},
+            "boundVariables": {"fills": [{"type": "VARIABLE_ALIAS", "id": "VariableID:9"}]},
+            "explicitVariableModes": {"VariableCollectionId:1": "mode1"},
+            "children": [
+                {"id": "10:21", "type": "TEXT", "name": "Label", "characters": "Hello",
+                 "effects": [{"type": "DROP_SHADOW"}], "layoutGrids": [{"pattern":"GRID"}]}
+            ]
+        });
+        let opts = ViewOptions {
+            depth: None,
+            max_nodes: 500,
+            prototype: false,
+            meta: true,
+            rich_text: false,
+        };
+        let mut c = Collector::default();
+        let view = build_node_view(&node, &opts, &mut c);
+        let got = serde_json::to_string(&view).unwrap();
+        let expected = r##"{"id":"10:20","type":"FRAME","name":"Card","visible":false,"locked":true,"rotation":0.5,"opacity":0.8,"blend_mode":"MULTIPLY","preserve_ratio":true,"is_mask":true,"mask_type":"ALPHA","bounds":{"x":0.0,"y":0.0,"width":100.0,"height":50.0},"size":{"x":100.0,"y":50.0},"relative_transform":[[1.0,0.0,5.0],[0.0,1.0,7.0]],"constraints":{"vertical":"TOP","horizontal":"LEFT"},"size_constraints":{"min_width":10.0,"max_width":200.0},"corner":{"rectangle_corner_radii":[4.0,4.0,0.0,0.0]},"clips_content":true,"fills":[{"type":"SOLID","color":{"r":1.0,"g":0.0,"b":0.0,"a":1.0},"hex":"#ff0000"}],"strokes":[{"type":"SOLID","color":{"r":0.0,"g":0.0,"b":0.0,"a":1.0},"hex":"#000000"}],"stroke":{"weight":2.0},"effects":[{"type":"DROP_SHADOW","color":{"r":0.0,"g":0.0,"b":0.0,"a":0.5},"offset":{"x":0.0,"y":2.0},"radius":4.0,"hex":"#00000080"}],"layout":{"mode":"VERTICAL"},"layout_grids":[{"pattern":"GRID","sectionSize":8.0}],"property_refs":{"characters":"prop1"},"prototype":{"is_flow_start":true},"styles":{"fill":"S:1","text":"S:2"},"bound_variables":{"fills[0]":"VariableID:9"},"explicit_variable_modes":{"VariableCollectionId:1":"mode1"},"children":[{"id":"10:21","type":"TEXT","name":"Label","text":{"characters":"Hello"}}]}"##;
+        assert_eq!(got, expected);
+        assert_eq!(
+            c.styles.iter().cloned().collect::<Vec<_>>(),
+            vec!["S:1", "S:2"]
+        );
+        assert_eq!(
+            c.variables.iter().cloned().collect::<Vec<_>>(),
+            vec!["VariableID:9"]
+        );
+        assert_eq!(c.emitted_descendants, 1);
+        assert!(c.omitted_ids.is_empty());
     }
 }
