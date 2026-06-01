@@ -13,7 +13,6 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use figma_api::apis::configuration::Configuration;
-use figma_api::apis::files_api;
 use futures::stream::{FuturesUnordered, StreamExt};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -209,30 +208,6 @@ pub async fn extract(
         screenshot::render_urls(cfg, file_key, &icon_ids, 1.0, screenshot::Format::Svg).await?;
     let png_urls =
         screenshot::render_urls(cfg, file_key, &raster_ids, 2.0, screenshot::Format::Png).await?;
-
-    // We also need image-fill URLs for nodes that carry an `IMAGE` paint
-    // (raster_specs of kind Image with no exportable render). The /images
-    // render endpoint above handles that case for us by rendering the node,
-    // but real images backed by `imageRef` are also reachable via the
-    // file-level image_fills endpoint. We call it once so callers can
-    // download original-resolution bitmaps if the render endpoint failed.
-    let image_fills = if raster_specs
-        .iter()
-        .any(|s| matches!(s.kind, AssetKind::Image))
-    {
-        files_api::get_image_fills(
-            cfg,
-            files_api::GetImageFillsParams {
-                file_key: file_key.to_owned(),
-            },
-        )
-        .await
-        .map(|r| r.meta.images.clone())
-        .ok()
-    } else {
-        None
-    };
-    let _ = image_fills; // Reserved for future fallback; warning-free for now.
 
     let client = reqwest::Client::new();
     let mut tasks: FuturesUnordered<_> = FuturesUnordered::new();

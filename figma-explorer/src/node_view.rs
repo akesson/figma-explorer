@@ -1103,15 +1103,35 @@ pub fn build_variables_block(
     let variables = meta.get("variables").and_then(Value::as_object);
     let collections = meta.get("variableCollections").and_then(Value::as_object);
 
-    let mut out = Map::new();
-    for id in refs {
-        let Some(v) = variables.and_then(|m| m.get(id)) else {
+    // Worklist over the closure of `refs` under alias edges: building a
+    // variable entry can record alias-target ids into `collector.variables`
+    // (see `resolve_variable_value`), and those targets need their own entries
+    // too. We can't just iterate `refs` because it's an immutable snapshot
+    // taken before any entry was built. Accumulate into a BTreeMap so the
+    // output stays sorted regardless of discovery order.
+    let mut entries: BTreeMap<String, Value> = BTreeMap::new();
+    let mut seen: BTreeSet<String> = refs.iter().cloned().collect();
+    let mut queue: Vec<String> = refs.iter().cloned().collect();
+    while let Some(id) = queue.pop() {
+        let Some(v) = variables.and_then(|m| m.get(&id)) else {
             continue;
         };
-        out.insert(
-            id.clone(),
-            build_variable_entry(v, collections, collector, id),
-        );
+        let entry = build_variable_entry(v, collections, collector, &id);
+        entries.insert(id, entry);
+        let new_ids: Vec<String> = collector
+            .variables
+            .iter()
+            .filter(|v| !seen.contains(*v))
+            .cloned()
+            .collect();
+        for nid in new_ids {
+            seen.insert(nid.clone());
+            queue.push(nid);
+        }
+    }
+    let mut out = Map::new();
+    for (id, entry) in entries {
+        out.insert(id, entry);
     }
     Value::Object(out)
 }
@@ -1213,10 +1233,15 @@ fn resolve_variable_value(
     collector: &mut Collector,
     subject: &str,
 ) -> Value {
-    // Alias indirection: {"type": "VARIABLE_ALIAS", "id": "..."}.
+    // Alias indirection: {"type": "VARIABLE_ALIAS", "id": "..."}. Record the
+    // aliased variable id so `build_variables_block` pulls its definition into
+    // the output too — otherwise the value references an id with no entry.
     if let Some(obj) = raw.as_object() {
         if obj.get("type").and_then(Value::as_str) == Some("VARIABLE_ALIAS") {
             if let Some(id) = obj.get("id") {
+                if let Some(id_str) = id.as_str() {
+                    collector.variables.insert(id_str.to_owned());
+                }
                 return json!({ "alias": id.clone() });
             }
         }
@@ -1672,6 +1697,56 @@ mod tests {
         assert_eq!(entry["resolved_type"], "COLOR");
         assert_eq!(entry["values_by_mode"]["Light"], "#0a85ff");
         assert_eq!(entry["collection"]["default_mode"], "Light");
+    }
+
+    #[test]
+    fn variables_block_pulls_in_aliased_variable() {
+        // A semantic COLOR variable whose value aliases a primitive variable.
+        // `refs` references only the semantic id; the block must still emit the
+        // aliased primitive so the `{alias: id}` value resolves to a definition.
+        let mut refs = BTreeSet::new();
+        refs.insert("VariableID:sem:1".to_owned());
+        let vars_root = json!({
+            "meta": {
+                "variables": {
+                    "VariableID:sem:1": {
+                        "name": "color/semantic/accent",
+                        "variableCollectionId": "VariableCollectionId:1:0",
+                        "resolvedType": "COLOR",
+                        "valuesByMode": {
+                            "1:0": {"type": "VARIABLE_ALIAS", "id": "VariableID:prim:1"},
+                        },
+                    },
+                    "VariableID:prim:1": {
+                        "name": "color/primitive/blue-500",
+                        "variableCollectionId": "VariableCollectionId:1:0",
+                        "resolvedType": "COLOR",
+                        "valuesByMode": {
+                            "1:0": {"r": 0.039, "g": 0.522, "b": 1.0, "a": 1.0},
+                        },
+                    }
+                },
+                "variableCollections": {
+                    "VariableCollectionId:1:0": {
+                        "name": "Tokens",
+                        "defaultModeId": "1:0",
+                        "modes": [{"modeId": "1:0", "name": "Light"}]
+                    }
+                }
+            }
+        });
+        let mut c = Collector::default();
+        let block = build_variables_block(Some(&vars_root), &refs, &mut c);
+        // The alias value surfaces the target id…
+        assert_eq!(
+            block["VariableID:sem:1"]["values_by_mode"]["Light"]["alias"],
+            "VariableID:prim:1"
+        );
+        // …and the aliased primitive is pulled into the block with its own def.
+        assert_eq!(
+            block["VariableID:prim:1"]["values_by_mode"]["Light"], "#0a85ff",
+            "aliased primitive must be pulled into the block"
+        );
     }
 
     #[test]

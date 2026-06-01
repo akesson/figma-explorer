@@ -235,17 +235,27 @@ fn resolve_point(
         let Some(b) = entry.node.bounds.as_ref() else {
             continue;
         };
+        // Tie-breaks compare node id so the winner is stable across runs —
+        // `by_id` is a HashMap and its iteration order is unspecified, so a
+        // bare `>=`/`<=` would pick an arbitrary node when two candidates have
+        // equal area (e.g. a frame and its full-bleed child) or equal distance.
         if contains_point(b, x, y) {
-            let a = area(b);
-            match best_contain {
-                Some((ba, _)) if a >= ba => {}
-                _ => best_contain = Some((a, entry)),
+            let a = area(b); // smallest containing node wins
+            let better = match best_contain {
+                None => true,
+                Some((ba, be)) => a < ba || (a == ba && entry.node.id < be.node.id),
+            };
+            if better {
+                best_contain = Some((a, entry));
             }
         } else {
-            let d = dist_to_rect(b, x, y);
-            match best_nearest {
-                Some((bd, _)) if d >= bd => {}
-                _ => best_nearest = Some((d, entry)),
+            let d = dist_to_rect(b, x, y); // nearest node wins
+            let better = match best_nearest {
+                None => true,
+                Some((bd, be)) => d < bd || (d == bd && entry.node.id < be.node.id),
+            };
+            if better {
+                best_nearest = Some((d, entry));
             }
         }
     }
@@ -487,6 +497,31 @@ mod tests {
         assert!(out[0].node.is_none());
         assert!(matches!(out[0].method, AssociationMethod::CanvasLevel));
         assert_eq!(out[0].stale_node_id.as_deref(), Some("deleted-node"));
+    }
+
+    #[test]
+    fn equal_area_containers_resolve_deterministically_by_id() {
+        // Two sibling frames with identical bounds both contain the pin. The
+        // winner must be stable: `build_index` uses a HashMap whose iteration
+        // order varies per instance, so without an id tie-break the winner
+        // would flicker. Each iteration builds a fresh tree (fresh map seed),
+        // so 25 runs exercise different iteration orders.
+        for _ in 0..25 {
+            let a = node("1:9", "FRAME", "a", Some(b(0.0, 0.0, 100.0, 100.0)), vec![]);
+            let z = node("1:2", "FRAME", "z", Some(b(0.0, 0.0, 100.0, 100.0)), vec![]);
+            let page = node("0:1", "CANVAS", "Page 1", None, vec![a, z]);
+            let tree = node("0:0", "DOCUMENT", "doc", None, vec![page]);
+            let c = make_comment(
+                "c1",
+                CommentClientMeta::Vector(Box::new(ApiVector::new(50.0, 50.0))),
+                None,
+                "pin",
+            );
+            let out = associate(&tree, &[c], 50.0);
+            let n = out[0].node.as_ref().expect("containing hit");
+            assert_eq!(n.node_id, "1:2", "tie must resolve to the smaller node id");
+            assert!(matches!(out[0].method, AssociationMethod::Containing));
+        }
     }
 
     #[test]
