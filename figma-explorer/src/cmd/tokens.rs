@@ -12,7 +12,7 @@ use anyhow::{anyhow, Result};
 use clap::Args as ClapArgs;
 use figma_api::apis::configuration::Configuration;
 
-use crate::cmd::fetch_file_json;
+use crate::cmd::{fetch_file_json, require_document};
 use crate::node_search;
 use crate::resolver::{parse_id, render_resolve_error, ResolvedTarget, Resolver};
 use crate::styles::{self as st, Category, Format, Scope};
@@ -66,7 +66,7 @@ impl Args {
         // Token extraction reads fills/strokes/effects/style — fields the
         // cache projection drops. So we re-fetch the live JSON document here.
         let file = fetch_file_json(cfg, &file_key, None).await?;
-        let doc = &file["document"];
+        let doc = require_document(&file, &file_key)?;
 
         let target_value = match &node_id {
             Some(nid) => Some(

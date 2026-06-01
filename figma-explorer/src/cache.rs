@@ -945,6 +945,13 @@ async fn fetch_and_cache(
 ) -> Result<CachedFile> {
     match crate::cmd::fetch_file_json(cfg, file_key, None).await {
         Ok(file) => {
+            // A 200 response with no `document` (auth quirk, partial body,
+            // schema drift) must not be cached as an empty file — treat it
+            // exactly like a fetch failure so a marker blocks the refetch loop.
+            let doc = match crate::cmd::require_document(&file, file_key) {
+                Ok(d) => d,
+                Err(e) => return record_fetch_failure(cache, file_key, file_ref, e, now),
+            };
             let last_modified = file
                 .get("lastModified")
                 .and_then(Value::as_str)
@@ -965,7 +972,7 @@ async fn fetch_and_cache(
                 project_id,
                 project_name,
             };
-            let payload = build_cached_file(&synthetic_ref, &file["document"], now);
+            let payload = build_cached_file(&synthetic_ref, doc, now);
             let bytes = cache.write_file(file_key, &payload)?;
             let mut meta = FileMeta::from_success(&synthetic_ref, &payload, bytes, now);
             // Fetch comments alongside the structural payload — same cadence,
@@ -998,41 +1005,50 @@ async fn fetch_and_cache(
             }
             Ok(payload)
         }
-        Err(e) => {
-            let msg = format!("{e:#}");
-            let status = if is_not_exportable_error(&msg) {
-                EntryStatus::NotExportable
-            } else {
-                EntryStatus::Failed
-            };
-            // Record a marker meta so subsequent loads don't keep retrying
-            // NotExportable on every call.
-            let (project_id, project_name, name, last_modified) = file_ref
-                .map(|fr| {
-                    (
-                        fr.project_id.clone(),
-                        fr.project_name.clone(),
-                        fr.name.clone(),
-                        fr.last_modified.clone(),
-                    )
-                })
-                .unwrap_or_default();
-            let marker = FileMeta::failure_marker(
-                file_key.to_owned(),
-                name,
-                project_id,
-                project_name,
-                last_modified,
-                status,
-                msg.clone(),
-                now,
-            );
-            // Also drop any stale payload — meta-first ordering.
-            let _ = cache.delete_entry(file_key);
-            let _ = cache.write_meta(&marker);
-            Err(e)
-        }
+        Err(e) => record_fetch_failure(cache, file_key, file_ref, e, now),
     }
+}
+
+/// Persist a failure/`NotExportable` marker meta for a file we could not fetch
+/// (network error) or whose response was malformed (missing `document`), so
+/// subsequent loads don't keep retrying on every call. Drops any stale payload
+/// first (meta-first ordering) and returns the original error to propagate.
+fn record_fetch_failure(
+    cache: &CacheDir,
+    file_key: &str,
+    file_ref: Option<&FileRef>,
+    e: anyhow::Error,
+    now: u64,
+) -> Result<CachedFile> {
+    let msg = format!("{e:#}");
+    let status = if is_not_exportable_error(&msg) {
+        EntryStatus::NotExportable
+    } else {
+        EntryStatus::Failed
+    };
+    let (project_id, project_name, name, last_modified) = file_ref
+        .map(|fr| {
+            (
+                fr.project_id.clone(),
+                fr.project_name.clone(),
+                fr.name.clone(),
+                fr.last_modified.clone(),
+            )
+        })
+        .unwrap_or_default();
+    let marker = FileMeta::failure_marker(
+        file_key.to_owned(),
+        name,
+        project_id,
+        project_name,
+        last_modified,
+        status,
+        msg.clone(),
+        now,
+    );
+    let _ = cache.delete_entry(file_key);
+    let _ = cache.write_meta(&marker);
+    Err(e)
 }
 
 /// Stable signature over the comment set so future polling tooling can answer
