@@ -67,7 +67,10 @@ pub async fn render_node(
             node_id
         )
     })?;
-    let bytes = reqwest::get(&url)
+    let bytes = cfg
+        .client
+        .get(&url)
+        .send()
         .await
         .with_context(|| format!("downloading rendered image from {url}"))?
         .error_for_status()

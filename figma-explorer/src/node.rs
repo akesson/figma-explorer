@@ -168,16 +168,23 @@ pub fn walk_visible<'a, F>(node: &'a Value, mut f: F)
 where
     F: FnMut(&'a Value),
 {
-    fn rec<'a, F: FnMut(&'a Value)>(n: &'a Value, f: &mut F) {
+    fn rec<'a, F: FnMut(&'a Value)>(n: &'a Value, f: &mut F, depth: usize) {
         if !is_visible(n) {
             return;
         }
         f(n);
+        if depth >= crate::MAX_NODE_DEPTH {
+            eprintln!(
+                "node: node tree exceeded max depth {}; truncating walk",
+                crate::MAX_NODE_DEPTH
+            );
+            return;
+        }
         for c in children(n) {
-            rec(c, f);
+            rec(c, f, depth + 1);
         }
     }
-    rec(node, &mut f);
+    rec(node, &mut f, 0);
 }
 
 #[cfg(test)]

@@ -25,6 +25,7 @@ pub fn build_config(token: Option<&str>) -> anyhow::Result<Configuration> {
         })?,
     };
     let mut cfg = Configuration::new();
+    cfg.client = figma_common::http_client().context("building HTTP client")?;
     cfg.api_key = Some(ApiKey { prefix: None, key });
     Ok(cfg)
 }

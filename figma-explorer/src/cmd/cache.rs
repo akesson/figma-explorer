@@ -13,7 +13,9 @@ use crate::cache::{
     self, build_cached_file, default_dir, fetch_comments_into_meta, CacheDir, EntryStatus,
     FileMeta, FileRef,
 };
-use crate::cmd::{fetch_file_json, fetch_local_variables, is_variables_forbidden_error};
+use crate::cmd::{
+    fetch_file_json, fetch_local_variables, is_variables_forbidden_error, require_document,
+};
 use crate::full_cache;
 use crate::team_catalog;
 use crate::{print, Globals, Output};
@@ -182,7 +184,9 @@ impl PrefetchArgs {
                 Some(_) if unchanged && m.status == EntryStatus::NotExportable => {
                     let mut updated = m.clone();
                     updated.last_listed_at_epoch = now_pre;
-                    let _ = cache_dir.write_meta(&updated);
+                    if let Err(e) = cache_dir.write_meta(&updated) {
+                        eprintln!("cache: write_meta failed for {}: {e:#}", m.file_key);
+                    }
                 }
                 Some(_) => {
                     // Stale or transient-failed — drop and refetch below.
@@ -247,8 +251,16 @@ impl PrefetchArgs {
                     let started = Instant::now();
                     let cache = CacheDir::new(&cache_root);
                     let now = cache::now_epoch();
-                    match fetch_file_json(cfg, &f.file_key, None).await {
+                    // Validate `document` as part of the fetch so a malformed
+                    // 200 (missing/null `document`) flows into the failure arm
+                    // below — a marker, not an empty cached payload.
+                    let fetched = fetch_file_json(cfg, &f.file_key, None).await.and_then(|file| {
+                        require_document(&file, &f.file_key)?;
+                        Ok(file)
+                    });
+                    match fetched {
                         Ok(file) => {
+                            // `document` validated present in the fetch chain above.
                             let payload = build_cached_file(&f, &file["document"], now);
                             let node_count = payload.node_count as usize;
                             let bytes = match cache.write_file(&f.file_key, &payload) {
@@ -381,7 +393,9 @@ impl PrefetchArgs {
                                 msg,
                                 now,
                             );
-                            let _ = cache.write_meta(&marker);
+                            if let Err(e) = cache.write_meta(&marker) {
+                                eprintln!("cache: write_meta failed for {}: {e:#}", f.file_key);
+                            }
                         }
                     }
                 }

@@ -26,18 +26,25 @@ use crate::node::{children, id};
 /// fields the cache drops) and returns a borrow. The duplication is
 /// intentional — different node type, different ownership.
 pub fn resolve_node_id<'a>(doc: &'a Value, node_id: &str) -> Option<&'a Value> {
-    fn find<'a>(n: &'a Value, target: &str) -> Option<&'a Value> {
+    fn find<'a>(n: &'a Value, target: &str, depth: usize) -> Option<&'a Value> {
         if id(n) == Some(target) {
             return Some(n);
         }
+        if depth >= crate::MAX_NODE_DEPTH {
+            eprintln!(
+                "node_search: node tree exceeded max depth {}; truncating search",
+                crate::MAX_NODE_DEPTH
+            );
+            return None;
+        }
         for c in children(n) {
-            if let Some(hit) = find(c, target) {
+            if let Some(hit) = find(c, target, depth + 1) {
                 return Some(hit);
             }
         }
         None
     }
-    find(doc, node_id)
+    find(doc, node_id, 0)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

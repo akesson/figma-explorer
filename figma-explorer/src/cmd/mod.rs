@@ -79,6 +79,26 @@ pub async fn fetch_file_json(
     get_json(cfg, &url).await
 }
 
+/// Borrow the `document` node from a fetched file response, erroring clearly if
+/// it is absent or null. `serde_json`'s `Index` (`file["document"]`) returns
+/// `Value::Null` on a missing key, so callers that index directly silently walk
+/// an empty tree — reporting "no nodes" (commands) or caching an empty file
+/// (prefetch) — instead of surfacing the real failure (auth error, partial
+/// response, or a renamed field).
+pub fn require_document<'a>(
+    file: &'a serde_json::Value,
+    file_key: &str,
+) -> Result<&'a serde_json::Value> {
+    file.get("document")
+        .filter(|d| !d.is_null())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Figma response for file {file_key} is missing `document` \
+                 (auth failure or unexpected response shape)"
+            )
+        })
+}
+
 /// Fetch the local-variables document for a file. Wraps the
 /// `/v1/files/{key}/variables/local` endpoint and returns the raw JSON.
 ///
@@ -110,4 +130,29 @@ pub async fn get_json(cfg: &Configuration, url: &str) -> Result<serde_json::Valu
     use anyhow::Context;
     let body = figma_common::get_text(cfg, url).await?;
     serde_json::from_str(&body).with_context(|| format!("parsing response from {url}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::require_document;
+    use serde_json::json;
+
+    #[test]
+    fn require_document_present() {
+        let file = json!({ "document": { "id": "0:0", "children": [] } });
+        let doc = require_document(&file, "abc").unwrap();
+        assert_eq!(doc["id"], json!("0:0"));
+    }
+
+    #[test]
+    fn require_document_missing_is_error() {
+        let file = json!({ "name": "Untitled" });
+        assert!(require_document(&file, "abc").is_err());
+    }
+
+    #[test]
+    fn require_document_null_is_error() {
+        let file = json!({ "document": null });
+        assert!(require_document(&file, "abc").is_err());
+    }
 }
