@@ -13,3 +13,6 @@ reqwest.workspace = true
 dotenvy.workspace = true
 anyhow.workspace = true
 twox-hash.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

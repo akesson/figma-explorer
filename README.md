@@ -61,7 +61,7 @@ Optional environment variables:
 - `FIGMA_TEAM_ID` — needed by `library search` and for the catalog warm in `cache prefetch`.
 - `FIGMA_EXPLORER_CACHE_DIR` — override the cache location (default: OS cache dir).
 
-A `.env` file in the current directory (or any ancestor up to root) is auto-loaded.
+A `.env` file in the current directory (or any ancestor up to root) is auto-loaded, with `~/.config/figma-explorer/.env` as the global fallback — handy for git worktrees and directories with no `.env` in their ancestry. Exported environment variables always win.
 
 ## Quickstart
 
@@ -73,7 +73,10 @@ figma-explorer ls
 figma-explorer ls proj:1
 figma-explorer ls file:2
 
-# Find a node by name within the current scope
+# Find a node by name across every cached file
+figma-explorer find "Button / Primary"
+
+# ...or scope the search to one file
 figma-explorer --in file:2 find "Button / Primary"
 
 # Get implementation-ready info for one node

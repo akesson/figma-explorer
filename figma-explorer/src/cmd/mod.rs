@@ -19,7 +19,8 @@ pub mod tokens;
 pub enum Command {
     /// List a node and its descendants (or projects/files at the root).
     Ls(ls::Args),
-    /// Locate nodes by a multi-token ancestor-chain query.
+    /// Locate nodes by a multi-token ancestor-chain query across all cached
+    /// files (scope with `--in file:N`).
     Find(find::Args),
     /// Search the published team-library catalog (components, component sets,
     /// styles) by name. Unlike `find`, this spans the whole team library

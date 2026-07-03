@@ -7,7 +7,7 @@ description: Inspect Figma files from the CLI — list/search nodes, dump trees,
 
 CLI on top of the Figma REST API. Default to this over the Figma MCP server when you need bulk navigation, search, comments, or token/asset extraction — it's faster, locally cached, and pastable.
 
-Binary: `figma-explorer` (on PATH). Needs `FIGMA_TOKEN` in env or `.env`.
+Binary: `figma-explorer` (on PATH). Needs `FIGMA_TOKEN` in env, a `.env` (nearest one walking up from cwd), or the global fallback `~/.config/figma-explorer/.env`.
 
 ## Tagged-ID grammar
 
@@ -25,8 +25,10 @@ Synthetic ids (`proj:N`, `file:N`) are assigned once and persisted; you can past
 ## Commands
 
 ```
-ls          [ID]   tree under a node (or root). --depth N, --no-ignore, --resolved
-find        QUERY  fuzzy multi-token ancestor-chain search. --in, --type, --limit
+ls          [ID]   tree under a node (or root). --depth N, --no-ignore, --resolved,
+                   --name PATTERN (substring filter; keeps matches + ancestors)
+find        QUERY  fuzzy multi-token ancestor-chain search across ALL cached
+                   files (add --in file:N to scope). --type, --limit
 node-info   [ID]   curated single-target view: layout, fills, effects, text, component
                    metadata, bound variables, anchored comments. Accepts node, comment,
                    file, project, and root targets. See "Design-to-code" below.
@@ -48,7 +50,7 @@ Global flags that apply everywhere: `--json` (else compact text format), `--cach
 
 1. **Discover.** `figma-explorer ls` to see projects and top-level files. Note the `proj:N` / `file:N` ids.
 2. **Drill in.** `figma-explorer ls file:N --depth 1` to see canvases. `--no-ignore` reveals hidden Cover/WIP/Archive canvases (filtered by default).
-3. **Search.** `figma-explorer find "employee status" --in file:28 --limit 5`. Tokens are whitespace-split; each must fuzzy-match some ancestor in the chain. Results are scored — higher score = each token landed on a more distinct ancestor.
+3. **Search.** `figma-explorer find "employee status" --limit 5` searches **every cached file** — don't loop over files. Narrow with `--in file:28` when you already know where to look. Tokens are whitespace-split; each must fuzzy-match some ancestor in the chain. Results are scored — higher score = each token landed on a more distinct ancestor.
 4. **Implement a frame.** `figma-explorer node-info file:28:2974:150299` for a one-shot LLM-friendly view (everything you need to write the JSX/CSS in one read). For visual reference + bulk assets too, use `context` instead — it bundles a screenshot + token files + an `assets/` directory.
 5. **Comments.** `figma-explorer comments file:28` lists every thread in the file, replies inline, newest activity first — filter with `--unresolved` / `--since 2026-06`, re-fetch with `--refresh`. `comments file:28:2974:150299` restricts to threads anchored in that subtree; `comments file:28:comm:M` pulls a single thread (parent + replies). `node-info` still summarizes the 10 newest threads on a file target and inlines anchored comments under node targets.
 
@@ -74,6 +76,7 @@ Defaults are tuned for "useful but not overwhelming":
 - Comments anchored to the target or its subtree are inlined under `node.comments`. Pass `--no-comments` to skip.
 
 Useful flags:
+- `--only fills,layout,…` — restrict output to named sections instead of grepping the full dump. Sections: fills, strokes, effects, geometry, corner, layout, text, component, prototype, meta, styles, variables, comments. Identity (id/type/name) always stays; hoisted variables keep only what kept sections reference.
 - `--depth N` / `--no-children` — limit subtree depth.
 - `--max-nodes N` — emit a `truncated` block instead of dumping huge frames.
 - `--prototype` — include interactions/transitions (off by default).

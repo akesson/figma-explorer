@@ -69,8 +69,9 @@ pub fn build_config(token: Option<&str>) -> anyhow::Result<Configuration> {
         Some(t) => t.to_owned(),
         None => std::env::var("FIGMA_TOKEN").map_err(|_| {
             anyhow!(
-                "FIGMA_TOKEN not set. Export it (https://www.figma.com/developers/api#access-tokens) \
-                 or pass --token."
+                "FIGMA_TOKEN not set. Export it (https://www.figma.com/developers/api#access-tokens), \
+                 pass --token, or put it in a `.env` — the nearest one walking up from cwd wins, \
+                 with ~/.config/figma-explorer/.env as the global fallback."
             )
         })?,
     };

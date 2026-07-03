@@ -108,6 +108,14 @@ pub struct Args {
     /// rows in `ls` regardless. Default: show every thread.
     #[arg(long)]
     pub resolved: Option<bool>,
+
+    /// Only show nodes whose name contains PATTERN (case-insensitive
+    /// substring). Ancestors of matching nodes are kept for tree context;
+    /// other branches are pruned. Matching happens within the --depth
+    /// budget. Files/projects with no matches inside are dropped from
+    /// root/project listings unless their own name matches.
+    #[arg(long, value_name = "PATTERN")]
+    pub name: Option<String>,
 }
 
 impl Args {
@@ -118,8 +126,12 @@ impl Args {
 
         let show_all = self.no_ignore;
         let resolved = self.resolved;
+        // Lowercase the needle once; case-insensitive substring matching
+        // downstream. (`--name ""` matches everything — a harmless no-op.)
+        let name_filter = self.name.as_deref().map(str::to_lowercase);
+        let name_filter = name_filter.as_deref();
         match self.id.as_deref() {
-            None => render_root(&resolver, depth, format, show_all, resolved),
+            None => render_root(&resolver, depth, format, show_all, resolved, name_filter),
             Some(s) => {
                 let id = parse_id(s).map_err(|e| anyhow::anyhow!("{e}"))?;
                 // Promote a bare native id to a qualified one when --in
@@ -133,7 +145,7 @@ impl Args {
                     .map_err(|e| render_resolve_error(e, format))?;
                 match target {
                     ResolvedTarget::Root => {
-                        render_root(&resolver, depth, format, show_all, resolved)
+                        render_root(&resolver, depth, format, show_all, resolved, name_filter)
                     }
                     ResolvedTarget::Project { synth, project_id } => render_project(
                         &resolver,
@@ -143,6 +155,7 @@ impl Args {
                         format,
                         show_all,
                         resolved,
+                        name_filter,
                     ),
                     ResolvedTarget::File {
                         synth,
@@ -157,17 +170,27 @@ impl Args {
                         format,
                         show_all,
                         resolved,
+                        name_filter,
                     ),
                     ResolvedTarget::Node {
                         file_synth,
                         meta,
                         node,
                     } => {
-                        // Filter intentionally does not apply when the user has
-                        // already drilled into a specific node — drilling in is
-                        // explicit, the filter is for browsing.
+                        // The canvas-ignore filter intentionally does not apply
+                        // when the user has already drilled into a specific node
+                        // — drilling in is explicit, that filter is for
+                        // browsing. `--name` DOES apply here (pruning inside a
+                        // subtree is its point).
                         render_node_subtree(
-                            &resolver, file_synth, &meta, &node, depth, format, resolved,
+                            &resolver,
+                            file_synth,
+                            &meta,
+                            &node,
+                            depth,
+                            format,
+                            resolved,
+                            name_filter,
                         )
                     }
                     ResolvedTarget::Comment { .. } => {
@@ -189,6 +212,11 @@ type ProjectGroup = (u32, String, String, Vec<(u32, FileMeta)>);
 /// Build the YAML rows for one project group: a PROJECT header, then a FILE
 /// header per file, descending into each file's tree when `depth >= 2`.
 /// Shared by `render_root` (called per project) and `render_project` (once).
+///
+/// With a `name_filter`, file sections whose pruned tree came up empty are
+/// dropped unless the file's own name matches, and the whole project block
+/// is dropped (empty vec) when no file survived and the project name doesn't
+/// match either.
 #[allow(clippy::too_many_arguments)]
 fn project_rows(
     resolver: &Resolver,
@@ -199,22 +227,34 @@ fn project_rows(
     show_all: bool,
     hidden: &mut BTreeSet<&'static str>,
     resolved_filter: Option<bool>,
+    name_filter: Option<&str>,
+    match_count: &mut usize,
 ) -> Vec<Row> {
     let mut rows = Vec::new();
+    let project_name_matches = name_filter
+        .map(|needle| project_name.to_lowercase().contains(needle))
+        .unwrap_or(false);
+    if project_name_matches {
+        *match_count += 1;
+    }
     rows.push(Row::header(
         format!("proj:{project_synth}"),
         0,
         "PROJECT",
         project_name.to_owned(),
     ));
+    let mut any_file_kept = false;
     if depth >= 1 {
         for (fs, fm) in files {
-            rows.push(Row::header(
+            let file_name_matches = name_filter
+                .map(|needle| fm.name.to_lowercase().contains(needle))
+                .unwrap_or(false);
+            let mut section = vec![Row::header(
                 format!("file:{fs}"),
                 1,
                 "FILE",
                 fm.name.clone(),
-            ));
+            )];
             if depth >= 2 {
                 append_descent_rows(
                     resolver,
@@ -222,19 +262,35 @@ fn project_rows(
                     fm,
                     depth,
                     1,
-                    &mut rows,
+                    &mut section,
                     show_all,
                     hidden,
                     resolved_filter,
+                    name_filter,
+                    match_count,
                 );
             }
+            if name_filter.is_some() && section.len() == 1 && !file_name_matches {
+                continue;
+            }
+            if file_name_matches {
+                *match_count += 1;
+            }
+            any_file_kept = true;
+            rows.extend(section);
         }
+    }
+    if name_filter.is_some() && !any_file_kept && !project_name_matches {
+        return Vec::new();
     }
     rows
 }
 
 /// Build the JSON `files` array for one project group. Empty when `depth < 1`
 /// (listing projects only). Shared by `render_root` and `render_project`.
+/// With a `name_filter`, files whose pruned tree came up empty (and whose
+/// own name doesn't match) are omitted.
+#[allow(clippy::too_many_arguments)]
 fn project_files_json(
     resolver: &Resolver,
     files: &[(u32, FileMeta)],
@@ -242,14 +298,26 @@ fn project_files_json(
     show_all: bool,
     hidden: &mut BTreeSet<&'static str>,
     resolved_filter: Option<bool>,
+    name_filter: Option<&str>,
+    match_count: &mut usize,
 ) -> Vec<Value> {
     if depth < 1 {
         return Vec::new();
     }
     files
         .iter()
-        .map(|(fs, fm)| {
-            build_file_json(resolver, *fs, fm, depth, show_all, hidden, resolved_filter)
+        .filter_map(|(fs, fm)| {
+            build_file_json(
+                resolver,
+                *fs,
+                fm,
+                depth,
+                show_all,
+                hidden,
+                resolved_filter,
+                name_filter,
+                match_count,
+            )
         })
         .collect()
 }
@@ -265,6 +333,7 @@ fn render_root(
     format: Output,
     show_all: bool,
     resolved_filter: Option<bool>,
+    name_filter: Option<&str>,
 ) -> Result<()> {
     let synth = resolver.synth();
     let metas = resolver.cache().list_metas()?;
@@ -286,6 +355,7 @@ fn render_root(
     groups.sort_by_key(|(s, _, _, _)| *s);
 
     let mut hidden: BTreeSet<&'static str> = BTreeSet::new();
+    let mut matches = 0usize;
 
     match format {
         Output::Yaml => {
@@ -300,30 +370,55 @@ fn render_root(
                     show_all,
                     &mut hidden,
                     resolved_filter,
+                    name_filter,
+                    &mut matches,
                 ));
             }
             print_hidden_comment(&hidden);
+            if let Some(pattern) = name_filter {
+                print_name_filter_comment(pattern, matches);
+            }
             print!("{}", format_rows(&rows));
             Ok(())
         }
         Output::Json => {
             let projects: Vec<Value> = groups
                 .iter()
-                .map(|(ps, pid, pname, files)| {
-                    json!({
+                .filter_map(|(ps, pid, pname, files)| {
+                    let file_jsons = project_files_json(
+                        resolver,
+                        files,
+                        depth,
+                        show_all,
+                        &mut hidden,
+                        resolved_filter,
+                        name_filter,
+                        &mut matches,
+                    );
+                    if let Some(needle) = name_filter {
+                        let pname_matches = pname.to_lowercase().contains(needle);
+                        if file_jsons.is_empty() && !pname_matches {
+                            return None;
+                        }
+                        if pname_matches {
+                            matches += 1;
+                        }
+                    }
+                    Some(json!({
                         "id": format!("proj:{ps}"),
                         "project_id": pid,
                         "name": pname,
-                        "files": project_files_json(
-                            resolver, files, depth, show_all, &mut hidden, resolved_filter,
-                        ),
-                    })
+                        "files": file_jsons,
+                    }))
                 })
                 .collect();
-            print(
-                &json!({ "ignored": ignored_json(&hidden), "projects": projects }),
-                format,
-            )
+            let mut payload = serde_json::Map::new();
+            payload.insert("ignored".into(), ignored_json(&hidden));
+            if let Some(pattern) = name_filter {
+                payload.insert("name_filter".into(), name_filter_json(pattern, matches));
+            }
+            payload.insert("projects".into(), Value::Array(projects));
+            print(&Value::Object(payload), format)
         }
     }
 }
@@ -436,18 +531,27 @@ fn append_descent_rows(
     show_all: bool,
     hidden: &mut BTreeSet<&'static str>,
     resolved_filter: Option<bool>,
+    name_filter: Option<&str>,
+    match_count: &mut usize,
 ) {
     let cached = match resolver.cache().read_file(&fm.file_key) {
         Ok(Some(c)) => c,
         _ => return,
     };
-    let synthetic = synthesize_file_root(fm, &cached.document, show_all, hidden);
-    let comment_rows = load_comment_rows(resolver, &fm.file_key, file_synth, resolved_filter);
-    let (by_node, canvas) = group_comments(&comment_rows);
-
+    let mut synthetic = synthesize_file_root(fm, &cached.document, show_all, hidden);
     // The synthesized root itself represents the FILE row, already emitted
     // by the caller; descend its children up to `depth - file_depth` levels.
     let max_sub_depth = depth.saturating_sub(file_depth);
+    if let Some(needle) = name_filter {
+        synthetic = prune_root_children(&synthetic, needle, max_sub_depth, match_count);
+    }
+    let mut comment_rows = load_comment_rows(resolver, &fm.file_key, file_synth, resolved_filter);
+    if name_filter.is_some() {
+        // A filtered listing shows matched nodes + their anchored threads;
+        // canvas-level (unanchored) threads are browsing noise here.
+        comment_rows.retain(|r| r.anchor_node_id.is_some());
+    }
+    let (by_node, canvas) = group_comments(&comment_rows);
     let mut tuples: Vec<(&CacheNode, usize, Option<usize>)> = Vec::new();
     collect_visible(&synthetic, 0, max_sub_depth, &mut tuples);
     for (node, sub_depth, truncated) in tuples.into_iter().skip(1) {
@@ -567,6 +671,9 @@ fn build_comment_rows(
 /// array (or `truncated` marker) when `depth >= 2`. Mirrors the YAML descent
 /// in `append_descent_rows`. Pre-associated comments are attached on each
 /// node parallel to `children`; canvas-level threads sit on the file root.
+/// Returns `None` when a `name_filter` is active, nothing under the file
+/// matched, and the file's own name doesn't match either.
+#[allow(clippy::too_many_arguments)]
 fn build_file_json(
     resolver: &Resolver,
     file_synth: u32,
@@ -575,16 +682,29 @@ fn build_file_json(
     show_all: bool,
     hidden: &mut BTreeSet<&'static str>,
     resolved_filter: Option<bool>,
-) -> Value {
+    name_filter: Option<&str>,
+    match_count: &mut usize,
+) -> Option<Value> {
+    let file_name_matches = name_filter
+        .map(|needle| fm.name.to_lowercase().contains(needle))
+        .unwrap_or(false);
     let mut obj = serde_json::Map::new();
     obj.insert("id".into(), json!(format!("file:{file_synth}")));
     obj.insert("file_key".into(), json!(fm.file_key));
     obj.insert("name".into(), json!(fm.name));
     obj.insert("last_modified".into(), json!(fm.last_modified));
-    let comment_rows = load_comment_rows(resolver, &fm.file_key, file_synth, resolved_filter);
+    let mut comment_rows = load_comment_rows(resolver, &fm.file_key, file_synth, resolved_filter);
+    if name_filter.is_some() {
+        comment_rows.retain(|r| r.anchor_node_id.is_some());
+    }
+    let mut any_node_kept = false;
     if depth >= 2 {
         if let Ok(Some(cached)) = resolver.cache().read_file(&fm.file_key) {
-            let synthetic = synthesize_file_root(fm, &cached.document, show_all, hidden);
+            let mut synthetic = synthesize_file_root(fm, &cached.document, show_all, hidden);
+            if let Some(needle) = name_filter {
+                synthetic = prune_root_children(&synthetic, needle, depth - 1, match_count);
+            }
+            any_node_kept = !synthetic.children.is_empty();
             let rendered =
                 render_subtree_json_with_comments(file_synth, &synthetic, depth - 1, &comment_rows);
             if let Value::Object(rendered_obj) = rendered {
@@ -597,6 +717,12 @@ fn build_file_json(
             }
         }
     }
+    if name_filter.is_some() && !any_node_kept && !file_name_matches {
+        return None;
+    }
+    if file_name_matches {
+        *match_count += 1;
+    }
     // Canvas-level threads attach to the file root regardless of depth.
     let canvas_json: Vec<Value> = comment_rows
         .iter()
@@ -606,7 +732,7 @@ fn build_file_json(
     if !canvas_json.is_empty() {
         obj.insert("canvas_comments".into(), Value::Array(canvas_json));
     }
-    Value::Object(obj)
+    Some(Value::Object(obj))
 }
 
 /// Best-effort lookup of the human-readable project name for `project_id` by
@@ -623,6 +749,7 @@ fn derive_project_name(metas: &[FileMeta], project_id: &str) -> String {
 
 /// Project listing — header + files in that project, recursing into each
 /// file's structural tree when `depth >= 2`. Reads from cache state.
+#[allow(clippy::too_many_arguments)]
 fn render_project(
     resolver: &Resolver,
     project_synth: u32,
@@ -631,6 +758,7 @@ fn render_project(
     format: Output,
     show_all: bool,
     resolved_filter: Option<bool>,
+    name_filter: Option<&str>,
 ) -> Result<()> {
     let synth = resolver.synth();
     let metas = resolver.cache().list_metas()?;
@@ -643,6 +771,7 @@ fn render_project(
     files.sort_by_key(|(_, m)| m.name.to_lowercase());
 
     let mut hidden: BTreeSet<&'static str> = BTreeSet::new();
+    let mut matches = 0usize;
 
     match format {
         Output::Yaml => {
@@ -655,8 +784,13 @@ fn render_project(
                 show_all,
                 &mut hidden,
                 resolved_filter,
+                name_filter,
+                &mut matches,
             );
             print_hidden_comment(&hidden);
+            if let Some(pattern) = name_filter {
+                print_name_filter_comment(pattern, matches);
+            }
             print!("{}", format_rows(&rows));
             Ok(())
         }
@@ -668,17 +802,19 @@ fn render_project(
                 show_all,
                 &mut hidden,
                 resolved_filter,
+                name_filter,
+                &mut matches,
             );
-            print(
-                &json!({
-                    "id": format!("proj:{project_synth}"),
-                    "project_id": project_id,
-                    "name": project_name,
-                    "ignored": ignored_json(&hidden),
-                    "files": file_jsons,
-                }),
-                format,
-            )
+            let mut payload = serde_json::Map::new();
+            payload.insert("id".into(), json!(format!("proj:{project_synth}")));
+            payload.insert("project_id".into(), json!(project_id));
+            payload.insert("name".into(), json!(project_name));
+            payload.insert("ignored".into(), ignored_json(&hidden));
+            if let Some(pattern) = name_filter {
+                payload.insert("name_filter".into(), name_filter_json(pattern, matches));
+            }
+            payload.insert("files".into(), Value::Array(file_jsons));
+            print(&Value::Object(payload), format)
         }
     }
 }
@@ -696,13 +832,24 @@ fn render_file(
     format: Output,
     show_all: bool,
     resolved_filter: Option<bool>,
+    name_filter: Option<&str>,
 ) -> Result<()> {
     let mut hidden: BTreeSet<&'static str> = BTreeSet::new();
-    let synthetic_root = synthesize_file_root(meta, document, show_all, &mut hidden);
-    let comment_rows = load_comment_rows(resolver, &meta.file_key, file_synth, resolved_filter);
+    let mut synthetic_root = synthesize_file_root(meta, document, show_all, &mut hidden);
+    let mut matches = 0usize;
+    if let Some(needle) = name_filter {
+        synthetic_root = prune_root_children(&synthetic_root, needle, depth, &mut matches);
+    }
+    let mut comment_rows = load_comment_rows(resolver, &meta.file_key, file_synth, resolved_filter);
+    if name_filter.is_some() {
+        comment_rows.retain(|r| r.anchor_node_id.is_some());
+    }
     match format {
         Output::Yaml => {
             print_hidden_comment(&hidden);
+            if let Some(pattern) = name_filter {
+                print_name_filter_comment(pattern, matches);
+            }
             let lines =
                 render_flat_with_comments(&synthetic_root, file_synth, depth, &comment_rows);
             println!("{}", lines.join("\n"));
@@ -725,6 +872,9 @@ fn render_file(
             payload.insert("file_key".into(), json!(meta.file_key));
             payload.insert("name".into(), json!(meta.name));
             payload.insert("ignored".into(), ignored_json(&hidden));
+            if let Some(pattern) = name_filter {
+                payload.insert("name_filter".into(), name_filter_json(pattern, matches));
+            }
             payload.insert("items".into(), items);
             if !canvas_json.is_empty() {
                 payload.insert("canvas_comments".into(), Value::Array(canvas_json));
@@ -737,6 +887,7 @@ fn render_file(
 /// Node-subtree listing — straightforward delegation to `render_flat_with_comments`.
 /// Anchor matching still considers the full set of comments for the file: a
 /// comment whose anchor lives outside the subtree just won't render here.
+#[allow(clippy::too_many_arguments)]
 fn render_node_subtree(
     resolver: &Resolver,
     file_synth: u32,
@@ -745,22 +896,39 @@ fn render_node_subtree(
     depth: usize,
     format: Output,
     resolved_filter: Option<bool>,
+    name_filter: Option<&str>,
 ) -> Result<()> {
-    let comment_rows = load_comment_rows(resolver, &meta.file_key, file_synth, resolved_filter);
+    let mut matches = 0usize;
+    let node = match name_filter {
+        Some(needle) => &prune_root_children(node, needle, depth, &mut matches),
+        None => node,
+    };
+    let mut comment_rows = load_comment_rows(resolver, &meta.file_key, file_synth, resolved_filter);
+    if name_filter.is_some() {
+        comment_rows.retain(|r| r.anchor_node_id.is_some());
+    }
     match format {
         Output::Yaml => {
+            if let Some(pattern) = name_filter {
+                print_name_filter_comment(pattern, matches);
+            }
             let lines = render_flat_with_comments(node, file_synth, depth, &comment_rows);
             println!("{}", lines.join("\n"));
             Ok(())
         }
-        Output::Json => print(
-            &json!({
-                "id": format!("file:{file_synth}:{}", node.id),
-                "file_key": meta.file_key,
-                "items": render_subtree_json_with_comments(file_synth, node, depth, &comment_rows),
-            }),
-            format,
-        ),
+        Output::Json => {
+            let mut payload = serde_json::Map::new();
+            payload.insert("id".into(), json!(format!("file:{file_synth}:{}", node.id)));
+            payload.insert("file_key".into(), json!(meta.file_key));
+            if let Some(pattern) = name_filter {
+                payload.insert("name_filter".into(), name_filter_json(pattern, matches));
+            }
+            payload.insert(
+                "items".into(),
+                render_subtree_json_with_comments(file_synth, node, depth, &comment_rows),
+            );
+            print(&Value::Object(payload), format)
+        }
     }
 }
 
@@ -804,6 +972,87 @@ pub fn synthesize_file_root(
         bounds: None,
         children,
     }
+}
+
+/// Prune `node`'s subtree to name matches ∪ their ancestors, within the
+/// `max_depth` render budget (`depth` = node's own level below the render
+/// root; nodes deeper than the budget are neither matched nor kept). Returns
+/// `None` when nothing at or under `node` matches. Grep semantics: a matched
+/// node does NOT keep its non-matching descendants — drilling in is one
+/// `ls <id>` away — EXCEPT at the depth boundary, where the raw clone keeps
+/// its (never-rendered) children so the `[+N children]` truncation marker
+/// still reports the unfiltered count. Increments `match_count` per matched
+/// node.
+fn filter_tree_by_name(
+    node: &CacheNode,
+    needle_lower: &str,
+    depth: usize,
+    max_depth: usize,
+    match_count: &mut usize,
+) -> Option<CacheNode> {
+    if !node.visible {
+        return None;
+    }
+    let self_matches = node.name.to_lowercase().contains(needle_lower);
+    if depth >= max_depth {
+        if self_matches {
+            *match_count += 1;
+            return Some(node.clone());
+        }
+        return None;
+    }
+    let kept: Vec<CacheNode> = node
+        .children
+        .iter()
+        .filter_map(|c| filter_tree_by_name(c, needle_lower, depth + 1, max_depth, match_count))
+        .collect();
+    if self_matches {
+        *match_count += 1;
+        return Some(CacheNode {
+            children: kept,
+            ..node.clone()
+        });
+    }
+    if kept.is_empty() {
+        return None;
+    }
+    Some(CacheNode {
+        children: kept,
+        ..node.clone()
+    })
+}
+
+/// Apply [`filter_tree_by_name`] below an always-kept render root (the
+/// synthesized FILE node or an explicitly-targeted node): the root row stays,
+/// its descendants are pruned. The root's own name does not count as a match.
+fn prune_root_children(
+    root: &CacheNode,
+    needle_lower: &str,
+    max_depth: usize,
+    match_count: &mut usize,
+) -> CacheNode {
+    let children: Vec<CacheNode> = root
+        .children
+        .iter()
+        .filter_map(|c| filter_tree_by_name(c, needle_lower, 1, max_depth, match_count))
+        .collect();
+    CacheNode {
+        children,
+        ..root.clone()
+    }
+}
+
+/// The `# name filter …` YAML transparency line — printed whenever the
+/// filter is active, including on zero matches (a silent empty listing reads
+/// as "no children" otherwise).
+fn print_name_filter_comment(pattern: &str, matches: usize) {
+    let label = if matches == 1 { "match" } else { "matches" };
+    println!("# name filter \"{pattern}\": {matches} {label}");
+}
+
+/// The JSON counterpart of the transparency line.
+fn name_filter_json(pattern: &str, matches: usize) -> Value {
+    json!({ "pattern": pattern, "matches": matches })
 }
 
 /// If `--in <ID>` named a file scope and the user passed a bare native id,
@@ -1104,6 +1353,100 @@ mod tests {
         }
     }
 
+    /// Three-level fixture for the `--name` filter tests:
+    /// Page ─ Header ─ Search  |  Page ─ Footer ─ Links
+    fn name_filter_fixture() -> CacheNode {
+        let search = leaf_node("2:1", "INSTANCE", "Search", vec![]);
+        let header = leaf_node("1:1", "FRAME", "Header", vec![search]);
+        let links = leaf_node("2:2", "TEXT", "Links", vec![]);
+        let footer = leaf_node("1:2", "FRAME", "Footer", vec![links]);
+        leaf_node("0:1", "CANVAS", "Page", vec![header, footer])
+    }
+
+    #[test]
+    fn name_filter_keeps_match_and_ancestors_drops_siblings() {
+        let root = name_filter_fixture();
+        let mut count = 0;
+        let pruned = filter_tree_by_name(&root, "search", 0, 5, &mut count).unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(pruned.children.len(), 1, "Footer branch pruned");
+        assert_eq!(pruned.children[0].name, "Header");
+        assert_eq!(pruned.children[0].children[0].name, "Search");
+    }
+
+    #[test]
+    fn name_filter_is_case_insensitive_substring() {
+        let root = name_filter_fixture();
+        let mut count = 0;
+        // Needle is pre-lowercased by run(); "earch" ⊂ "Search".
+        let pruned = filter_tree_by_name(&root, "earch", 0, 5, &mut count);
+        assert!(pruned.is_some());
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn name_filter_matched_node_drops_nonmatching_children() {
+        let root = name_filter_fixture();
+        let mut count = 0;
+        let pruned = filter_tree_by_name(&root, "header", 0, 5, &mut count).unwrap();
+        assert_eq!(count, 1);
+        let header = &pruned.children[0];
+        assert_eq!(header.name, "Header");
+        assert!(
+            header.children.is_empty(),
+            "matched node keeps no non-matching descendants"
+        );
+    }
+
+    #[test]
+    fn name_filter_respects_depth_budget() {
+        let root = name_filter_fixture();
+        let mut count = 0;
+        // "Search" sits at depth 2 below the canvas; budget 1 → no match.
+        assert!(filter_tree_by_name(&root, "search", 0, 1, &mut count).is_none());
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn name_filter_boundary_match_keeps_raw_children_for_truncation() {
+        let root = name_filter_fixture();
+        let mut count = 0;
+        // "Header" matches exactly at the depth boundary (1) — the raw clone
+        // keeps its children so `[+N children]` counts stay unfiltered.
+        let pruned = filter_tree_by_name(&root, "header", 0, 1, &mut count).unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(pruned.children[0].children.len(), 1);
+    }
+
+    #[test]
+    fn name_filter_zero_matches_returns_none() {
+        let root = name_filter_fixture();
+        let mut count = 0;
+        assert!(filter_tree_by_name(&root, "nonexistent", 0, 5, &mut count).is_none());
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn name_filter_skips_invisible_nodes() {
+        let mut hidden_node = leaf_node("3:1", "FRAME", "Search hidden", vec![]);
+        hidden_node.visible = false;
+        let root = leaf_node("0:1", "CANVAS", "Page", vec![hidden_node]);
+        let mut count = 0;
+        assert!(filter_tree_by_name(&root, "search", 0, 5, &mut count).is_none());
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn prune_root_children_always_keeps_root() {
+        let root = name_filter_fixture();
+        let mut count = 0;
+        // Root's own name matches nothing; children all pruned — root stays.
+        let pruned = prune_root_children(&root, "nonexistent", 5, &mut count);
+        assert_eq!(pruned.name, "Page");
+        assert!(pruned.children.is_empty());
+        assert_eq!(count, 0);
+    }
+
     /// Characterization guard for the comment-aware JSON subtree renderer:
     /// id formatting, per-node comment attachment, canvas-level exclusion, and
     /// depth truncation. Locks behavior across the group_comments rewire + the
@@ -1186,6 +1529,7 @@ mod tests {
         let meta = resolver.cache().read_meta("abc").unwrap().unwrap();
 
         let mut hidden = BTreeSet::new();
+        let mut matches = 0usize;
         // depth 3: projects(0) -> files(1) -> canvases(2) -> frames(3).
         let rows = project_rows(
             &resolver,
@@ -1196,6 +1540,8 @@ mod tests {
             false,
             &mut hidden,
             None,
+            None,
+            &mut matches,
         );
         let out = format_rows(&rows);
         assert!(out.contains(&format!("proj:{psynth}")), "{out}");

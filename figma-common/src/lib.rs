@@ -32,9 +32,13 @@ pub fn http_client() -> reqwest::Result<reqwest::Client> {
 /// persisted fingerprint stays valid after a `rustup update`.
 pub type StableHasher = twox_hash::XxHash64;
 
-/// Walk from cwd up to the filesystem root, loading every `.env` we find.
-/// `dotenvy::from_path` does not override already-set vars, so the closest
-/// `.env` wins and ancestors fill in any keys it didn't define.
+/// Walk from cwd up to the filesystem root, loading every `.env` we find,
+/// then the global fallback `~/.config/figma-explorer/.env`.
+/// `dotenvy::from_path` does not override already-set vars, so precedence is
+/// three-tiered: exported environment beats the nearest `.env` (ancestors
+/// fill gaps), which beats the global fallback. The global file exists for
+/// contexts with no `.env` in their ancestry — git worktrees of a repo whose
+/// canonical checkout holds the token, or bare shells.
 pub fn load_envs() {
     let Ok(start) = std::env::current_dir() else {
         return;
@@ -50,6 +54,34 @@ pub fn load_envs() {
             None => break,
         }
     }
+    if let Some(global) = global_env_path() {
+        if global.is_file() {
+            let _ = dotenvy::from_path(&global);
+        }
+    }
+}
+
+/// The global fallback `.env` location:
+/// `$XDG_CONFIG_HOME/figma-explorer/.env`, else
+/// `<home>/.config/figma-explorer/.env`. Deliberately the XDG-style path on
+/// every platform (not `dirs::config_dir()`, which on macOS resolves to
+/// `~/Library/Application Support` — nobody guesses that for a CLI).
+pub fn global_env_path() -> Option<std::path::PathBuf> {
+    let xdg = std::env::var("XDG_CONFIG_HOME").ok();
+    let home = std::env::var("HOME")
+        .ok()
+        .or_else(|| std::env::var("USERPROFILE").ok());
+    global_env_dir(xdg.as_deref(), home.as_deref())
+}
+
+/// Pure path assembly for [`global_env_path`], split out for tests. An empty
+/// `XDG_CONFIG_HOME` counts as unset, per the XDG basedir spec.
+fn global_env_dir(xdg: Option<&str>, home: Option<&str>) -> Option<std::path::PathBuf> {
+    let config_root = match xdg.filter(|s| !s.is_empty()) {
+        Some(x) => std::path::PathBuf::from(x),
+        None => std::path::Path::new(home?).join(".config"),
+    };
+    Some(config_root.join("figma-explorer").join(".env"))
 }
 
 /// Issue an authenticated GET against the Figma REST API and return the raw
@@ -90,5 +122,42 @@ mod tests {
         // The builder only fails on invalid TLS/proxy config; this guards
         // against a future timeout/option combination that won't build.
         assert!(http_client().is_ok());
+    }
+
+    #[test]
+    fn global_env_dir_prefers_xdg() {
+        assert_eq!(
+            global_env_dir(Some("/x"), Some("/h")).unwrap(),
+            std::path::PathBuf::from("/x/figma-explorer/.env")
+        );
+    }
+
+    #[test]
+    fn global_env_dir_empty_xdg_falls_to_home() {
+        assert_eq!(
+            global_env_dir(Some(""), Some("/h")).unwrap(),
+            std::path::PathBuf::from("/h/.config/figma-explorer/.env")
+        );
+    }
+
+    #[test]
+    fn global_env_dir_none_when_no_home() {
+        assert_eq!(global_env_dir(None, None), None);
+    }
+
+    #[test]
+    fn dotenv_does_not_override_existing_var() {
+        // The precedence invariant the whole global-fallback design leans on:
+        // a var already set in the process environment survives a later
+        // `.env` load. Uniquely-named var to dodge parallel-test races.
+        let dir = tempfile::tempdir().unwrap();
+        let env_file = dir.path().join(".env");
+        std::fs::write(&env_file, "FIGMA_COMMON_TEST_PRECEDENCE=from_file\n").unwrap();
+        std::env::set_var("FIGMA_COMMON_TEST_PRECEDENCE", "from_env");
+        let _ = dotenvy::from_path(&env_file);
+        assert_eq!(
+            std::env::var("FIGMA_COMMON_TEST_PRECEDENCE").unwrap(),
+            "from_env"
+        );
     }
 }

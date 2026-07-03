@@ -31,7 +31,8 @@ use crate::file_summary::build_file_summary;
 use crate::full_cache;
 use crate::node_search::resolve_node_id;
 use crate::node_view::{
-    build_node_view, build_styles_index_block, build_variables_block, Collector, ViewOptions,
+    build_node_view, build_styles_index_block, build_variables_block, Collector, Section,
+    ViewOptions,
 };
 use crate::resolver::{parse_id, render_resolve_error, ResolvedTarget, Resolver};
 use crate::synth::SynthState;
@@ -91,6 +92,15 @@ pub struct Args {
     /// Useful when the curated view drops a field you need.
     #[arg(long)]
     pub raw: bool,
+
+    /// Restrict output to these sections (comma-separated), e.g.
+    /// `--only fills,strokes`. Identity (id/type/name) is always emitted,
+    /// and variables/styles referenced by a kept section still hoist to the
+    /// top-level blocks. `--only prototype` / `--only meta` imply those
+    /// opt-in sections. Node targets only.
+    #[arg(long, value_enum, value_delimiter = ',',
+          conflicts_with_all = ["raw", "no_variables", "no_comments"])]
+    pub only: Vec<Section>,
 }
 
 impl Args {
@@ -109,18 +119,20 @@ impl Args {
             }
         };
 
-        let depth = if self.no_children {
-            Some(0)
-        } else {
-            self.depth
-        };
-        let opts = ViewOptions {
-            depth,
-            max_nodes: self.max_nodes,
-            prototype: self.prototype,
-            meta: self.meta,
-            rich_text: self.rich_text,
-        };
+        // `--only` narrows node views; on any other target kind the filter
+        // would be silently ignored — reject it so agents notice.
+        if !self.only.is_empty() && !matches!(target, ResolvedTarget::Node { .. }) {
+            let kind = match &target {
+                ResolvedTarget::Root => "the root listing",
+                ResolvedTarget::Project { .. } => "a project",
+                ResolvedTarget::File { .. } => "a file",
+                ResolvedTarget::Comment { .. } => "a comment",
+                ResolvedTarget::Node { .. } => unreachable!(),
+            };
+            anyhow::bail!("--only applies to node targets; the id resolved to {kind}");
+        }
+
+        let opts = view_options(&self);
 
         let payload = match target {
             ResolvedTarget::Root => emit_root(&resolver)?,
@@ -158,6 +170,31 @@ impl Args {
         };
 
         print(&payload, format)
+    }
+}
+
+/// Assemble [`ViewOptions`] from the CLI args. `--only prototype` /
+/// `--only meta` imply those opt-in bools — without this the tokens would
+/// select sections whose builders then gate themselves off and emit nothing.
+fn view_options(args: &Args) -> ViewOptions {
+    let depth = if args.no_children {
+        Some(0)
+    } else {
+        args.depth
+    };
+    let only: Option<BTreeSet<Section>> = if args.only.is_empty() {
+        None
+    } else {
+        Some(args.only.iter().copied().collect())
+    };
+    let selected = |s: Section| only.as_ref().is_some_and(|set| set.contains(&s));
+    ViewOptions {
+        depth,
+        max_nodes: args.max_nodes,
+        prototype: args.prototype || selected(Section::Prototype),
+        meta: args.meta || selected(Section::Meta),
+        rich_text: args.rich_text,
+        only,
     }
 }
 
@@ -200,8 +237,10 @@ async fn emit_node(
     let mut view = build_node_view(raw_node, opts, &mut collector);
 
     // Anchored comments (subtree-scoped — descendants count for frame-like
-    // targets). On by default, suppressible with --no-comments.
-    if !args.no_comments {
+    // targets). On by default, suppressible with --no-comments or by an
+    // `--only` selection that omits `comments` (the flags are mutually
+    // exclusive at the clap level).
+    if !args.no_comments && opts.wants(Section::Comments) {
         if let Some(arr) =
             build_anchored_comments(cache, &meta.file_key, file_synth, node, &collector)?
         {
@@ -240,7 +279,9 @@ async fn emit_node(
     out.insert("node".into(), view);
     if variables.as_object().is_some_and(|m| !m.is_empty()) {
         out.insert("variables".into(), variables);
-    } else if !args.no_variables {
+    } else if !args.no_variables && args.only.is_empty() {
+        // The sidecar-unavailable note is a diagnostics nicety — noise under
+        // a deliberately narrowed `--only` view.
         if let Some(err) = meta.variables_error.as_deref() {
             // Don't pollute on success; surface only when the user asked and
             // we have a hint as to why we don't have variables data.
@@ -592,4 +633,64 @@ fn file_block_with_doc_info(synth: u32, meta: &FileMeta, doc: &crate::cache::Cac
         "last_modified": meta.last_modified,
         "node_count": doc.node_count,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[derive(Parser, Debug)]
+    struct TestCli {
+        #[command(flatten)]
+        args: Args,
+    }
+
+    fn parse(argv: &[&str]) -> Result<Args, clap::Error> {
+        TestCli::try_parse_from(argv).map(|c| c.args)
+    }
+
+    #[test]
+    fn view_options_implies_prototype_and_meta() {
+        let args = parse(&["t", "file:1:1:2", "--only", "prototype,meta"]).unwrap();
+        let opts = view_options(&args);
+        assert!(
+            opts.prototype,
+            "--only prototype must imply the opt-in bool"
+        );
+        assert!(opts.meta, "--only meta must imply the opt-in bool");
+        assert!(opts.wants(Section::Prototype));
+        assert!(!opts.wants(Section::Fills));
+
+        let args = parse(&["t", "file:1:1:2", "--only", "fills"]).unwrap();
+        let opts = view_options(&args);
+        assert!(!opts.prototype);
+        assert!(!opts.meta);
+    }
+
+    #[test]
+    fn view_options_without_only_selects_everything() {
+        let args = parse(&["t", "file:1:1:2"]).unwrap();
+        let opts = view_options(&args);
+        assert!(opts.only.is_none());
+        assert!(opts.wants(Section::Fills) && opts.wants(Section::Comments));
+    }
+
+    #[test]
+    fn only_conflicts_with_raw_and_no_flags() {
+        for conflicting in ["--raw", "--no-variables", "--no-comments"] {
+            let err = parse(&["t", "file:1:1:2", "--only", "fills", conflicting]).unwrap_err();
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::ArgumentConflict,
+                "{conflicting}"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_only_token_lists_sections() {
+        let err = parse(&["t", "file:1:1:2", "--only", "bogus"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidValue);
+    }
 }
