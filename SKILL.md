@@ -38,6 +38,12 @@ find        QUERY  fuzzy multi-token ancestor-chain search across ALL cached
 mark        add KEY ID... [--alias A]... [--note N] [--force] | rm KEY | list
                    curated keyword→node marks. `mark add` writes down a node you
                    identified; resolve it later as mark:KEY. Survives cache clear.
+library     search QUERY  fuzzy text search across the published team library —
+                   components, component sets, styles (not variables). Hits print
+                   a paste-ready file:N:x:y + the component key. No strong match →
+                   says so and labels the closest weak hits. Matching marks lead
+                   (★ rows). --type, --limit, --refresh. Needs FIGMA_TEAM_ID
+                   (or --team-id).
 node-info   [ID]   curated single-target view: layout, fills, effects, text, component
                    metadata, bound variables, anchored comments. Accepts node, comment,
                    file, project, and root targets. See "Design-to-code" below.
@@ -51,7 +57,7 @@ tokens      ID     design tokens. --as tokens|css|tailwind, --only colors,..., -
 assets      ID     bulk SVG/PNG export under a subtree. --out-dir
 context     ID     bundle: tree.txt + screenshot.png + styles/ + assets/. --out-dir
                    tree.txt uses the same flat pipe-rail format as ls/find
-cache       prefetch [--no-full|--no-variables|--force] | clear [--file-key K]
+cache       prefetch [--no-full|--no-variables|--no-catalog|--force] | clear [--file-key K]
 ```
 
 Global flags that apply everywhere: `--json` (else compact text format), `--cache-only` (no live fetches), `--in <ID>` (scope; `find` searches inside it, `ls` uses it to qualify a bare native id like `0:0`).
@@ -61,9 +67,10 @@ Global flags that apply everywhere: `--json` (else compact text format), `--cach
 1. **Discover.** `figma-explorer ls` to see projects and top-level files (depth 1 by default — no canvas/frame dump). Note the `proj:N` / `file:N` ids.
 2. **Drill in.** `figma-explorer ls file:N --depth 1` to see canvases. `--no-ignore` reveals hidden Cover/WIP/Archive canvases (filtered by default). A `[N comments]` suffix flags nodes with discussion; `--comments` inlines the threads.
 3. **Search.** `figma-explorer find "employee status" --limit 5` searches **every cached file** — don't loop over files. Narrow with `--in file:28` when you already know where to look. Tokens are whitespace-split; each must fuzzy-match some ancestor name **or the node's visible text** (`characters`) — so `find "leave details"` finds a button whose layer is named "Button Label" but whose copy reads "Leave details" (shown as a `text:"…"` line under the hit). Results are scored — higher score = each token landed on a more distinct ancestor. If a name search still comes up empty, `find` tells you when the query appears in the file's comments — chase it with `comments file:N --grep <word>` (designers describe things in your vocabulary, not the layer names).
-4. **Implement a frame.** `figma-explorer node-info file:28:2974:150299` for a one-shot LLM-friendly view (everything you need to write the JSX/CSS in one read). For visual reference + bulk assets too, use `context` instead — it bundles a screenshot + token files + an `assets/` directory.
-5. **Comments.** `figma-explorer comments file:28` lists every thread in the file, replies inline, newest activity first — filter with `--unresolved` / `--since 2026-06`, re-fetch with `--refresh`. `comments file:28:2974:150299` restricts to threads anchored in that subtree; `comments file:28:comm:M` pulls a single thread (parent + replies). `node-info` still summarizes the 10 newest threads on a file target and inlines anchored comments under node targets.
-6. **Mark what you find.** The moment you've positively identified a design entity — after the search-and-screenshot dance that located it — write it down: `figma-explorer mark add wallchart-cell file:28:5610:29618 --alias "leave tooltip" --alias "hover card" --note "hover card on a wall-chart cell"`. The `--alias` words are the vocabulary bridge: add the terms *you'd* search for, not the layer name. Then `find "leave tooltip"` surfaces it instantly (as a ★ row, ahead of ordinary hits), and `node-info mark:wallchart-cell` / `screenshot mark:wallchart-cell` resolve straight through. Marks persist across sessions and survive `cache clear`; `mark list` shows them all and flags any that the design has since renamed/moved/deleted. This is the highest-leverage habit in this tool — one `mark add` turns a 10-query hunt into a 1-query lookup forever after.
+4. **Search the design system.** When you're hunting a *component or style* rather than a feature screen, `figma-explorer library search "date picker" --type component-set` spans the whole published team library — no file id needed. Feature screens aren't in the catalog; those live via `ls`/`find`. The catalog caches for 24h (`--refresh` to force).
+5. **Implement a frame.** `figma-explorer node-info file:28:2974:150299` for a one-shot LLM-friendly view (everything you need to write the JSX/CSS in one read). For visual reference + bulk assets too, use `context` instead — it bundles a screenshot + token files + an `assets/` directory.
+6. **Comments.** `figma-explorer comments file:28` lists every thread in the file, replies inline, newest activity first — filter with `--unresolved` / `--since 2026-06`, re-fetch with `--refresh`. `comments file:28:2974:150299` restricts to threads anchored in that subtree; `comments file:28:comm:M` pulls a single thread (parent + replies). `node-info` still summarizes the 10 newest threads on a file target and inlines anchored comments under node targets.
+7. **Mark what you find.** The moment you've positively identified a design entity — after the search-and-screenshot dance that located it — write it down: `figma-explorer mark add wallchart-cell file:28:5610:29618 --alias "leave tooltip" --alias "hover card" --note "hover card on a wall-chart cell"`. The `--alias` words are the vocabulary bridge: add the terms *you'd* search for, not the layer name. Then `find "leave tooltip"` surfaces it instantly (as a ★ row, ahead of ordinary hits), and `node-info mark:wallchart-cell` / `screenshot mark:wallchart-cell` resolve straight through. Marks persist across sessions and survive `cache clear`; `mark list` shows them all and flags any that the design has since renamed/moved/deleted. This is the highest-leverage habit in this tool — one `mark add` turns a 10-query hunt into a 1-query lookup forever after.
 
 ## Design-to-code with `node-info`
 
@@ -109,7 +116,7 @@ Variables: requires the paid-tier Variables REST API. `cache prefetch` adaptivel
 
 - For bare node ids (`x:y`) from a URL or designer DM, always pair with `--in file:N` to avoid ambiguity across files.
 - `--cache-only` is the right default for read-heavy automation; let `cache prefetch` populate first. `node-info` honors this strictly — a missing sidecar errors with a "run cache prefetch" hint instead of silently hitting the network.
-- Cache lives at `$FIGMA_EXPLORER_CACHE_DIR` or `dirs::cache_dir()`. `cache clear --file-key <key>` for surgical invalidation; `cache clear` wipes everything **except** `synth.json` and `marks.json` (so ids and marks stay stable). Per file, the cache holds: `<key>.rkyv` (structural tree for ls/find), `<key>.meta.json` (status), `<key>.comments.json` (pre-associated comments), `<key>.full.json.gz` (raw `/v1/files` body for `node-info`), and `<key>.variables.json` when the account has Variables API access.
+- Cache lives at `$FIGMA_EXPLORER_CACHE_DIR` or `dirs::cache_dir()`. `cache clear --file-key <key>` for surgical invalidation; `cache clear` wipes everything **except** `synth.json` and `marks.json` (so ids and marks stay stable).
 - `tokens --scope target` restricts to the resolved subtree's actually-used values; `--scope file` is only the published library styles; `both` (default) unions them.
 - `assets` separates flat SVG icons from PNGs from "composite" PNGs (subtrees that don't fit one image format). Check the output summary for counts and failures.
 - Comments are cached on disk, refreshed by `cache prefetch` or per-file via `comments <ID> --refresh`; `node-info` and `comments` accept comment ids — `ls`/`screenshot`/`tokens`/`context`/`assets` reject `file:N:comm:M` with a hint.
