@@ -551,6 +551,7 @@ mod tests {
             name: name.into(),
             visible: true,
             bounds: None,
+            characters: None,
             children,
         }
     }

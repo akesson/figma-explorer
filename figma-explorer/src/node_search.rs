@@ -64,6 +64,10 @@ pub struct TokenMatch {
     /// Length-normalized score (nucleo raw score divided by `sqrt(name_chars)`).
     /// Short, semantically-named ancestors outscore long descriptive text.
     pub token_score: f64,
+    /// The matched node's stored text content, set only when the winning lane
+    /// was `characters` (the node's visible copy) rather than its name. Lets
+    /// callers render a `text:"…"` snippet under the hit.
+    pub matched_characters: Option<String>,
 }
 
 /// One result of `multi_token_search`. The path is root → … → node, so the
@@ -85,6 +89,13 @@ const LEAF_WEIGHT_DECAY: f64 = 0.7;
 /// positions in query order. Encodes "wallchart > grid > filter > button"
 /// matching as a chain.
 const CONSECUTIVE_PAIR_BONUS: f64 = 0.10;
+
+/// Length-normalization cap for the text (`characters`) lane. The sqrt
+/// normalization exists to punish verbose *names*; a node's visible copy is
+/// prose by design, so beyond ~64 chars extra length carries no relevance
+/// signal. Uncapped, a clean word match inside a 160-char paragraph (÷12.6)
+/// would score ~4× lower than the same word in a short name.
+const TEXT_NORM_CAP: f64 = 64.0;
 
 /// Search for nodes whose ancestor chain matches every token in `tokens`.
 /// Returns up to `limit` hits ranked by aggregate score.
@@ -129,8 +140,9 @@ pub fn multi_token_search<'a>(
     let mut hits: Vec<SearchHit<'a>> = Vec::new();
     let mut path: Vec<&'a CacheNode> = Vec::new();
     walk_with_path(root, &mut path, &mut |node, path| {
-        // Skip nodes that can't be a meaningful target.
-        if node.name.is_empty() {
+        // Skip nodes that can't be a meaningful target. An unnamed TEXT node
+        // with visible copy is still a valid target (matched via characters).
+        if node.name.is_empty() && node.characters.is_none() {
             return;
         }
         if let Some(ref tfs) = type_filter_lower {
@@ -153,20 +165,47 @@ pub fn multi_token_search<'a>(
         for pattern in &patterns {
             let mut cands: Vec<TokenCandidate> = Vec::new();
             for (pi, ancestor) in path.iter().enumerate() {
-                buf.clear();
-                buf.extend(ancestor.name.chars());
-                if let Some(s) = pattern.score(
-                    nucleo_matcher::Utf32Str::new(&ancestor.name, &mut buf),
-                    &mut matcher,
-                ) {
-                    let name_chars = (ancestor.name.chars().count() as f64).max(1.0);
-                    let normalized = (s as f64) / name_chars.sqrt();
-                    cands.push(TokenCandidate {
-                        path_index: pi,
-                        normalized,
-                        ancestor_name: ancestor.name.clone(),
-                    });
-                }
+                // Name lane: nucleo score ÷ sqrt(name_chars). Empty names score
+                // nothing (nucleo returns None on an empty haystack anyway).
+                let name_score = if ancestor.name.is_empty() {
+                    None
+                } else {
+                    buf.clear();
+                    pattern
+                        .score(
+                            nucleo_matcher::Utf32Str::new(&ancestor.name, &mut buf),
+                            &mut matcher,
+                        )
+                        .map(|s| {
+                            (s as f64) / (ancestor.name.chars().count() as f64).max(1.0).sqrt()
+                        })
+                };
+                // Text lane: same, over the node's visible copy, normalized by a
+                // capped length so a word in a paragraph isn't over-penalized.
+                let text_score = ancestor.characters.as_deref().and_then(|chars| {
+                    buf.clear();
+                    pattern
+                        .score(nucleo_matcher::Utf32Str::new(chars, &mut buf), &mut matcher)
+                        .map(|s| {
+                            let norm_len = (chars.chars().count() as f64).clamp(1.0, TEXT_NORM_CAP);
+                            (s as f64) / norm_len.sqrt()
+                        })
+                });
+                // Take the better lane; the name lane wins ties (Figma
+                // auto-names TEXT nodes with their content, so exact ties are
+                // common and a redundant `text:"…"` snippet adds nothing).
+                let (normalized, matched_characters) = match (name_score, text_score) {
+                    (Some(n), Some(t)) if t > n => (t, ancestor.characters.clone()),
+                    (Some(n), _) => (n, None),
+                    (None, Some(t)) => (t, ancestor.characters.clone()),
+                    (None, None) => continue,
+                };
+                cands.push(TokenCandidate {
+                    path_index: pi,
+                    normalized,
+                    ancestor_name: ancestor.name.clone(),
+                    matched_characters,
+                });
             }
             if cands.is_empty() {
                 return;
@@ -187,6 +226,7 @@ pub fn multi_token_search<'a>(
                 path_index: c.path_index,
                 matched_name: c.ancestor_name.clone(),
                 token_score: c.normalized,
+                matched_characters: c.matched_characters.clone(),
             })
             .collect();
 
@@ -214,6 +254,9 @@ struct TokenCandidate {
     path_index: usize,
     normalized: f64,
     ancestor_name: String,
+    /// The node's `characters`, present only when the text lane beat the name
+    /// lane for this candidate. Threaded into `TokenMatch::matched_characters`.
+    matched_characters: Option<String>,
 }
 
 /// Find the best assignment of tokens to distinct path indices that
@@ -359,6 +402,7 @@ mod tests {
             name: name.into(),
             visible: true,
             bounds: None,
+            characters: None,
             children: vec![],
         }
     }
@@ -370,6 +414,7 @@ mod tests {
             name: name.into(),
             visible: true,
             bounds: None,
+            characters: None,
             children,
         }
     }
@@ -567,6 +612,118 @@ mod tests {
             hits[0].node.id,
             "1:1",
             "short 'Employees' frame should outrank the long prose; got {:?}",
+            hits.iter()
+                .map(|h| (&h.node.id, h.score))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// TEXT leaf carrying visible copy, with a distinct layer name.
+    fn cache_text(id: &str, name: &str, characters: &str) -> CacheNode {
+        let mut n = cache_leaf(id, name, "TEXT");
+        n.characters = Some(characters.into());
+        n
+    }
+
+    #[test]
+    fn text_content_match_finds_node_by_characters() {
+        // The layer is named "Label" but its copy says "Add a tooltip…".
+        let doc = cache_node(
+            "0:0",
+            "doc",
+            "DOCUMENT",
+            vec![cache_node(
+                "1:0",
+                "Home",
+                "CANVAS",
+                vec![cache_text(
+                    "1:1",
+                    "Label",
+                    "Add a tooltip explaining the wallchart",
+                )],
+            )],
+        );
+        let hits = multi_token_search(&doc, &["tooltip"], None, 5);
+        assert_eq!(hits[0].node.id, "1:1", "matched via characters");
+        assert!(
+            hits[0]
+                .matches
+                .iter()
+                .any(|m| m.matched_characters.is_some()),
+            "the match should record the text snippet"
+        );
+    }
+
+    #[test]
+    fn unnamed_text_node_with_characters_is_searchable() {
+        // Empty name but non-empty copy → still a valid, searchable target.
+        let doc = cache_node(
+            "0:0",
+            "doc",
+            "DOCUMENT",
+            vec![cache_node(
+                "1:0",
+                "Home",
+                "CANVAS",
+                vec![cache_text("1:1", "", "Overtime details")],
+            )],
+        );
+        let hits = multi_token_search(&doc, &["overtime"], None, 5);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].node.id, "1:1");
+    }
+
+    #[test]
+    fn name_lane_wins_ties_no_snippet() {
+        // Figma auto-names a TEXT node with its own content: name == characters.
+        // The name lane wins the tie, so no redundant snippet is recorded.
+        let doc = cache_node(
+            "0:0",
+            "doc",
+            "DOCUMENT",
+            vec![cache_node(
+                "1:0",
+                "Home",
+                "CANVAS",
+                vec![cache_text("1:1", "Submit", "Submit")],
+            )],
+        );
+        let hits = multi_token_search(&doc, &["submit"], None, 5);
+        assert_eq!(hits[0].node.id, "1:1");
+        assert!(
+            hits[0]
+                .matches
+                .iter()
+                .all(|m| m.matched_characters.is_none()),
+            "name lane should win the tie — no text snippet"
+        );
+    }
+
+    #[test]
+    fn text_norm_cap_keeps_paragraph_match_competitive() {
+        // A clean word match inside a 160-char paragraph must still outrank a
+        // sibling whose *name* only weakly fuzzy-matches the query.
+        let paragraph = format!("intro preamble {} tooltip trailing filler", "x".repeat(120));
+        let doc = cache_node(
+            "0:0",
+            "doc",
+            "DOCUMENT",
+            vec![cache_node(
+                "1:0",
+                "Home",
+                "CANVAS",
+                vec![
+                    cache_text("1:1", "Body", &paragraph),
+                    // Weak fuzzy name match for "tooltip" (subsequence t-o-o-l).
+                    cache_leaf("1:2", "Toolbox", "FRAME"),
+                ],
+            )],
+        );
+        let hits = multi_token_search(&doc, &["tooltip"], None, 5);
+        assert_eq!(
+            hits[0].node.id,
+            "1:1",
+            "paragraph text match should win under TEXT_NORM_CAP; got {:?}",
             hits.iter()
                 .map(|h| (&h.node.id, h.score))
                 .collect::<Vec<_>>()

@@ -46,6 +46,11 @@ pub struct Args {
     #[arg(long, value_name = "ISO8601")]
     pub since: Option<String>,
 
+    /// Only threads whose head or any reply message contains PATTERN
+    /// (case-insensitive substring). Composes with the other filters.
+    #[arg(long, value_name = "PATTERN")]
+    pub grep: Option<String>,
+
     /// Re-fetch this file's comments from Figma and rewrite the cached
     /// sidecar before listing. Refreshes the whole file's comments whatever
     /// the target (the sidecar is file-granular). Errors under --cache-only.
@@ -95,9 +100,13 @@ impl Args {
                 meta,
                 comment,
             } => {
-                if self.unresolved || self.since.is_some() || self.limit.is_some() {
+                if self.unresolved
+                    || self.since.is_some()
+                    || self.limit.is_some()
+                    || self.grep.is_some()
+                {
                     bail!(
-                        "--unresolved/--since/--limit filter thread listings; file:{file_synth}:comm:{comm_synth} dumps a single thread — drop the flags or target the file"
+                        "--unresolved/--since/--limit/--grep filter thread listings; file:{file_synth}:comm:{comm_synth} dumps a single thread — drop the flags or target the file"
                     );
                 }
                 self.single_thread(
@@ -143,9 +152,12 @@ impl Args {
             .filter(|t| t.head.resolved_at.is_none())
             .count();
 
+        // Lowercase the grep needle once; matched case-insensitively downstream.
+        let grep_lower = self.grep.as_deref().map(str::to_lowercase);
         let filters = Filters {
             unresolved: self.unresolved,
             since: self.since.as_deref(),
+            grep: grep_lower.as_deref(),
             scope,
         };
         let matched = assemble_threads(threads, &filters);
@@ -164,7 +176,8 @@ impl Args {
             None => format!("file:{file_synth}"),
             Some(_) => self.id.clone(),
         };
-        let filters_active = self.unresolved || self.since.is_some() || scope.is_some();
+        let filters_active =
+            self.unresolved || self.since.is_some() || self.grep.is_some() || scope.is_some();
 
         match format {
             Output::Yaml => {
@@ -175,7 +188,14 @@ impl Args {
                         .unwrap_or_else(|| "at an unknown time".to_owned()),
                 );
                 if filters_active {
-                    println!("# {matched_count} of {threads_total} threads match the filters");
+                    match self.grep.as_deref() {
+                        Some(pattern) => println!(
+                            "# {matched_count} of {threads_total} threads match \"{pattern}\""
+                        ),
+                        None => println!(
+                            "# {matched_count} of {threads_total} threads match the filters"
+                        ),
+                    }
                 }
                 if entries.len() < matched_count {
                     println!(
@@ -202,6 +222,7 @@ impl Args {
                         "unresolved_total": unresolved_total,
                         "matched": matched_count,
                         "shown": entries.len(),
+                        "grep": self.grep,
                         "comments_fetched_at_epoch": fetched_at,
                     },
                     "threads": entries,
@@ -311,14 +332,18 @@ fn subtree_ids(node: &CacheNode) -> BTreeSet<String> {
 struct Filters<'a> {
     unresolved: bool,
     since: Option<&'a str>,
+    /// Pre-lowercased substring needle; a thread matches when its head or any
+    /// reply message (lowercased) contains it.
+    grep: Option<&'a str>,
     scope: Option<&'a BTreeSet<String>>,
 }
 
 /// Filter + sort threads: subtree scope (head's anchor must lie in `scope`;
-/// canvas-level threads are excluded when scoped), unresolved-only, and
-/// since (thread activity — head or any reply — at/after the cutoff,
-/// compared lexicographically on ISO-8601 Z timestamps). Sorted
-/// newest-activity-first, ties broken by comment id for determinism.
+/// canvas-level threads are excluded when scoped), unresolved-only, since
+/// (thread activity — head or any reply — at/after the cutoff, compared
+/// lexicographically on ISO-8601 Z timestamps), and grep (head or any reply
+/// message contains the needle). Sorted newest-activity-first, ties broken by
+/// comment id for determinism.
 fn assemble_threads<'a>(threads: Vec<Thread<'a>>, f: &Filters<'_>) -> Vec<Thread<'a>> {
     let mut kept: Vec<Thread<'a>> = threads
         .into_iter()
@@ -338,6 +363,15 @@ fn assemble_threads<'a>(threads: Vec<Thread<'a>>, f: &Filters<'_>) -> Vec<Thread
             }
             if let Some(since) = f.since {
                 if last_activity(t) < since {
+                    return false;
+                }
+            }
+            if let Some(needle) = f.grep {
+                let hit = t.head.message.to_lowercase().contains(needle)
+                    || t.replies
+                        .iter()
+                        .any(|r| r.message.to_lowercase().contains(needle));
+                if !hit {
                     return false;
                 }
             }
@@ -452,6 +486,7 @@ mod tests {
         Filters {
             unresolved: false,
             since: None,
+            grep: None,
             scope: None,
         }
     }
@@ -473,6 +508,71 @@ mod tests {
             unresolved: true,
             ..no_filters()
         };
+        assert_eq!(ids(&assemble_threads(group_threads(&all), &f)), ["open"]);
+    }
+
+    fn with_message(mut c: AssociatedComment, msg: &str) -> AssociatedComment {
+        c.message = msg.into();
+        c
+    }
+
+    #[test]
+    fn grep_matches_head_case_insensitive() {
+        let all = vec![
+            with_message(
+                comment("hit", None, "2026-01-02T00:00:00Z"),
+                "Needs a TOOLTIP here",
+            ),
+            with_message(comment("miss", None, "2026-01-01T00:00:00Z"), "unrelated"),
+        ];
+        let f = Filters {
+            grep: Some("tooltip"),
+            ..no_filters()
+        };
+        assert_eq!(ids(&assemble_threads(group_threads(&all), &f)), ["hit"]);
+    }
+
+    #[test]
+    fn grep_matches_reply_messages() {
+        // Head is clean; a reply mentions the needle → the whole thread matches.
+        let all = vec![
+            with_message(
+                comment("head", None, "2026-01-01T00:00:00Z"),
+                "clean subject",
+            ),
+            with_message(
+                comment("reply", Some("head"), "2026-01-02T00:00:00Z"),
+                "actually the tooltip is wrong",
+            ),
+        ];
+        let f = Filters {
+            grep: Some("tooltip"),
+            ..no_filters()
+        };
+        assert_eq!(ids(&assemble_threads(group_threads(&all), &f)), ["head"]);
+    }
+
+    #[test]
+    fn grep_composes_with_unresolved() {
+        let all = vec![
+            resolved(
+                with_message(
+                    comment("closed", None, "2026-01-01T00:00:00Z"),
+                    "tooltip note",
+                ),
+                "2026-01-03T00:00:00Z",
+            ),
+            with_message(
+                comment("open", None, "2026-01-02T00:00:00Z"),
+                "tooltip note",
+            ),
+        ];
+        let f = Filters {
+            unresolved: true,
+            grep: Some("tooltip"),
+            ..no_filters()
+        };
+        // Both mention "tooltip"; only the open one survives --unresolved.
         assert_eq!(ids(&assemble_threads(group_threads(&all), &f)), ["open"]);
     }
 
@@ -571,6 +671,7 @@ mod tests {
             id: "file:1".into(),
             unresolved: false,
             since: None,
+            grep: None,
             refresh: true,
             limit: None,
         };
@@ -596,6 +697,7 @@ mod tests {
             id: "file:1".into(),
             unresolved: false,
             since: Some("last tuesday".into()),
+            grep: None,
             refresh: false,
             limit: None,
         };
@@ -646,12 +748,14 @@ mod tests {
             name: "root".into(),
             visible: true,
             bounds: None,
+            characters: None,
             children: vec![CacheNode {
                 id: "1:2".into(),
                 type_: "TEXT".into(),
                 name: "leaf".into(),
                 visible: true,
                 bounds: None,
+                characters: None,
                 children: vec![],
             }],
         };

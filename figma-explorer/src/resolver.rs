@@ -526,13 +526,24 @@ impl Resolver {
                 meta.status
             )));
         }
-        let payload = self
-            .cache
-            .read_file(file_key)
-            .map_err(ResolveError::internal)?
-            .ok_or_else(|| {
-                ResolveError::NotCached(format!("file_key {file_key} payload missing"))
-            })?;
+        let payload = match self.cache.read_file(file_key) {
+            Ok(Some(p)) => p,
+            Ok(None) => {
+                return Err(ResolveError::NotCached(format!(
+                    "file_key {file_key} payload missing"
+                )))
+            }
+            // Schema drift (a `CACHE_SCHEMA_VERSION` bump) or rkyv corruption:
+            // per `cache::read_file`'s contract, treat it as a cache miss so
+            // `read_file_or_fetch` refetches into the new schema (or reports a
+            // `CacheOnlyMiss` under `--cache-only`) instead of dead-ending on a
+            // raw "schema version mismatch" internal error.
+            Err(e) => {
+                return Err(ResolveError::NotCached(format!(
+                    "file_key {file_key} payload unreadable ({e}); refetching"
+                )))
+            }
+        };
         Ok((meta, payload))
     }
 }
@@ -825,6 +836,27 @@ mod tests {
             .unwrap();
         let err = r.resolve(&dummy_cfg(), &id).await.unwrap_err();
         assert!(matches!(err, ResolveError::CacheOnlyMiss(_)), "got {err:?}");
+    }
+
+    /// A payload written under an older `CACHE_SCHEMA_VERSION` (the situation
+    /// after a schema bump) must resolve as a cache miss, not a hard internal
+    /// error — so live lanes refetch and `--cache-only` reports a clean miss.
+    #[tokio::test]
+    async fn schema_mismatched_payload_is_a_miss_not_internal_error() {
+        let (g, r) = fixture_with_two_files(); // cache_only resolver
+                                               // Overwrite file-a's payload with a valid magic + a future version so
+                                               // decode returns `VersionMismatch`; the meta stays Ok.
+        let mut bytes = crate::cache::CACHE_MAGIC.to_vec();
+        bytes.extend_from_slice(&999u32.to_le_bytes());
+        bytes.extend_from_slice(b"stale body");
+        std::fs::write(CacheDir::new(g.path()).file_path("file-a"), bytes).unwrap();
+
+        let id: Id = "file:1".parse().unwrap();
+        let err = r.resolve(&dummy_cfg(), &id).await.unwrap_err();
+        assert!(
+            matches!(err, ResolveError::CacheOnlyMiss(_)),
+            "schema drift must be a miss, got {err:?}"
+        );
     }
 
     #[tokio::test]

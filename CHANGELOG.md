@@ -22,6 +22,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the node's name + ancestor path when added, so `mark list` flags drift as
   `[renamed]` / `[moved]` / `[gone]` / `[uncached]` rather than silently
   pointing at a node the design moved out from under.
+- `find` now matches a node's **visible text**, not just its layer name. TEXT
+  content (`characters`) is captured into the structural cache (truncated to
+  160 chars) so a query like `leave details` finds the button whose layer is
+  named "Button Label" but whose copy reads "Leave details". Text-lane matches
+  render a `text:"…"` snippet line under the hit (JSON: `text_matches`), and
+  unnamed TEXT nodes with copy are now searchable. This bumps
+  `CACHE_SCHEMA_VERSION` to 2 — existing caches silently refetch on next
+  access; under `--cache-only`, run `cache prefetch` once first.
+- `comments <ID> --grep <PATTERN>` — case-insensitive substring filter over
+  thread head + reply messages. Composes with `--unresolved`/`--since`/
+  `--limit`; the header reports `# N of M threads match "<pattern>"` (JSON
+  summary gains `grep`).
+- `find` now surfaces a comment-mention hint: after the search it reports
+  which searched files discuss the query in their comment threads
+  (`# N comment threads mention "tooltip" — try: comments file:15 --grep
+  "tooltip"`, capped at 3 files; JSON: `comment_mentions`). A name-search
+  miss often lands in the designers' discussion, which is written in user
+  vocabulary — this closes that dead end.
+- `ls --comments` — restore the pre-diet inline comment thread rows. By
+  default `ls` now summarizes comments (see Changed).
 - `comments <ID>` — list every comment thread in a file (replies inline,
   sorted newest-activity-first, full message text), threads anchored under a
   node subtree, or one thread by `file:N:comm:M`. Filters: `--unresolved`,
@@ -65,6 +85,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `FIGMA_TEAM_ID` environment variable (also `--team-id`), consumed by
   `library search` and the `cache prefetch` catalog warm.
 
+### Changed
+
+- Root `ls` (no ID) now defaults to depth 1 — projects + files only — instead
+  of descending into every file's canvases/frames. A full workspace dump
+  measured ~237KB; the shallow default is ~2KB with a `# depth 1 …` hint on
+  how to descend (`ls file:N`, `ls proj:N`, or `--depth 2`). Explicit
+  `--depth` is unchanged; every non-root target still defaults to depth 3.
+  JSON root output is also depth 1 by default now — pass `--depth 3` for the
+  old shape.
+- `ls` now summarizes comments by default instead of interleaving every
+  thread: a node with anchored threads shows a `[N comments]` suffix, and
+  file targets get a `# N comment threads (M unresolved) — use: comments
+  file:N …` header. Pass `--comments` for the old inline rows. Because the
+  filter now applies to those rows, `--resolved` requires `--comments`. JSON
+  output is unchanged (full comment arrays regardless).
+- `library search` now distinguishes strong from weak fuzzy matches: when any
+  hit clears ~85% of the query's self-score, only strong hits show (with a
+  `# N weaker matches hidden` line); when none do, it prints `# no strong
+  match for "<q>"` and lists a few `(weak)`-labeled leads instead of ranking
+  subsequence junk as if it were relevant. JSON hits gain `strong`; the
+  envelope gains `no_strong_match`/`self_score`.
+
 ### Fixed
 
 - Instance-descendant node ids (`I880:3606;2816:36646`) are now accepted
@@ -82,3 +124,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   silently leaving other cache state on disk; it now also clears the
   team-catalog sidecars under `teams/`. The command's help text overstated its
   scope and has been corrected.
+- A cached payload written under an older `CACHE_SCHEMA_VERSION` now resolves as
+  a cache miss (→ live refetch, or a clean `--cache-only` miss) instead of a
+  hard "cache schema version mismatch" internal error. The version check
+  already promised silent refetch, but the tagged file/node resolve lane
+  mapped the mismatch to an internal error — so a schema bump would have
+  dead-ended every synth-id lookup until a manual `cache clear`.

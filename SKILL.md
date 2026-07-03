@@ -26,11 +26,15 @@ Synthetic ids (`proj:N`, `file:N`) are assigned once and persisted; you can past
 ## Commands
 
 ```
-ls          [ID]   tree under a node (or root). --depth N, --no-ignore, --resolved,
-                   --name PATTERN (substring filter; keeps matches + ancestors)
+ls          [ID]   tree under a node (or root; root defaults to depth 1 =
+                   projects+files). --depth N, --no-ignore, --name PATTERN
+                   (substring filter; keeps matches + ancestors). Comments are
+                   summarized by default (a [N comments] suffix + file header);
+                   --comments restores inline thread rows (--resolved needs it)
 find        QUERY  fuzzy multi-token ancestor-chain search across ALL cached
-                   files (add --in file:N to scope). --type, --limit.
-                   Matching marks lead the results (★ rows).
+                   files (add --in file:N to scope). --type, --limit. Matching
+                   marks lead (★ rows); also flags files whose comment threads
+                   mention the query.
 mark        add KEY ID... [--alias A]... [--note N] [--force] | rm KEY | list
                    curated keyword→node marks. `mark add` writes down a node you
                    identified; resolve it later as mark:KEY. Survives cache clear.
@@ -39,8 +43,9 @@ node-info   [ID]   curated single-target view: layout, fills, effects, text, com
                    file, project, and root targets. See "Design-to-code" below.
 comments    ID     list every comment thread in a file (replies inline, newest
                    activity first), threads under a node, or one thread
-                   (file:N:comm:M). --unresolved, --since ISO8601, --limit,
-                   --refresh (re-fetch one file's comments, no full prefetch)
+                   (file:N:comm:M). --unresolved, --since ISO8601, --grep WORD
+                   (message substring), --limit, --refresh (re-fetch one file's
+                   comments, no full prefetch)
 screenshot  ID     export PNG/JPG/SVG/PDF. --out, --scale, --img-format
 tokens      ID     design tokens. --as tokens|css|tailwind, --only colors,..., --scope
 assets      ID     bulk SVG/PNG export under a subtree. --out-dir
@@ -53,9 +58,9 @@ Global flags that apply everywhere: `--json` (else compact text format), `--cach
 
 ## How to use it
 
-1. **Discover.** `figma-explorer ls` to see projects and top-level files. Note the `proj:N` / `file:N` ids.
-2. **Drill in.** `figma-explorer ls file:N --depth 1` to see canvases. `--no-ignore` reveals hidden Cover/WIP/Archive canvases (filtered by default).
-3. **Search.** `figma-explorer find "employee status" --limit 5` searches **every cached file** — don't loop over files. Narrow with `--in file:28` when you already know where to look. Tokens are whitespace-split; each must fuzzy-match some ancestor in the chain. Results are scored — higher score = each token landed on a more distinct ancestor.
+1. **Discover.** `figma-explorer ls` to see projects and top-level files (depth 1 by default — no canvas/frame dump). Note the `proj:N` / `file:N` ids.
+2. **Drill in.** `figma-explorer ls file:N --depth 1` to see canvases. `--no-ignore` reveals hidden Cover/WIP/Archive canvases (filtered by default). A `[N comments]` suffix flags nodes with discussion; `--comments` inlines the threads.
+3. **Search.** `figma-explorer find "employee status" --limit 5` searches **every cached file** — don't loop over files. Narrow with `--in file:28` when you already know where to look. Tokens are whitespace-split; each must fuzzy-match some ancestor name **or the node's visible text** (`characters`) — so `find "leave details"` finds a button whose layer is named "Button Label" but whose copy reads "Leave details" (shown as a `text:"…"` line under the hit). Results are scored — higher score = each token landed on a more distinct ancestor. If a name search still comes up empty, `find` tells you when the query appears in the file's comments — chase it with `comments file:N --grep <word>` (designers describe things in your vocabulary, not the layer names).
 4. **Implement a frame.** `figma-explorer node-info file:28:2974:150299` for a one-shot LLM-friendly view (everything you need to write the JSX/CSS in one read). For visual reference + bulk assets too, use `context` instead — it bundles a screenshot + token files + an `assets/` directory.
 5. **Comments.** `figma-explorer comments file:28` lists every thread in the file, replies inline, newest activity first — filter with `--unresolved` / `--since 2026-06`, re-fetch with `--refresh`. `comments file:28:2974:150299` restricts to threads anchored in that subtree; `comments file:28:comm:M` pulls a single thread (parent + replies). `node-info` still summarizes the 10 newest threads on a file target and inlines anchored comments under node targets.
 6. **Mark what you find.** The moment you've positively identified a design entity — after the search-and-screenshot dance that located it — write it down: `figma-explorer mark add wallchart-cell file:28:5610:29618 --alias "leave tooltip" --alias "hover card" --note "hover card on a wall-chart cell"`. The `--alias` words are the vocabulary bridge: add the terms *you'd* search for, not the layer name. Then `find "leave tooltip"` surfaces it instantly (as a ★ row, ahead of ordinary hits), and `node-info mark:wallchart-cell` / `screenshot mark:wallchart-cell` resolve straight through. Marks persist across sessions and survive `cache clear`; `mark list` shows them all and flags any that the design has since renamed/moved/deleted. This is the highest-leverage habit in this tool — one `mark add` turns a 10-query hunt into a 1-query lookup forever after.

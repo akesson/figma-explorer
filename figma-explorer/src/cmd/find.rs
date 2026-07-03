@@ -15,7 +15,8 @@ use clap::Args as ClapArgs;
 use figma_api::apis::configuration::Configuration;
 use serde_json::{json, Value};
 
-use crate::cache::EntryStatus;
+use crate::cache::{CacheDir, EntryStatus};
+use crate::comment_assoc::AssociatedComment;
 use crate::marks::{self, MarkStore};
 use crate::node_search::{multi_token_search, SearchHit};
 use crate::resolver::{parse_id, render_resolve_error, ResolvedTarget, Resolver};
@@ -80,6 +81,10 @@ impl Args {
         // When `--in` scopes to one file, remember its key so mark injection
         // below can be limited to marks that reference the same file.
         let mut scope_file_key: Option<String> = None;
+        // (file_synth, file_key) of every file searched — drives the
+        // comment-mention hint (a query that misses layer names often hits the
+        // designers' discussion, which is written in user vocabulary).
+        let mut searched_targets: Vec<(u32, String)> = Vec::new();
 
         match in_ {
             Some(scope_str) => {
@@ -90,9 +95,12 @@ impl Args {
                     .map_err(|e| render_resolve_error(e, format))?;
                 match target {
                     ResolvedTarget::File {
-                        synth, document, ..
+                        synth,
+                        meta,
+                        document,
                     } => {
                         scope_file_key = resolver.synth().file_key(synth).map(|s| s.to_owned());
+                        searched_targets.push((synth, meta.file_key.clone()));
                         let hits = multi_token_search(
                             &document.document,
                             &tokens,
@@ -104,10 +112,13 @@ impl Args {
                         }
                     }
                     ResolvedTarget::Node {
-                        file_synth, node, ..
+                        file_synth,
+                        meta,
+                        node,
                     } => {
                         scope_file_key =
                             resolver.synth().file_key(file_synth).map(|s| s.to_owned());
+                        searched_targets.push((file_synth, meta.file_key.clone()));
                         let hits = multi_token_search(&node, &tokens, type_filter, usize::MAX);
                         for h in hits {
                             all_hits.push(scoped_from_hit(file_synth, &h));
@@ -141,6 +152,7 @@ impl Args {
                         _ => continue,
                     };
                     searched += 1;
+                    searched_targets.push((file_synth, m.file_key.clone()));
                     let hits =
                         multi_token_search(&payload.document, &tokens, type_filter, usize::MAX);
                     for h in hits {
@@ -176,6 +188,13 @@ impl Args {
         }
         let mark_block = marks::render_mark_rows(&mark_views);
 
+        // Comment-mention hint: which of the searched files discuss the query
+        // in their comment threads. A name-search miss ("tooltip") often lands
+        // in the designers' discussion, which is written in user vocabulary.
+        // Sidecars are small JSON, so this is cheap even cross-file.
+        let query_lower = joined.to_lowercase();
+        let mentions = comment_mentions(resolver.cache(), &searched_targets, &query_lower);
+
         // Render. Output format mirrors `ls` (id-first, qualified) so a
         // user can grab any line's first column and paste it into another
         // command. Score and path are tail columns.
@@ -192,8 +211,20 @@ impl Args {
                         total_matches
                     );
                 }
-                // Marks lead, ahead of the ordinary hits.
+                // Marks lead, ahead of everything else.
                 print!("{mark_block}");
+                // Mention hint sits with the headers — most valuable exactly
+                // when there are zero node hits (the query missed layer names).
+                for (file_synth, threads) in &mentions {
+                    let label = if *threads == 1 {
+                        "comment thread"
+                    } else {
+                        "comment threads"
+                    };
+                    println!(
+                        "# {threads} {label} mention \"{joined}\" — try: comments file:{file_synth} --grep \"{joined}\""
+                    );
+                }
                 if all_hits.is_empty() {
                     // Scoped zero-match runs were previously fully silent —
                     // say so explicitly (the cross-file header above already
@@ -233,6 +264,10 @@ impl Args {
                         id_w = max_id,
                         b_w = max_b,
                     ));
+                    for snippet in &h.text_snippets {
+                        out.push_str(&text_snippet_line(snippet, max_id, max_b));
+                        out.push('\n');
+                    }
                 }
                 print!("{out}");
                 Ok(())
@@ -249,8 +284,15 @@ impl Args {
                             "path": h.path_components.join(" > "),
                             "path_components": h.path_components,
                             "suppressed_descendants": h.suppressed_count,
+                            "text_matches": h.text_snippets,
                         })
                     })
+                    .collect();
+                let comment_mentions_json: Vec<Value> = mentions
+                    .iter()
+                    .map(
+                        |(fs, threads)| json!({ "file": format!("file:{fs}"), "threads": threads }),
+                    )
                     .collect();
                 print(
                     &json!({
@@ -263,6 +305,7 @@ impl Args {
                         "truncated": truncated,
                         "marks": marks::marks_json(&mark_views),
                         "hits": hits,
+                        "comment_mentions": comment_mentions_json,
                     }),
                     format,
                 )
@@ -282,6 +325,45 @@ fn cross_file_header(searched_files: Option<usize>, total_matches: usize) -> Opt
     } else {
         format!("# searched {n} cached {files}")
     })
+}
+
+/// Max files listed in the comment-mention hint. Keeps the header block short
+/// on a broad cross-file search.
+const MENTION_HINT_FILES_MAX: usize = 3;
+
+/// Count distinct comment *threads* whose head or any reply message contains
+/// `needle_lower` (pre-lowercased). A reply attributes to its parent thread,
+/// so a head + two matching replies count once.
+fn count_mention_threads(comments: &[AssociatedComment], needle_lower: &str) -> usize {
+    let mut threads: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    for c in comments {
+        if c.message.to_lowercase().contains(needle_lower) {
+            let key = c.parent_id.as_deref().unwrap_or(&c.comment_id);
+            threads.insert(key);
+        }
+    }
+    threads.len()
+}
+
+/// For every searched file, count threads mentioning the query. Files with a
+/// missing/unreadable sidecar or zero mentions are dropped. Sorted by count
+/// descending (ties by file synth) and capped at [`MENTION_HINT_FILES_MAX`].
+fn comment_mentions(
+    cache: &CacheDir,
+    searched: &[(u32, String)],
+    query_lower: &str,
+) -> Vec<(u32, usize)> {
+    let mut out: Vec<(u32, usize)> = searched
+        .iter()
+        .filter_map(|(file_synth, file_key)| {
+            let comments = cache.read_comments(file_key).ok().flatten()?;
+            let n = count_mention_threads(&comments, query_lower);
+            (n > 0).then_some((*file_synth, n))
+        })
+        .collect();
+    out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    out.truncate(MENTION_HINT_FILES_MAX);
+    out
 }
 
 /// Flattened, render-ready hit. We materialize names/bounds/path strings
@@ -308,6 +390,10 @@ struct ScopedHit {
     node_id: String,
     ancestor_node_ids: Vec<String>,
     suppressed_count: usize,
+    /// Visible-copy snippets from tokens that matched the node's `characters`
+    /// rather than a layer name — rendered as `text:"…"` lines under the hit.
+    /// Deduped, order-preserving; empty when every token matched a name.
+    text_snippets: Vec<String>,
 }
 
 fn scoped_from_hit(file_synth: u32, hit: &SearchHit<'_>) -> ScopedHit {
@@ -347,6 +433,16 @@ fn scoped_from_hit(file_synth: u32, hit: &SearchHit<'_>) -> ScopedHit {
     } else {
         Vec::new()
     };
+    // Collect the visible-copy snippets from text-lane matches, deduped in
+    // first-seen order (usually ≤1 per hit).
+    let mut text_snippets: Vec<String> = Vec::new();
+    for m in &hit.matches {
+        if let Some(chars) = &m.matched_characters {
+            if !text_snippets.contains(chars) {
+                text_snippets.push(chars.clone());
+            }
+        }
+    }
     ScopedHit {
         id,
         bounds,
@@ -362,7 +458,22 @@ fn scoped_from_hit(file_synth: u32, hit: &SearchHit<'_>) -> ScopedHit {
         node_id: node.id.clone(),
         ancestor_node_ids,
         suppressed_count: 0,
+        text_snippets,
     }
+}
+
+/// Continuation line rendered under a hit for a text-lane match. The id and
+/// bounds columns are blank so the pipe rail stays aligned and
+/// `awk '{print $1}'` still skips it (the first token is `|`).
+fn text_snippet_line(snippet: &str, id_w: usize, b_w: usize) -> String {
+    format!(
+        "{blank_id:<id_w$}  {blank_b:<b_w$}  |   text:\"{snippet}\"",
+        blank_id = "",
+        blank_b = "",
+        snippet = truncate_display(snippet, 80),
+        id_w = id_w,
+        b_w = b_w,
+    )
 }
 
 fn round_one(x: f64) -> f64 {
@@ -418,6 +529,95 @@ mod tests {
         );
     }
 
+    #[test]
+    fn text_snippet_line_keeps_pipe_rail_and_truncates() {
+        // Columns 1 (id) and 2 (bounds) are blank-padded, so the pipe lands at
+        // id_w + 2 + b_w + 2 and `awk '{print $1}'` sees `|` (skips the line).
+        let line = text_snippet_line("Leave details", 18, 12);
+        let pipe = line.find('|').unwrap();
+        assert_eq!(pipe, 18 + 2 + 12 + 2);
+        assert_eq!(line.split_whitespace().next().unwrap(), "|");
+        assert!(line.contains("text:\"Leave details\""));
+        // A 200-char snippet is truncated to <= 80 chars with an ellipsis.
+        let long = "a".repeat(200);
+        let l = text_snippet_line(&long, 4, 1);
+        let quoted = &l[l.find("text:\"").unwrap() + 6..l.rfind('"').unwrap()];
+        assert!(quoted.chars().count() <= 80, "snippet not truncated");
+        assert!(quoted.ends_with('…'));
+    }
+
+    /// Minimal `AssociatedComment` for the mention-hint tests: a head or reply
+    /// carrying `msg`, canvas-level anchor (irrelevant to mention counting).
+    fn mention_comment(id: &str, parent: Option<&str>, msg: &str) -> AssociatedComment {
+        use crate::comment_assoc::{Anchor, AnchorKind, AssociationMethod};
+        AssociatedComment {
+            comment_id: id.into(),
+            message: msg.into(),
+            author: "a".into(),
+            created_at: "2026-01-01".into(),
+            resolved_at: None,
+            parent_id: parent.map(str::to_owned),
+            order_id: None,
+            reactions: 0,
+            anchor: Anchor {
+                kind: AnchorKind::Vector,
+                explicit_node_id: None,
+                canvas_point: Some([0.0, 0.0]),
+                canvas_rect: None,
+            },
+            node: None,
+            method: AssociationMethod::CanvasLevel,
+            stale_node_id: None,
+        }
+    }
+
+    #[test]
+    fn count_mention_threads_counts_threads_not_comments() {
+        // Head + two replies all mention → one thread.
+        let thread = vec![
+            mention_comment("h", None, "the tooltip is off"),
+            mention_comment("r1", Some("h"), "yeah the tooltip"),
+            mention_comment("r2", Some("h"), "TOOLTIP again"),
+        ];
+        assert_eq!(count_mention_threads(&thread, "tooltip"), 1);
+        // A reply-only mention still counts its (parent) thread once.
+        let reply_only = vec![
+            mention_comment("h2", None, "clean"),
+            mention_comment("r3", Some("h2"), "tooltip"),
+        ];
+        assert_eq!(count_mention_threads(&reply_only, "tooltip"), 1);
+        // No mention → zero.
+        assert_eq!(count_mention_threads(&reply_only, "nonexistent"), 0);
+    }
+
+    #[test]
+    fn comment_mentions_caps_at_three_and_orders_desc() {
+        use crate::cache::CacheDir;
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = CacheDir::new(tmp.path());
+        cache.ensure().unwrap();
+        // Four files with 5 / 3 / 2 / 1 mentioning threads (distinct heads).
+        for (key, n) in [("f5", 5usize), ("f3", 3), ("f2", 2), ("f1", 1)] {
+            let comments: Vec<AssociatedComment> = (0..n)
+                .map(|i| mention_comment(&format!("{key}-{i}"), None, "has tooltip in it"))
+                .collect();
+            cache.write_comments(key, &comments).unwrap();
+        }
+        let searched = vec![
+            (1u32, "f5".to_string()),
+            (2, "f3".to_string()),
+            (3, "f2".to_string()),
+            (4, "f1".to_string()),
+        ];
+        let mentions = comment_mentions(&cache, &searched, "tooltip");
+        assert_eq!(mentions.len(), 3, "capped at MENTION_HINT_FILES_MAX");
+        assert_eq!(
+            mentions,
+            vec![(1, 5), (2, 3), (3, 2)],
+            "ordered by count desc"
+        );
+    }
+
     /// Build a `ScopedHit` with just the fields `dedupe_descendants` looks at —
     /// score, file, node id, and ancestor chain. The display fields stay empty
     /// because the dedup pass never reads them.
@@ -433,6 +633,7 @@ mod tests {
             node_id: node_id.into(),
             ancestor_node_ids: ancestors.iter().map(|s| (*s).into()).collect(),
             suppressed_count: 0,
+            text_snippets: Vec::new(),
         }
     }
 
