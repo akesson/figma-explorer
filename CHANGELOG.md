@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `find` now matches a node's **visible text**, not just its layer name. TEXT
+  content (`characters`) is captured into the structural cache (truncated to
+  160 chars) so a query like `leave details` finds the button whose layer is
+  named "Button Label" but whose copy reads "Leave details". Text-lane matches
+  render a `text:"…"` snippet line under the hit (JSON: `text_matches`), and
+  unnamed TEXT nodes with copy are now searchable. This bumps
+  `CACHE_SCHEMA_VERSION` to 2 — existing caches silently refetch on next
+  access; under `--cache-only`, run `cache prefetch` once first.
 - `comments <ID>` — list every comment thread in a file (replies inline,
   sorted newest-activity-first, full message text), threads anchored under a
   node subtree, or one thread by `file:N:comm:M`. Filters: `--unresolved`,
@@ -69,3 +77,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   silently leaving other cache state on disk; it now also clears the
   team-catalog sidecars under `teams/`. The command's help text overstated its
   scope and has been corrected.
+- A cached payload written under an older `CACHE_SCHEMA_VERSION` now resolves as
+  a cache miss (→ live refetch, or a clean `--cache-only` miss) instead of a
+  hard "cache schema version mismatch" internal error. The version check
+  already promised silent refetch, but the tagged file/node resolve lane
+  mapped the mismatch to an internal error — so a schema bump would have
+  dead-ended every synth-id lookup until a manual `cache clear`.

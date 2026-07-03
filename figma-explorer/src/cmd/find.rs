@@ -213,6 +213,10 @@ impl Args {
                         id_w = max_id,
                         b_w = max_b,
                     ));
+                    for snippet in &h.text_snippets {
+                        out.push_str(&text_snippet_line(snippet, max_id, max_b));
+                        out.push('\n');
+                    }
                 }
                 print!("{out}");
                 Ok(())
@@ -229,6 +233,7 @@ impl Args {
                             "path": h.path_components.join(" > "),
                             "path_components": h.path_components,
                             "suppressed_descendants": h.suppressed_count,
+                            "text_matches": h.text_snippets,
                         })
                     })
                     .collect();
@@ -287,6 +292,10 @@ struct ScopedHit {
     node_id: String,
     ancestor_node_ids: Vec<String>,
     suppressed_count: usize,
+    /// Visible-copy snippets from tokens that matched the node's `characters`
+    /// rather than a layer name — rendered as `text:"…"` lines under the hit.
+    /// Deduped, order-preserving; empty when every token matched a name.
+    text_snippets: Vec<String>,
 }
 
 fn scoped_from_hit(file_synth: u32, hit: &SearchHit<'_>) -> ScopedHit {
@@ -326,6 +335,16 @@ fn scoped_from_hit(file_synth: u32, hit: &SearchHit<'_>) -> ScopedHit {
     } else {
         Vec::new()
     };
+    // Collect the visible-copy snippets from text-lane matches, deduped in
+    // first-seen order (usually ≤1 per hit).
+    let mut text_snippets: Vec<String> = Vec::new();
+    for m in &hit.matches {
+        if let Some(chars) = &m.matched_characters {
+            if !text_snippets.contains(chars) {
+                text_snippets.push(chars.clone());
+            }
+        }
+    }
     ScopedHit {
         id,
         bounds,
@@ -341,7 +360,22 @@ fn scoped_from_hit(file_synth: u32, hit: &SearchHit<'_>) -> ScopedHit {
         node_id: node.id.clone(),
         ancestor_node_ids,
         suppressed_count: 0,
+        text_snippets,
     }
+}
+
+/// Continuation line rendered under a hit for a text-lane match. The id and
+/// bounds columns are blank so the pipe rail stays aligned and
+/// `awk '{print $1}'` still skips it (the first token is `|`).
+fn text_snippet_line(snippet: &str, id_w: usize, b_w: usize) -> String {
+    format!(
+        "{blank_id:<id_w$}  {blank_b:<b_w$}  |   text:\"{snippet}\"",
+        blank_id = "",
+        blank_b = "",
+        snippet = truncate_display(snippet, 80),
+        id_w = id_w,
+        b_w = b_w,
+    )
 }
 
 fn round_one(x: f64) -> f64 {
@@ -397,6 +431,23 @@ mod tests {
         );
     }
 
+    #[test]
+    fn text_snippet_line_keeps_pipe_rail_and_truncates() {
+        // Columns 1 (id) and 2 (bounds) are blank-padded, so the pipe lands at
+        // id_w + 2 + b_w + 2 and `awk '{print $1}'` sees `|` (skips the line).
+        let line = text_snippet_line("Leave details", 18, 12);
+        let pipe = line.find('|').unwrap();
+        assert_eq!(pipe, 18 + 2 + 12 + 2);
+        assert_eq!(line.split_whitespace().next().unwrap(), "|");
+        assert!(line.contains("text:\"Leave details\""));
+        // A 200-char snippet is truncated to <= 80 chars with an ellipsis.
+        let long = "a".repeat(200);
+        let l = text_snippet_line(&long, 4, 1);
+        let quoted = &l[l.find("text:\"").unwrap() + 6..l.rfind('"').unwrap()];
+        assert!(quoted.chars().count() <= 80, "snippet not truncated");
+        assert!(quoted.ends_with('…'));
+    }
+
     /// Build a `ScopedHit` with just the fields `dedupe_descendants` looks at —
     /// score, file, node id, and ancestor chain. The display fields stay empty
     /// because the dedup pass never reads them.
@@ -412,6 +463,7 @@ mod tests {
             node_id: node_id.into(),
             ancestor_node_ids: ancestors.iter().map(|s| (*s).into()).collect(),
             suppressed_count: 0,
+            text_snippets: Vec::new(),
         }
     }
 

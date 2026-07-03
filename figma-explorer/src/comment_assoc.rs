@@ -395,6 +395,7 @@ mod tests {
             name: name.to_owned(),
             visible: true,
             bounds,
+            characters: None,
             children,
         }
     }
@@ -671,6 +672,7 @@ mod tests {
             name: "leaf".into(),
             visible: false,
             bounds: Some(b(60.0, 60.0, 30.0, 30.0)),
+            characters: None,
             children: vec![],
         };
         let inner = node(

@@ -575,6 +575,7 @@ mod tests {
             name: name.into(),
             visible: true,
             bounds,
+            characters: None,
             children: vec![],
         }
     }
