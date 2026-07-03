@@ -39,10 +39,9 @@ pub enum Id {
     /// is any native Figma node id, including the instance-descendant form
     /// `I880:3606;2816:36646`.
     Node { file: u32, node: String },
-    /// `file:N:comm:M` — a comment in a file, both synth indexes known. The
-    /// parser accepts this form so paste-ready IDs round-trip; the resolver
-    /// currently bails ("not resolvable yet") because no command consumes
-    /// comment scope yet.
+    /// `file:N:comm:M` — a comment in a file, both synth indexes known.
+    /// Resolves through the `.comments.json` sidecar; consumed by
+    /// `node-info` and `comments` (other commands reject it with a hint).
     Comment { file: u32, comm: u32 },
     /// `x:y` (or `I…;…`) — a native Figma node id with no file scope. Caller
     /// (Resolver) must look it up against the cache's node index. Multiple

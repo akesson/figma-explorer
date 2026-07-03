@@ -26,6 +26,7 @@ use serde_json::{json, Map, Value};
 
 use crate::cache::{self, CacheDir, CacheNode, EntryStatus, FileMeta};
 use crate::comment_assoc::AssociatedComment;
+use crate::comment_view::{comment_value, recent_thread_heads, thread_value};
 use crate::file_summary::build_file_summary;
 use crate::full_cache;
 use crate::node_search::resolve_node_id;
@@ -294,54 +295,12 @@ fn emit_comment(
     requested: &AssociatedComment,
 ) -> Result<Value> {
     let cache = resolver.cache();
-    // Pull every comment in the file so we can attach replies (when the
-    // requested id is a thread head) or the parent (when it's a reply)
-    // without a second lookup.
+    // Pull every comment in the file so `thread_value` can attach replies
+    // (when the requested id is a thread head) or the parent (when it's a
+    // reply) without a second lookup.
     let all = cache.read_comments(&meta.file_key)?.unwrap_or_default();
     let synth_state = SynthState::load(cache)?;
-
-    // The "thread root" is the head — either the requested entry itself
-    // (when no parent) or the parent it points to.
-    let head_id = requested
-        .parent_id
-        .clone()
-        .unwrap_or_else(|| requested.comment_id.clone());
-
-    let mut comment_obj = comment_value(file_synth, &synth_state, requested);
-    if let Value::Object(map) = &mut comment_obj {
-        if requested.parent_id.is_some() {
-            // Requested is a reply — surface its parent so the LLM has the
-            // full context without a second `node-info` call. Also list
-            // sibling replies (same parent, but not the requested entry).
-            if let Some(parent) = all.iter().find(|c| c.comment_id == head_id) {
-                map.insert(
-                    "parent".into(),
-                    comment_value(file_synth, &synth_state, parent),
-                );
-            }
-            let siblings: Vec<Value> = all
-                .iter()
-                .filter(|c| {
-                    c.parent_id.as_deref() == Some(head_id.as_str())
-                        && c.comment_id != requested.comment_id
-                })
-                .map(|c| comment_value(file_synth, &synth_state, c))
-                .collect();
-            if !siblings.is_empty() {
-                map.insert("siblings".into(), Value::Array(siblings));
-            }
-        } else {
-            // Requested is a thread head — surface direct replies.
-            let replies: Vec<Value> = all
-                .iter()
-                .filter(|c| c.parent_id.as_deref() == Some(head_id.as_str()))
-                .map(|c| comment_value(file_synth, &synth_state, c))
-                .collect();
-            if !replies.is_empty() {
-                map.insert("replies".into(), Value::Array(replies));
-            }
-        }
-    }
+    let comment_obj = thread_value(file_synth, &synth_state, &all, requested);
 
     Ok(json!({
         "target": {
@@ -352,30 +311,6 @@ fn emit_comment(
         "file": file_block(file_synth, meta),
         "comment": comment_obj,
     }))
-}
-
-fn comment_value(file_synth: u32, synth: &SynthState, c: &AssociatedComment) -> Value {
-    let mut v = serde_json::to_value(c).unwrap_or(Value::Null);
-    if let Value::Object(map) = &mut v {
-        // Surface a paste-ready `file:N:comm:M` id; fall back to the Figma
-        // id when we have no synth (interning failed earlier — best-effort).
-        if let Some(comm) = synth.comment_synth(file_synth, &c.comment_id) {
-            map.insert(
-                "comm_id".into(),
-                json!(format!("file:{file_synth}:comm:{comm}")),
-            );
-        }
-        // Promote the associated node's id to qualified form.
-        if let Some(node) = c.node.as_ref() {
-            if let Some(node_obj) = map.get_mut("node").and_then(|n| n.as_object_mut()) {
-                node_obj.insert(
-                    "id".into(),
-                    json!(format!("file:{file_synth}:{}", node.node_id)),
-                );
-            }
-        }
-    }
-    v
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -395,18 +330,27 @@ async fn emit_file(
     let vars_root = full_cache::read_variables(cache, &meta.file_key)?;
     let comments = cache.read_comments(&meta.file_key)?.unwrap_or_default();
     let synth_state = SynthState::load(cache)?;
-    let recent_comments: Vec<Value> = comments
-        .iter()
-        .filter(|c| c.parent_id.is_none())
-        .take(FILE_RECENT_COMMENTS)
+    let heads_total = comments.iter().filter(|c| c.parent_id.is_none()).count();
+    let recent_comments: Vec<Value> = recent_thread_heads(&comments, FILE_RECENT_COMMENTS)
+        .into_iter()
         .map(|c| comment_value(synth, &synth_state, c))
         .collect();
-    let summary = build_file_summary(
+    let mut summary = build_file_summary(
         &file_root,
         vars_root.as_ref(),
         comments.len(),
         Some(Value::Array(recent_comments)),
     );
+    if heads_total > FILE_RECENT_COMMENTS {
+        if let Value::Object(map) = &mut summary {
+            map.insert(
+                "comments_hint".into(),
+                json!(format!(
+                    "showing the {FILE_RECENT_COMMENTS} newest of {heads_total} threads — run `figma-explorer comments file:{synth}` for all of them"
+                )),
+            );
+        }
+    }
     Ok(json!({
         "target": {
             "kind": "file",

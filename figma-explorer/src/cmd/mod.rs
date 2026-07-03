@@ -6,6 +6,7 @@ use crate::Globals;
 
 pub mod assets;
 pub mod cache;
+pub mod comments;
 pub mod context;
 pub mod find;
 pub mod library;
@@ -37,6 +38,10 @@ pub enum Command {
     /// Claude Code agents implementing designs in application code. Accepts
     /// node, comment, file, project, and root targets.
     NodeInfo(node_info::Args),
+    /// List comment threads in a file or under a node, or dump one thread
+    /// (`file:N:comm:M`). Reads the cached comments sidecar; `--refresh`
+    /// re-fetches one file's comments without a full `cache prefetch`.
+    Comments(comments::Args),
     /// Maintain the local file cache (prefetch / clear).
     Cache(cache::Args),
 }
@@ -52,6 +57,7 @@ impl Command {
             Self::Assets(a) => a.run(cfg, globals).await,
             Self::Context(a) => a.run(cfg, globals).await,
             Self::NodeInfo(a) => a.run(cfg, globals).await,
+            Self::Comments(a) => a.run(cfg, globals).await,
             Self::Cache(a) => a.run(cfg, globals).await,
         }
     }
