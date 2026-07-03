@@ -109,6 +109,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Piping any command into a reader that closes early (`figma-explorer ls … |
+  head`) no longer panics with `failed printing to stdout: Broken pipe (os
+  error 32)`. The Rust runtime ignores `SIGPIPE` at startup, which turned a
+  broken pipe into a `println!` panic (exit 101); both binaries now restore the
+  default disposition so the process ends quietly (exit 141) like a normal Unix
+  CLI. Matters most for agents, which pipe through `head`/`grep` constantly.
+- `--cache-only` is now enforced by the live-fetch commands (`tokens`,
+  `screenshot`, `assets`, `context`). Previously the flag was honored only
+  during id resolution, then the mandatory step-2 live fetch proceeded anyway —
+  so `--cache-only tokens …` silently hit the network. These commands cannot be
+  served offline (they need fills/strokes/type styles or the `/images` API), so
+  they now bail up front with a clear message, matching `comments --refresh`.
+- Root `ls` on a cache with no files (fresh, or just cleared) now prints a
+  `no cached files — run … cache prefetch …` nudge (and a `hint` key in
+  `--json`) instead of only the depth hint, which gave no clue the cache needed
+  populating.
 - Instance-descendant node ids (`I880:3606;2816:36646`) are now accepted
   everywhere an id is: qualified (`file:7:I880:3606;2816:36646`), bare (with
   `--in`), and in figma.com URLs (`node-id=I880-3606%3B2816-36646`).

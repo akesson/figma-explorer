@@ -425,6 +425,7 @@ dependencies = [
  "anyhow",
  "dotenvy",
  "figma-api",
+ "libc",
  "reqwest",
  "tempfile",
  "twox-hash",

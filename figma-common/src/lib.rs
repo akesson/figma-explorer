@@ -26,6 +26,22 @@ pub fn http_client() -> reqwest::Result<reqwest::Client> {
         .build()
 }
 
+/// Restore the default SIGPIPE disposition so that writing to a closed pipe
+/// (e.g. `figma-explorer ls … | head`) terminates the process quietly with the
+/// conventional 128+SIGPIPE exit code instead of panicking. The Rust runtime
+/// ignores SIGPIPE at startup, which turns a broken pipe into an `ErrorKind`
+/// that `println!` unwraps into `panicked … Broken pipe (os error 32)`. This is
+/// a no-op off Unix. Call once, first thing in `main`.
+pub fn reset_sigpipe() {
+    #[cfg(unix)]
+    // SAFETY: `signal` with `SIG_DFL` merely restores a process-global signal
+    // disposition to the OS default; it touches no memory we own and is sound
+    // to call before any threads or handlers are installed.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+}
+
 /// The hasher used for any fingerprint that is written to disk and compared
 /// across runs. `std::collections::hash_map::DefaultHasher` is explicitly not
 /// stable across Rust toolchain versions; xxHash64 is a fixed algorithm, so a

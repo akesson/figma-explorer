@@ -98,6 +98,13 @@ fn ignored_json(hidden: &BTreeSet<&'static str>) -> Value {
     json!({ "canvases": canvases })
 }
 
+/// Nudge shown by root `ls` when no files are cached yet (a fresh cache, or one
+/// whose files were swept by `cache clear`). Without it the listing is a bare
+/// header, giving no hint that the cache needs populating.
+fn empty_cache_hint() -> &'static str {
+    "no cached files — run `figma-explorer cache prefetch` to populate the cache, or pass a Figma URL to fetch one file"
+}
+
 /// Max characters of a comment's head message rendered in `ls` output.
 /// Long-form discussion gets truncated to keep rows scannable; the full
 /// thread is paste-ready behind the `file:N:comm:M` id for future tooling.
@@ -406,12 +413,22 @@ fn render_root(
     }
     groups.sort_by_key(|(s, _, _, _)| *s);
 
+    // A cache with no OK file metas (fresh, or just cleared) has nothing to
+    // list — the depth hint is pointless and a "run prefetch" nudge is what the
+    // user actually needs. Key on the meta count, not `groups`: project synths
+    // survive `cache clear` (so `groups` is non-empty post-clear), and a
+    // URL-fetched file carries no project_id (so it never joins a group) yet is
+    // a genuinely cached file the nudge must not deny.
+    let has_files = metas.iter().any(|m| m.status == EntryStatus::Ok);
+
     let mut hidden: BTreeSet<&'static str> = BTreeSet::new();
     let mut matches = 0usize;
 
     match format {
         Output::Yaml => {
-            if depth_hint {
+            if !has_files {
+                println!("# {}", empty_cache_hint());
+            } else if depth_hint {
                 println!(
                     "# depth {ROOT_DEFAULT_DEPTH} (projects + files) — use `ls file:N` / `ls proj:N` or --depth 2 to descend"
                 );
@@ -474,6 +491,9 @@ fn render_root(
             payload.insert("ignored".into(), ignored_json(&hidden));
             if let Some(pattern) = name_filter {
                 payload.insert("name_filter".into(), name_filter_json(pattern, matches));
+            }
+            if !has_files {
+                payload.insert("hint".into(), json!(empty_cache_hint()));
             }
             payload.insert("projects".into(), Value::Array(projects));
             print(&Value::Object(payload), format)
@@ -1486,6 +1506,45 @@ mod tests {
             }
         )
         .is_none());
+    }
+
+    #[test]
+    fn empty_cache_hint_points_at_prefetch() {
+        let hint = empty_cache_hint();
+        assert!(hint.contains("prefetch"), "{hint}");
+        assert!(hint.contains("Figma URL"), "{hint}");
+    }
+
+    /// The nudge trigger keys on OK file metas, not project groups: project
+    /// synths survive a `cache clear`, so a group-based check would wrongly
+    /// suppress the nudge afterward. A URL-fetched file (no project_id, so it
+    /// joins no group) still counts as cached and must NOT trigger the nudge.
+    #[tokio::test]
+    async fn empty_cache_trigger_keys_on_ok_meta_count() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = CacheDir::new(tmp.path());
+        cache.ensure().unwrap();
+        let doc = json!({ "id": "0:0", "name": "doc", "type": "DOCUMENT", "children": [] });
+        // A project-less (URL-fetched) file: project_id is empty, so it never
+        // joins a `groups` entry, but it is a real cached OK meta.
+        let file_ref = FileRef {
+            file_key: "orphan".into(),
+            name: "Orphan".into(),
+            last_modified: "2026-01-01".into(),
+            project_id: String::new(),
+            project_name: String::new(),
+        };
+        let payload = build_cached_file(&file_ref, &doc, 0);
+        cache.write_file("orphan", &payload).unwrap();
+        cache
+            .write_meta(&FileMeta::from_success(&file_ref, &payload, 0, 0))
+            .unwrap();
+
+        let metas = cache.list_metas().unwrap();
+        assert!(
+            metas.iter().any(|m| m.status == EntryStatus::Ok),
+            "an ungrouped URL-fetched file still counts as a cached file"
+        );
     }
 
     /// Build a minimal DOCUMENT CacheNode with the given canvas children.
