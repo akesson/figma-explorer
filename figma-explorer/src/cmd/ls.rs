@@ -939,6 +939,19 @@ mod tests {
     }
 
     #[test]
+    fn apply_scope_promotes_bare_instance_node_under_file_scope() {
+        let id: Id = "I880:3606;2816:36646".parse().unwrap();
+        let promoted = apply_scope(id, Some("file:7")).unwrap();
+        assert_eq!(
+            promoted,
+            Id::Node {
+                file: 7,
+                node: "I880:3606;2816:36646".into()
+            }
+        );
+    }
+
+    #[test]
     fn apply_scope_leaves_explicit_qualifier_alone() {
         let id: Id = "file:3:1094:66591".parse().unwrap();
         // --in file:7 should be ignored — explicit qualifier wins.

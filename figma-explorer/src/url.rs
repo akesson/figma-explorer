@@ -6,9 +6,11 @@
 //!   https://www.figma.com/proto/<fileKey>/<slug>?node-id=<a-b>
 //!   https://www.figma.com/board/<fileKey>/<slug>?node-id=<a-b>
 //!
-//! Node IDs in URLs use `-` between the two integer halves; the REST API
-//! expects `:`. We translate. Anything we don't recognize returns an error
-//! rather than guessing.
+//! Node IDs in URLs use `-` where the REST API expects `:` (e.g. `5-12` →
+//! `5:12`). Instance-descendant ids keep their leading `I` and separate
+//! segments with `;`, percent-encoded as `%3B` (e.g. `I880-3606%3B2816-36646`
+//! → `I880:3606;2816:36646`). We translate. Anything we don't recognize
+//! returns an error rather than guessing.
 
 use anyhow::{anyhow, Result};
 
@@ -54,9 +56,13 @@ pub fn parse(url: &str) -> Result<ParsedUrl> {
 
 fn decode_node_id(raw: &str) -> String {
     // The URL encodes the colon as `-` (e.g. 5-12 → 5:12). Some links also
-    // percent-encode the colon as %3A — handle both.
+    // percent-encode the colon as %3A — handle both. Instance ids separate
+    // segments with `;`, usually percent-encoded as %3B; decoded ids contain
+    // no dashes, so the `-`→`:` swap stays safe.
     raw.replace("%3A", ":")
         .replace("%3a", ":")
+        .replace("%3B", ";")
+        .replace("%3b", ";")
         .replace('-', ":")
 }
 
@@ -82,6 +88,18 @@ mod tests {
     fn parses_percent_encoded_colon() {
         let p = parse("https://www.figma.com/design/K/Foo?node-id=5%3A12").unwrap();
         assert_eq!(p.node_id.as_deref(), Some("5:12"));
+    }
+
+    #[test]
+    fn parses_instance_node_id() {
+        let p = parse("https://www.figma.com/design/K/Foo?node-id=I880-3606%3B2816-36646").unwrap();
+        assert_eq!(p.node_id.as_deref(), Some("I880:3606;2816:36646"));
+    }
+
+    #[test]
+    fn parses_instance_node_id_raw_semicolon() {
+        let p = parse("https://www.figma.com/design/K/Foo?node-id=I880-3606;2816-36646").unwrap();
+        assert_eq!(p.node_id.as_deref(), Some("I880:3606;2816:36646"));
     }
 
     #[test]

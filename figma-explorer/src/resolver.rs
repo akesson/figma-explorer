@@ -136,8 +136,9 @@ impl Resolver {
 
     /// Resolve an [`Id`] to a concrete target.
     ///
-    /// `cfg` is consulted only when the id is a `Url` *and* `cache_only` is
-    /// false — that's the one path that can trigger a live fetch.
+    /// `cfg` is consulted only when the target's file is missing from the
+    /// cache *and* `cache_only` is false — URL and tagged synth paths alike
+    /// cold-fetch through [`cache::load_file`] on a miss.
     pub async fn resolve(
         &self,
         cfg: &Configuration,
@@ -145,10 +146,10 @@ impl Resolver {
     ) -> Result<ResolvedTarget, ResolveError> {
         match id {
             Id::Project(n) => self.resolve_project(*n),
-            Id::File(n) => self.resolve_file(*n),
-            Id::Node { file, node } => self.resolve_node(*file, node),
+            Id::File(n) => self.resolve_file(cfg, *n).await,
+            Id::Node { file, node } => self.resolve_node(cfg, *file, node).await,
             Id::Comment { file, comm } => self.resolve_comment(*file, *comm),
-            Id::BareNode(node_id) => self.resolve_bare(node_id),
+            Id::BareNode(node_id) => self.resolve_bare(cfg, node_id).await,
             Id::Url(parsed) => self.resolve_url(cfg, parsed).await,
         }
     }
@@ -162,22 +163,34 @@ impl Resolver {
         Ok(ResolvedTarget::Project { synth, project_id })
     }
 
-    fn resolve_file(&self, synth: u32) -> Result<ResolvedTarget, ResolveError> {
+    async fn resolve_file(
+        &self,
+        cfg: &Configuration,
+        synth: u32,
+    ) -> Result<ResolvedTarget, ResolveError> {
         let file_key = self
             .synth
             .file_key(synth)
             .ok_or_else(|| ResolveError::NotCached(format!("file:{synth}")))?
             .to_owned();
-        self.load_file_target(synth, &file_key)
+        self.load_file_target(cfg, synth, &file_key, &format!("file:{synth}"))
+            .await
     }
 
-    fn resolve_node(&self, file_synth: u32, node_id: &str) -> Result<ResolvedTarget, ResolveError> {
+    async fn resolve_node(
+        &self,
+        cfg: &Configuration,
+        file_synth: u32,
+        node_id: &str,
+    ) -> Result<ResolvedTarget, ResolveError> {
         let file_key = self
             .synth
             .file_key(file_synth)
             .ok_or_else(|| ResolveError::NotCached(format!("file:{file_synth}")))?
             .to_owned();
-        let (meta, payload) = self.read_file(&file_key)?;
+        let (meta, payload) = self
+            .read_file_or_fetch(cfg, &format!("file:{file_synth}:{node_id}"), &file_key)
+            .await?;
         let node = find_node(&payload.document, node_id).ok_or_else(|| {
             ResolveError::NotCached(format!(
                 "file:{file_synth}:{node_id} (node id not found in file)"
@@ -252,14 +265,18 @@ impl Resolver {
         })
     }
 
-    fn resolve_bare(&self, node_id: &str) -> Result<ResolvedTarget, ResolveError> {
+    async fn resolve_bare(
+        &self,
+        cfg: &Configuration,
+        node_id: &str,
+    ) -> Result<ResolvedTarget, ResolveError> {
         let index = self.node_index()?;
         let candidates = index.lookup(node_id);
         match candidates.len() {
             0 => Err(ResolveError::NotCached(format!(
                 "{node_id} (no cached file contains this node id; paste a Figma URL if the file isn't cached)"
             ))),
-            1 => self.resolve_node(candidates[0], node_id),
+            1 => self.resolve_node(cfg, candidates[0], node_id).await,
             _ => {
                 let mut named: Vec<(u32, String)> = candidates
                     .iter()
@@ -284,9 +301,13 @@ impl Resolver {
         url: &ParsedUrl,
     ) -> Result<ResolvedTarget, ResolveError> {
         // Try the cache first — a URL whose file_key we've already cached
-        // becomes a no-op disk read.
+        // becomes a no-op disk read (with a cold-fetch fallback should the
+        // entry have been evicted since the synth was interned).
         if let Some(synth) = self.synth.file_synth(&url.file_key) {
-            let target = self.load_file_target(synth, &url.file_key)?;
+            let display = format!("url:{}", url.file_key);
+            let target = self
+                .load_file_target(cfg, synth, &url.file_key, &display)
+                .await?;
             return narrow_to_node_if_requested(target, url.node_id.as_deref());
         }
 
@@ -297,19 +318,28 @@ impl Resolver {
         // Cold path: live fetch. `cache::load_file` writes meta+payload,
         // interns the file synth, and hands it back so we don't have to
         // reload SynthState from disk to learn what it just assigned.
-        let (_payload, synth) = cache::load_file(cfg, &url.file_key)
+        let (_payload, synth) = cache::load_file(cfg, &self.cache, &url.file_key)
             .await
             .map_err(|e| ResolveError::Internal(format!("fetching {}: {e:#}", url.file_key)))?;
         // `self.synth` is intentionally not updated here. The current
         // invocation needs the synth for this one resolution, which we hold,
         // and resolve_url is always terminal in a command's flow — no later
         // step queries `self.synth` for `url.file_key`.
-        let target = self.load_file_target(synth, &url.file_key)?;
+        let display = format!("url:{}", url.file_key);
+        let target = self
+            .load_file_target(cfg, synth, &url.file_key, &display)
+            .await?;
         narrow_to_node_if_requested(target, url.node_id.as_deref())
     }
 
-    fn load_file_target(&self, synth: u32, file_key: &str) -> Result<ResolvedTarget, ResolveError> {
-        let (meta, payload) = self.read_file(file_key)?;
+    async fn load_file_target(
+        &self,
+        cfg: &Configuration,
+        synth: u32,
+        file_key: &str,
+        display_id: &str,
+    ) -> Result<ResolvedTarget, ResolveError> {
+        let (meta, payload) = self.read_file_or_fetch(cfg, display_id, file_key).await?;
         Ok(ResolvedTarget::File {
             synth,
             meta,
@@ -317,17 +347,48 @@ impl Resolver {
         })
     }
 
-    /// Disk-only read of meta + payload. No TTL refresh, no live fetch — that
-    /// path is handled by the URL resolver above. Use for the tagged-id paths
-    /// where we already know what we want and a missing cache entry is an
-    /// error (rather than a refresh trigger).
+    /// [`Self::read_file`] with a cold-fetch fallback. Tagged synth paths
+    /// behave like the URL lane: on a cache miss, refetch via
+    /// [`cache::load_file`] when allowed (its `decide_action` throttles
+    /// NotExportable markers by TTL, so a 403'd file is not re-hammered), or
+    /// fail with [`ResolveError::CacheOnlyMiss`] under `--cache-only`.
+    /// Deliberately does NOT pre-warm node-info's `.full.json.gz` sidecar —
+    /// that would tax every refresh to save one API call on a fully-cold
+    /// `node-info`; its own `load_full` self-heals on the next call.
+    async fn read_file_or_fetch(
+        &self,
+        cfg: &Configuration,
+        display_id: &str,
+        file_key: &str,
+    ) -> Result<(FileMeta, CachedFile), ResolveError> {
+        match self.read_file(file_key) {
+            Ok(pair) => Ok(pair),
+            Err(ResolveError::NotCached(_)) if self.cache_only => {
+                Err(ResolveError::CacheOnlyMiss(display_id.to_owned()))
+            }
+            Err(ResolveError::NotCached(_)) => {
+                cache::load_file(cfg, &self.cache, file_key)
+                    .await
+                    .map_err(|e| ResolveError::Internal(format!("fetching {file_key}: {e:#}")))?;
+                self.read_file(file_key)
+            }
+            Err(other) => Err(other),
+        }
+    }
+
+    /// Disk-only read of meta + payload. No TTL refresh, no live fetch — the
+    /// cold-fetch fallback lives in [`Self::read_file_or_fetch`], which every
+    /// file-loading lane routes through. Keep this as the sync primitive for
+    /// callers that must not touch the network.
     fn read_file(&self, file_key: &str) -> Result<(FileMeta, CachedFile), ResolveError> {
         let meta = self
             .cache
             .read_meta(file_key)
             .map_err(ResolveError::internal)?
             .ok_or_else(|| {
-                ResolveError::NotCached(format!("file_key {file_key} (no meta on disk)"))
+                ResolveError::NotCached(format!(
+                    "file_key {file_key} (no meta on disk); run `figma-explorer cache prefetch` or pass the file's Figma URL"
+                ))
             })?;
         if meta.status != EntryStatus::Ok {
             return Err(ResolveError::NotCached(format!(
@@ -634,6 +695,70 @@ mod tests {
             .unwrap();
         let err = r.resolve(&dummy_cfg(), &id).await.unwrap_err();
         assert!(matches!(err, ResolveError::CacheOnlyMiss(_)), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn evicted_synth_file_cache_only_yields_cache_only_miss() {
+        let (g, r) = fixture_with_two_files(); // fixture resolver is cache_only
+        CacheDir::new(g.path()).delete_entry("file-a").unwrap();
+
+        let id: Id = "file:1".parse().unwrap();
+        let err = r.resolve(&dummy_cfg(), &id).await.unwrap_err();
+        match &err {
+            ResolveError::CacheOnlyMiss(what) => assert_eq!(what, "file:1"),
+            other => panic!("expected CacheOnlyMiss, got {other:?}"),
+        }
+
+        let id: Id = "file:1:1:2".parse().unwrap();
+        let err = r.resolve(&dummy_cfg(), &id).await.unwrap_err();
+        match &err {
+            ResolveError::CacheOnlyMiss(what) => assert_eq!(what, "file:1:1:2"),
+            other => panic!("expected CacheOnlyMiss, got {other:?}"),
+        }
+    }
+
+    /// Without `--cache-only`, an evicted synth-file target must attempt a
+    /// live refetch *into the resolver's own cache dir* — the point of
+    /// injecting the CacheDir into `cache::load_file`. The unroutable
+    /// base_path makes the fetch fail fast; the failure marker meta landing
+    /// in the tempdir proves both that the fallback fired and where it wrote.
+    #[tokio::test]
+    async fn evicted_synth_file_attempts_refetch_into_injected_cache() {
+        let (g, _) = fixture_with_two_files();
+        let cache_dir = CacheDir::new(g.path());
+        cache_dir.delete_entry("file-a").unwrap();
+
+        let r = Resolver::from_cache(CacheDir::new(g.path()), false).unwrap();
+        let mut cfg = Configuration::new();
+        cfg.base_path = "http://127.0.0.1:9".into();
+
+        let id: Id = "file:1".parse().unwrap();
+        let err = r.resolve(&cfg, &id).await.unwrap_err();
+        match &err {
+            ResolveError::Internal(msg) => {
+                assert!(msg.contains("fetching"), "got: {msg}")
+            }
+            other => panic!("expected Internal, got {other:?}"),
+        }
+
+        let marker = cache_dir.read_meta("file-a").unwrap();
+        assert!(
+            matches!(&marker, Some(m) if m.status == EntryStatus::Failed),
+            "expected a Failed marker meta in the injected cache dir, got {marker:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn url_with_known_synth_but_evicted_entry_cache_only_miss() {
+        let (g, r) = fixture_with_two_files();
+        CacheDir::new(g.path()).delete_entry("file-a").unwrap();
+
+        let id: Id = "https://www.figma.com/design/file-a/Foo".parse().unwrap();
+        let err = r.resolve(&dummy_cfg(), &id).await.unwrap_err();
+        match &err {
+            ResolveError::CacheOnlyMiss(what) => assert_eq!(what, "url:file-a"),
+            other => panic!("expected CacheOnlyMiss, got {other:?}"),
+        }
     }
 
     /// `file:N:comm:M` resolves to `ResolvedTarget::Comment` when the sidecar
