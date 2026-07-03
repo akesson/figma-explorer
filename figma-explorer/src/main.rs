@@ -13,7 +13,9 @@ struct Cli {
     #[arg(long, global = true)]
     json: bool,
 
-    /// Personal access token. Falls back to the FIGMA_TOKEN environment variable.
+    /// Personal access token. Falls back to the FIGMA_TOKEN environment
+    /// variable, auto-loaded from the nearest `.env` (walking up from cwd)
+    /// or the global fallback `~/.config/figma-explorer/.env`.
     #[arg(long, env = "FIGMA_TOKEN", global = true, hide_env_values = true)]
     token: Option<String>,
 

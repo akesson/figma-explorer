@@ -22,6 +22,40 @@ use serde_json::{json, Map, Value};
 
 use crate::node::rgba_to_hex;
 
+/// One selectable output section for `node-info --only`. The section → code
+/// mapping (not 1:1 with the `add_*` helpers):
+///
+/// - `Geometry` → bounds, size, relative_transform, constraints, size_constraints
+/// - `Corner` → corner + clips_content
+/// - `Fills` / `Strokes` / `Effects` → the three paint branches (`Strokes`
+///   includes the companion `stroke` weight/align block)
+/// - `Layout` → layout, layout_child, layout_grids
+/// - `Text` / `Component` / `Prototype` / `Meta` → those blocks (`component`
+///   includes property_refs)
+/// - `Styles` → the per-node `styles` map AND the top-level `styles_index`
+/// - `Variables` → per-node `bound_variables`/`explicit_variable_modes` AND
+///   the top-level `variables` block (variables referenced by kept paint
+///   sections are still hoisted regardless — see `Collector`)
+/// - `Comments` → the anchored-comments block (`node-info`-level)
+///
+/// Identity (id/type/name + modifier flags) is always emitted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, clap::ValueEnum)]
+pub enum Section {
+    Fills,
+    Strokes,
+    Effects,
+    Geometry,
+    Corner,
+    Layout,
+    Text,
+    Component,
+    Prototype,
+    Meta,
+    Styles,
+    Variables,
+    Comments,
+}
+
 /// Output-shaping knobs for the curated node view.
 #[derive(Clone, Debug)]
 pub struct ViewOptions {
@@ -40,6 +74,17 @@ pub struct ViewOptions {
     /// `node-info` auto-enables this when overrides differ on non-`fills`
     /// fields; otherwise the user must opt in via `--rich-text`.
     pub rich_text: bool,
+    /// `--only` section selection. `None` = every section (default). The
+    /// filter applies per node at every depth; identity and the `children`
+    /// recursion are unaffected.
+    pub only: Option<BTreeSet<Section>>,
+}
+
+impl ViewOptions {
+    /// Is `s` selected? Everything is selected when no `--only` was given.
+    pub fn wants(&self, s: Section) -> bool {
+        self.only.as_ref().is_none_or(|set| set.contains(&s))
+    }
 }
 
 impl Default for ViewOptions {
@@ -50,6 +95,7 @@ impl Default for ViewOptions {
             prototype: false,
             meta: false,
             rich_text: false,
+            only: None,
         }
     }
 }
@@ -209,18 +255,34 @@ fn build_view_recursive(
 
     // Each `add_*` helper appends its section to `out` in source order; the
     // order of these calls IS the output key order (serde_json Map is
-    // insertion-ordered). `depth` is threaded where the `depth == 0` gates
-    // live (effects, layout grids).
+    // insertion-ordered) — stable regardless of the `--only` selection.
+    // `depth` is threaded where the `depth == 0` gates live (effects, layout
+    // grids). Identity stays unconditional: a fill is useless without
+    // knowing which node it belongs to.
     add_identity_and_modifiers(&mut out, node);
-    add_geometry(&mut out, node);
-    add_corner(&mut out, node);
-    add_paint_layers(&mut out, node, collector, node_id, depth);
-    add_layout(&mut out, node, collector, node_id, depth);
-    add_text(&mut out, node, opts, collector);
-    add_component(&mut out, node);
-    add_prototype(&mut out, node, opts);
-    add_meta(&mut out, node, opts);
-    add_styles_and_variables(&mut out, node, collector, node_id);
+    if opts.wants(Section::Geometry) {
+        add_geometry(&mut out, node);
+    }
+    if opts.wants(Section::Corner) {
+        add_corner(&mut out, node);
+    }
+    add_paint_layers(&mut out, node, opts, collector, node_id, depth);
+    if opts.wants(Section::Layout) {
+        add_layout(&mut out, node, collector, node_id, depth);
+    }
+    if opts.wants(Section::Text) {
+        add_text(&mut out, node, opts, collector);
+    }
+    if opts.wants(Section::Component) {
+        add_component(&mut out, node);
+    }
+    if opts.wants(Section::Prototype) {
+        add_prototype(&mut out, node, opts);
+    }
+    if opts.wants(Section::Meta) {
+        add_meta(&mut out, node, opts);
+    }
+    add_styles_and_variables(&mut out, node, opts, collector, node_id);
 
     // ── Children ───────────────────────────────────────────────────────────
     // Stays inline: it recurses into build_view_recursive and its collector
@@ -349,28 +411,36 @@ fn add_corner(out: &mut Map<String, Value>, node: &Value) {
 fn add_paint_layers(
     out: &mut Map<String, Value>,
     node: &Value,
+    opts: &ViewOptions,
     collector: &mut Collector,
     node_id: &str,
     depth: usize,
 ) {
-    if let Some(arr) = node.get("fills").and_then(Value::as_array) {
-        let paints = build_paints(arr, collector, node_id);
-        if !paints.is_empty() {
-            out.insert("fills".into(), Value::Array(paints));
-        }
-    }
-    if let Some(arr) = node.get("strokes").and_then(Value::as_array) {
-        let paints = build_paints(arr, collector, node_id);
-        if !paints.is_empty() {
-            out.insert("strokes".into(), Value::Array(paints));
-            // Companion `stroke` block (weight/align/join/cap/dashes).
-            let stroke = build_stroke(node);
-            if !stroke.is_empty() {
-                out.insert("stroke".into(), Value::Object(stroke));
+    // Fills / strokes / effects gate individually — `--only strokes` must
+    // not walk fills (the Collector would otherwise hoist fill variables the
+    // narrowed output never shows).
+    if opts.wants(Section::Fills) {
+        if let Some(arr) = node.get("fills").and_then(Value::as_array) {
+            let paints = build_paints(arr, collector, node_id);
+            if !paints.is_empty() {
+                out.insert("fills".into(), Value::Array(paints));
             }
         }
     }
-    if depth == 0 {
+    if opts.wants(Section::Strokes) {
+        if let Some(arr) = node.get("strokes").and_then(Value::as_array) {
+            let paints = build_paints(arr, collector, node_id);
+            if !paints.is_empty() {
+                out.insert("strokes".into(), Value::Array(paints));
+                // Companion `stroke` block (weight/align/join/cap/dashes).
+                let stroke = build_stroke(node);
+                if !stroke.is_empty() {
+                    out.insert("stroke".into(), Value::Object(stroke));
+                }
+            }
+        }
+    }
+    if depth == 0 && opts.wants(Section::Effects) {
         if let Some(arr) = node.get("effects").and_then(Value::as_array) {
             let effects = build_effects(arr, collector, node_id);
             if !effects.is_empty() {
@@ -471,39 +541,47 @@ fn add_meta(out: &mut Map<String, Value>, node: &Value, opts: &ViewOptions) {
 fn add_styles_and_variables(
     out: &mut Map<String, Value>,
     node: &Value,
+    opts: &ViewOptions,
     collector: &mut Collector,
     node_id: &str,
 ) {
-    if let Some(styles_map) = node.get("styles").and_then(Value::as_object) {
-        // Pass the styles map through as-is (small) and collect ids so the
-        // top-level `styles_index` block resolves them.
-        let mut out_styles = Map::with_capacity(styles_map.len());
-        for (k, v) in styles_map {
-            if let Some(s) = v.as_str() {
-                collector.styles.insert(s.to_owned());
+    // The two halves gate independently: `Styles` feeds the top-level
+    // `styles_index` via the collector, `Variables` the `bound_variables`
+    // block (and thereby the hoisted `variables` block).
+    if opts.wants(Section::Styles) {
+        if let Some(styles_map) = node.get("styles").and_then(Value::as_object) {
+            // Pass the styles map through as-is (small) and collect ids so
+            // the top-level `styles_index` block resolves them.
+            let mut out_styles = Map::with_capacity(styles_map.len());
+            for (k, v) in styles_map {
+                if let Some(s) = v.as_str() {
+                    collector.styles.insert(s.to_owned());
+                }
+                out_styles.insert(k.clone(), v.clone());
             }
-            out_styles.insert(k.clone(), v.clone());
-        }
-        if !out_styles.is_empty() {
-            out.insert("styles".into(), Value::Object(out_styles));
+            if !out_styles.is_empty() {
+                out.insert("styles".into(), Value::Object(out_styles));
+            }
         }
     }
-    if let Some(bv) = node.get("boundVariables") {
-        let flat = flatten_bound_variables(bv, collector, node_id);
-        if let Some(map) = flat.as_object() {
-            for v in map.values() {
-                if let Some(s) = v.as_str() {
-                    collector.variables.insert(s.to_owned());
+    if opts.wants(Section::Variables) {
+        if let Some(bv) = node.get("boundVariables") {
+            let flat = flatten_bound_variables(bv, collector, node_id);
+            if let Some(map) = flat.as_object() {
+                for v in map.values() {
+                    if let Some(s) = v.as_str() {
+                        collector.variables.insert(s.to_owned());
+                    }
+                }
+                if !map.is_empty() {
+                    out.insert("bound_variables".into(), flat);
                 }
             }
-            if !map.is_empty() {
-                out.insert("bound_variables".into(), flat);
-            }
         }
-    }
-    if let Some(emodes) = node.get("explicitVariableModes") {
-        if !emodes.is_null() && emodes.as_object().is_some_and(|m| !m.is_empty()) {
-            out.insert("explicit_variable_modes".into(), emodes.clone());
+        if let Some(emodes) = node.get("explicitVariableModes") {
+            if !emodes.is_null() && emodes.as_object().is_some_and(|m| !m.is_empty()) {
+                out.insert("explicit_variable_modes".into(), emodes.clone());
+            }
         }
     }
 }
@@ -1400,6 +1478,97 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// A node carrying every major section, with a child that also has fills
+    /// and layout — exercises `--only` at both depths.
+    fn full_section_node() -> Value {
+        json!({
+            "id": "1:1", "type": "FRAME", "name": "Card",
+            "absoluteBoundingBox": {"x": 0.0, "y": 0.0, "width": 100.0, "height": 50.0},
+            "fills": [{"type": "SOLID", "color": {"r": 1.0, "g": 0.0, "b": 0.0, "a": 1.0},
+                       "boundVariables": {"color": {"type": "VARIABLE_ALIAS", "id": "VariableID:42:1"}}}],
+            "strokes": [{"type": "SOLID", "color": {"r": 0.0, "g": 0.0, "b": 0.0, "a": 1.0}}],
+            "strokeWeight": 2.0,
+            "layoutMode": "VERTICAL",
+            "itemSpacing": 8.0,
+            "children": [
+                {"id": "1:2", "type": "TEXT", "name": "Title", "characters": "Hello",
+                 "layoutAlign": "STRETCH",
+                 "fills": [{"type": "SOLID", "color": {"r": 0.0, "g": 1.0, "b": 0.0, "a": 1.0}}]}
+            ]
+        })
+    }
+
+    fn only(sections: &[Section]) -> ViewOptions {
+        ViewOptions {
+            only: Some(sections.iter().copied().collect()),
+            ..ViewOptions::default()
+        }
+    }
+
+    #[test]
+    fn only_fills_restricts_sections() {
+        let node = full_section_node();
+        let mut c = Collector::default();
+        let view = build_node_view(&node, &only(&[Section::Fills]), &mut c);
+        let obj = view.as_object().unwrap();
+        // Identity always present.
+        assert_eq!(obj["id"], "1:1");
+        assert_eq!(obj["name"], "Card");
+        assert!(obj.contains_key("fills"));
+        // Everything else pruned; children recursion unaffected.
+        for gone in ["strokes", "stroke", "layout", "bounds", "size"] {
+            assert!(!obj.contains_key(gone), "unexpected `{gone}` in {obj:?}");
+        }
+        assert!(obj.contains_key("children"));
+    }
+
+    #[test]
+    fn only_filter_recurses_into_children() {
+        let node = full_section_node();
+        let mut c = Collector::default();
+        let view = build_node_view(&node, &only(&[Section::Fills]), &mut c);
+        let child = &view["children"][0];
+        assert!(child.get("fills").is_some());
+        assert!(child.get("layout_child").is_none());
+        assert!(child.get("text").is_none());
+    }
+
+    #[test]
+    fn only_fills_still_collects_bound_variables() {
+        let node = full_section_node();
+        let mut c = Collector::default();
+        build_node_view(&node, &only(&[Section::Fills]), &mut c);
+        assert!(
+            c.variables.contains("VariableID:42:1"),
+            "kept sections must keep feeding the hoisted variables block"
+        );
+    }
+
+    #[test]
+    fn only_geometry_does_not_collect_paint_variables() {
+        let node = full_section_node();
+        let mut c = Collector::default();
+        let view = build_node_view(&node, &only(&[Section::Geometry]), &mut c);
+        assert!(
+            c.variables.is_empty(),
+            "excluded sections must not pollute the collector"
+        );
+        assert!(view.get("bounds").is_some());
+        assert!(view.get("fills").is_none());
+    }
+
+    #[test]
+    fn wants_none_includes_everything() {
+        let node = full_section_node();
+        let mut c_all = Collector::default();
+        let all = build_node_view(&node, &ViewOptions::default(), &mut c_all);
+        let obj = all.as_object().unwrap();
+        for key in ["fills", "strokes", "layout", "bounds", "children"] {
+            assert!(obj.contains_key(key), "missing `{key}` in unfiltered view");
+        }
+        assert!(c_all.variables.contains("VariableID:42:1"));
+    }
+
     #[test]
     fn build_paint_solid_includes_hex_and_collects_bound_variable() {
         let mut c = Collector::default();
@@ -1716,6 +1885,7 @@ mod tests {
             prototype: false,
             meta: true,
             rich_text: false,
+            only: None,
         };
         let mut c = Collector::default();
         let view = build_node_view(&node, &opts, &mut c);

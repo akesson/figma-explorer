@@ -19,6 +19,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `node-info` file targets now sort `recent_comments` newest-first (was:
   API order) and add a `comments_hint` pointing at `comments file:N` when
   more threads exist than the summary shows.
+- `node-info --only <sections>` — restrict output to named sections
+  (`fills,strokes,effects,geometry,corner,layout,text,component,prototype,meta,styles,variables,comments`)
+  instead of piping the full dump through grep. Identity (id/type/name) is
+  always emitted; the hoisted top-level `variables`/`styles_index` blocks
+  keep exactly the entries referenced by kept sections. `--only prototype`
+  and `--only meta` imply those opt-in sections.
+- `ls --name <PATTERN>` — case-insensitive substring filter over node names.
+  Matches keep their ancestor rail for tree context; other branches are
+  pruned; root/project listings drop files/projects with no matches inside
+  (unless their own name matches). A `# name filter "…": N matches` line
+  (JSON: `name_filter` object) makes the filtering visible.
+- `find` now prints `# searched N cached files` on unscoped runs (JSON:
+  `searched_files`) — cross-file search has always been the no-`--in`
+  default, but nothing said so; help text and docs now do, and zero-match
+  runs are no longer silent.
+- `FIGMA_TOKEN` (and any other env) now falls back to a global
+  `$XDG_CONFIG_HOME`-or-`~/.config/figma-explorer/.env`, loaded after the
+  cwd-upward `.env` walk (lowest priority). Covers git worktrees that don't
+  see the canonical checkout's `.env`.
 
 - `library search <query>` — fuzzy text search across a team's published
   design-system catalog (components, component sets, and styles). Each hit

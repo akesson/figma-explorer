@@ -23,7 +23,9 @@ use crate::{print, Globals, Output};
 
 /// Locate nodes by a multi-token ancestor-chain query. Each whitespace
 /// token must fuzzy-match some ancestor name on the root→node path; leaf
-/// hits rank highest. Top `--limit` hits returned.
+/// hits rank highest. Top `--limit` hits returned. Searches EVERY cached
+/// file by default; pass the global `--in file:N` (or `file:N:x:y`) to
+/// scope to one file or subtree.
 #[derive(ClapArgs, Debug)]
 pub struct Args {
     /// Query phrase (one or more words). Each whitespace-separated token must
@@ -70,6 +72,10 @@ impl Args {
         // `total_matches` then reports the retained-anchor count, with each
         // anchor carrying the count of descendants rolled up onto it.
         let mut all_hits: Vec<ScopedHit> = Vec::new();
+        // How many cached files the unscoped walk actually searched — None
+        // when `--in` scoped the search. Surfaced in the output so users see
+        // that no-`--in` means cross-file, not "current file".
+        let mut searched_files: Option<usize> = None;
 
         match in_ {
             Some(scope_str) => {
@@ -118,6 +124,7 @@ impl Args {
                 // top-N via score ties.
                 let synth = resolver.synth();
                 let metas = resolver.cache().list_metas()?;
+                let mut searched = 0usize;
                 for m in metas.iter().filter(|m| m.status == EntryStatus::Ok) {
                     let Some(file_synth) = synth.file_synth(&m.file_key) else {
                         continue;
@@ -126,12 +133,14 @@ impl Args {
                         Ok(Some(p)) => p,
                         _ => continue,
                     };
+                    searched += 1;
                     let hits =
                         multi_token_search(&payload.document, &tokens, type_filter, usize::MAX);
                     for h in hits {
                         all_hits.push(scoped_from_hit(file_synth, &h));
                     }
                 }
+                searched_files = Some(searched);
             }
         }
 
@@ -155,6 +164,9 @@ impl Args {
         let truncated = total_matches > all_hits.len();
         match format {
             Output::Yaml => {
+                if let Some(header) = cross_file_header(searched_files, total_matches) {
+                    println!("{header}");
+                }
                 if truncated {
                     println!(
                         "# showing {} of {} anchors — use --limit N to see more",
@@ -163,6 +175,12 @@ impl Args {
                     );
                 }
                 if all_hits.is_empty() {
+                    // Scoped zero-match runs were previously fully silent —
+                    // say so explicitly (the cross-file header above already
+                    // covers the unscoped case).
+                    if searched_files.is_none() && total_matches == 0 {
+                        println!("# 0 matches in {}", in_.unwrap_or_default());
+                    }
                     return Ok(());
                 }
                 let max_id = all_hits.iter().map(|h| h.id.len()).max().unwrap_or(0);
@@ -219,6 +237,7 @@ impl Args {
                         "query": joined,
                         "tokens": tokens,
                         "scope": in_,
+                        "searched_files": searched_files,
                         "total_matches": total_matches,
                         "shown": all_hits.len(),
                         "truncated": truncated,
@@ -229,6 +248,19 @@ impl Args {
             }
         }
     }
+}
+
+/// The `# searched N cached files` YAML header for unscoped (cross-file)
+/// runs — `None` when `--in` scoped the search. Carries the zero-match note
+/// so an empty cross-file result is never silent.
+fn cross_file_header(searched_files: Option<usize>, total_matches: usize) -> Option<String> {
+    let n = searched_files?;
+    let files = if n == 1 { "file" } else { "files" };
+    Some(if total_matches == 0 {
+        format!("# searched {n} cached {files} — 0 matches")
+    } else {
+        format!("# searched {n} cached {files}")
+    })
 }
 
 /// Flattened, render-ready hit. We materialize names/bounds/path strings
@@ -351,6 +383,19 @@ fn dedupe_descendants(hits: Vec<ScopedHit>) -> Vec<ScopedHit> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cross_file_header_reports_files_and_zero_matches() {
+        assert_eq!(cross_file_header(None, 5), None, "scoped run: no header");
+        assert_eq!(
+            cross_file_header(Some(24), 5).unwrap(),
+            "# searched 24 cached files"
+        );
+        assert_eq!(
+            cross_file_header(Some(1), 0).unwrap(),
+            "# searched 1 cached file — 0 matches"
+        );
+    }
 
     /// Build a `ScopedHit` with just the fields `dedupe_descendants` looks at —
     /// score, file, node id, and ancestor chain. The display fields stay empty
