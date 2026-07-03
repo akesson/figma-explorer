@@ -16,6 +16,7 @@ use figma_api::apis::configuration::Configuration;
 use serde_json::{json, Value};
 
 use crate::cache::EntryStatus;
+use crate::marks::{self, MarkStore};
 use crate::node_search::{multi_token_search, SearchHit};
 use crate::resolver::{parse_id, render_resolve_error, ResolvedTarget, Resolver};
 use crate::tree::{truncate_display, NAME_DISPLAY_MAX};
@@ -76,6 +77,9 @@ impl Args {
         // when `--in` scoped the search. Surfaced in the output so users see
         // that no-`--in` means cross-file, not "current file".
         let mut searched_files: Option<usize> = None;
+        // When `--in` scopes to one file, remember its key so mark injection
+        // below can be limited to marks that reference the same file.
+        let mut scope_file_key: Option<String> = None;
 
         match in_ {
             Some(scope_str) => {
@@ -88,6 +92,7 @@ impl Args {
                     ResolvedTarget::File {
                         synth, document, ..
                     } => {
+                        scope_file_key = resolver.synth().file_key(synth).map(|s| s.to_owned());
                         let hits = multi_token_search(
                             &document.document,
                             &tokens,
@@ -101,6 +106,8 @@ impl Args {
                     ResolvedTarget::Node {
                         file_synth, node, ..
                     } => {
+                        scope_file_key =
+                            resolver.synth().file_key(file_synth).map(|s| s.to_owned());
                         let hits = multi_token_search(&node, &tokens, type_filter, usize::MAX);
                         for h in hits {
                             all_hits.push(scoped_from_hit(file_synth, &h));
@@ -158,6 +165,17 @@ impl Args {
         let total_matches = all_hits.len();
         all_hits.truncate(self.limit);
 
+        // Fold in matching marks — a marked entity should always lead, even
+        // when the ordinary search finds nothing (that's the payoff case).
+        // Read-only and non-fatal: a corrupt store degrades to no marks.
+        let mark_store = MarkStore::load_lenient(resolver.cache());
+        let mut mark_views =
+            marks::search_marks(&mark_store, &joined, resolver.cache(), resolver.synth());
+        if let Some(fk) = &scope_file_key {
+            mark_views.retain(|v| v.nodes.iter().any(|n| &n.file_key == fk));
+        }
+        let mark_block = marks::render_mark_rows(&mark_views);
+
         // Render. Output format mirrors `ls` (id-first, qualified) so a
         // user can grab any line's first column and paste it into another
         // command. Score and path are tail columns.
@@ -174,6 +192,8 @@ impl Args {
                         total_matches
                     );
                 }
+                // Marks lead, ahead of the ordinary hits.
+                print!("{mark_block}");
                 if all_hits.is_empty() {
                     // Scoped zero-match runs were previously fully silent —
                     // say so explicitly (the cross-file header above already
@@ -241,6 +261,7 @@ impl Args {
                         "total_matches": total_matches,
                         "shown": all_hits.len(),
                         "truncated": truncated,
+                        "marks": marks::marks_json(&mark_views),
                         "hits": hits,
                     }),
                     format,

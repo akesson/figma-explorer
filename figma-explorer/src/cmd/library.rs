@@ -19,6 +19,7 @@ use nucleo_matcher::{
 use serde_json::{json, Value};
 
 use crate::cache::{self, CacheDir};
+use crate::marks::{self, MarkStore, ScoredMarkView};
 use crate::synth::SynthState;
 use crate::team_catalog::{self, CatalogEntry, EntryKind, TeamCatalog};
 use crate::tree::{truncate_display, NAME_DISPLAY_MAX};
@@ -104,7 +105,20 @@ impl SearchArgs {
         let total_matches = hits.len();
         hits.truncate(self.limit);
 
-        render(&catalog, &hits, total_matches, needle, &synth, format)
+        // Fold in matching marks ahead of catalog hits — same payoff as `find`,
+        // but spanning the whole mark table (library search has no scope).
+        let mark_store = MarkStore::load_lenient(&cache_dir);
+        let mark_views = marks::search_marks(&mark_store, needle, &cache_dir, &synth);
+
+        render(
+            &catalog,
+            &hits,
+            total_matches,
+            needle,
+            &synth,
+            &mark_views,
+            format,
+        )
     }
 }
 
@@ -258,12 +272,14 @@ fn human_age(secs: u64) -> String {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render(
     catalog: &TeamCatalog,
     hits: &[ScoredEntry<'_>],
     total_matches: usize,
     needle: &str,
     synth: &SynthState,
+    mark_views: &[ScoredMarkView],
     format: Output,
 ) -> Result<()> {
     let age = cache::now_epoch().saturating_sub(catalog.fetched_at_epoch);
@@ -278,6 +294,8 @@ fn render(
                 catalog.styles.len(),
                 human_age(age),
             );
+            // Marks lead, ahead of catalog hits.
+            print!("{}", marks::render_mark_rows(mark_views));
             if truncated {
                 println!(
                     "# showing {} of {} matches — use --limit N to see more",
@@ -367,6 +385,7 @@ fn render(
                     "total_matches": total_matches,
                     "shown": hits.len(),
                     "truncated": truncated,
+                    "marks": marks::marks_json(mark_views),
                     "hits": hit_values,
                 }),
                 format,

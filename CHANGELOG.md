@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Marks** — a curated keyword→node database (`mark add`/`rm`/`list`, and a new
+  `mark:<key>` id). Once you've positively identified a node, `mark add <key>
+  <ID> [--alias …] [--note …]` writes the mapping down so the expensive
+  discovery never repeats. `find` and `library search` now fold matching marks
+  in **ahead of** their own hits, so a query in *your* vocabulary ("leave
+  tooltip") surfaces the node even when no layer name matches. `mark:<key>`
+  resolves like the underlying node, so `node-info mark:k`, `screenshot mark:k`,
+  and `--in mark:k` work transparently; a multi-node mark lists its paste-ready
+  ids so you can pick one. Marks live in `<cache-root>/marks.json` (beside
+  `synth.json`) and **survive `cache clear`**. Each mark node carries a stamp of
+  the node's name + ancestor path when added, so `mark list` flags drift as
+  `[renamed]` / `[moved]` / `[gone]` / `[uncached]` rather than silently
+  pointing at a node the design moved out from under.
 - `comments <ID>` — list every comment thread in a file (replies inline,
   sorted newest-activity-first, full message text), threads anchored under a
   node subtree, or one thread by `file:N:comm:M`. Filters: `--unresolved`,

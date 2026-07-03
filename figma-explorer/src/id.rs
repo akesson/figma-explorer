@@ -47,6 +47,11 @@ pub enum Id {
     /// (Resolver) must look it up against the cache's node index. Multiple
     /// matches → error.
     BareNode(String),
+    /// `mark:<key>` — a curated keyword mark (see [`crate::marks`]). Resolves
+    /// through `marks.json` to the node(s) it points at; a single-node mark
+    /// resolves like the underlying node, so `node-info`/`screenshot`/`--in`
+    /// accept it transparently.
+    Mark(String),
     /// Full Figma URL (file_key + optional node-id parsed out).
     Url(ParsedUrl),
 }
@@ -126,6 +131,7 @@ impl FromStr for Id {
         match head {
             "proj" => parse_num(rest, s).map(Id::Project),
             "file" => parse_file_rest(rest, s),
+            "mark" => parse_mark_key(rest, s),
             other => Err(IdParseError::UnknownTag {
                 tag: other.to_owned(),
             }),
@@ -151,6 +157,23 @@ fn is_native_node_id(s: &str) -> bool {
                     && b.chars().all(|c| c.is_ascii_digit())
             })
         })
+}
+
+/// Parse the `<key>` after `mark:`. The key grammar (`[A-Za-z0-9._-]+`, no
+/// colon, no whitespace) is shared with [`crate::marks::is_valid_key`] so what
+/// parses here is exactly what `mark add` will accept — no drift between the
+/// two, and `mark:<key>` always round-trips through [`Id::Display`].
+fn parse_mark_key(rest: &str, full: &str) -> Result<Id, IdParseError> {
+    if crate::marks::is_valid_key(rest) {
+        Ok(Id::Mark(rest.to_owned()))
+    } else {
+        Err(IdParseError::Malformed {
+            input: full.to_owned(),
+            reason: "mark key must be non-empty and contain only [A-Za-z0-9._-] \
+                     (no ':' or whitespace)"
+                .into(),
+        })
+    }
 }
 
 fn parse_num(s: &str, full: &str) -> Result<u32, IdParseError> {
@@ -218,6 +241,7 @@ impl fmt::Display for Id {
             Id::Node { file, node } => write!(f, "file:{file}:{node}"),
             Id::Comment { file, comm } => write!(f, "file:{file}:comm:{comm}"),
             Id::BareNode(s) => write!(f, "{s}"),
+            Id::Mark(k) => write!(f, "mark:{k}"),
             Id::Url(p) => {
                 // Display URLs as their canonical tagged form when we can —
                 // a Url is just an alias for a file or node we haven't synthed
@@ -410,6 +434,38 @@ mod tests {
             Err(IdParseError::UnknownTag { tag }) => assert_eq!(tag, "xyz"),
             other => panic!("expected UnknownTag, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_mark_key() {
+        assert_eq!(
+            parse("mark:wallchart-cell").unwrap(),
+            Id::Mark("wallchart-cell".into())
+        );
+        assert_eq!(
+            parse("mark:tab.item_2").unwrap(),
+            Id::Mark("tab.item_2".into())
+        );
+    }
+
+    #[test]
+    fn malformed_mark_keys_error() {
+        // Empty key.
+        assert!(matches!(
+            parse("mark:"),
+            Err(IdParseError::Malformed { .. })
+        ));
+        // Colon in key would break round-tripping mark:<key>.
+        assert!(matches!(
+            parse("mark:a:b"),
+            Err(IdParseError::Malformed { .. })
+        ));
+    }
+
+    #[test]
+    fn mark_display_roundtrips() {
+        let id: Id = "mark:leave-tooltip".parse().unwrap();
+        assert_eq!(id.to_string(), "mark:leave-tooltip");
     }
 
     #[test]
