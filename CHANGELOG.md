@@ -24,6 +24,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Instance-descendant node ids (`I880:3606;2816:36646`) are now accepted
+  everywhere an id is: qualified (`file:7:I880:3606;2816:36646`), bare (with
+  `--in`), and in figma.com URLs (`node-id=I880-3606%3B2816-36646`).
+  Previously `ls`/`node-info` printed these ids but the parser rejected them
+  ("node part is not NUM:NUM"), so the CLI's own output couldn't be pasted
+  back into `node-info`/`screenshot`.
+- Tagged file/node targets (`file:N`, `file:N:x:y`) now cold-fetch a missing
+  or evicted cache entry instead of dead-ending with "nothing cached … (no
+  meta on disk)", matching the URL lane's behavior. Under `--cache-only` the
+  miss reports the standard remedy hint instead. The residual disk-only error
+  message now also names `cache prefetch` and the URL alternative.
 - `cache clear` (without `--file-key`) swept only the `files/` directory,
   silently leaving other cache state on disk; it now also clears the
   team-catalog sidecars under `teams/`. The command's help text overstated its

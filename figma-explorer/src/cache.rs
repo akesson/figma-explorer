@@ -1255,6 +1255,9 @@ fn intern_comment_synths(cache: &CacheDir, file_synth: u32, comments: &[Associat
 
 /// Cache-first loader for the structural commands.
 ///
+/// The caller supplies the cache dir (the resolver injects its own, so tests
+/// stay hermetic in tempdirs).
+///
 /// Flow (see plan):
 /// 1. Read meta. If fresh + Ok + payload present → return.
 /// 2. If meta says NotExportable and is fresh → return the cached error.
@@ -1264,8 +1267,11 @@ fn intern_comment_synths(cache: &CacheDir, file_synth: u32, comments: &[Associat
 ///    failure marker meta on error).
 /// 5. Rkyv corruption / version mismatch is treated as a cache miss: the
 ///    entry is deleted and we fall through to refetch.
-pub async fn load_file(cfg: &Configuration, file_key: &str) -> Result<(CachedFile, u32)> {
-    let cache = CacheDir::new(default_dir());
+pub async fn load_file(
+    cfg: &Configuration,
+    cache: &CacheDir,
+    file_key: &str,
+) -> Result<(CachedFile, u32)> {
     cache.ensure()?;
     let now = now_epoch();
     let mut meta = cache.read_meta(file_key).ok().flatten();
@@ -1312,7 +1318,7 @@ pub async fn load_file(cfg: &Configuration, file_key: &str) -> Result<(CachedFil
             let project_hint = meta.as_ref().map(|m| m.project_id.as_str()).unwrap_or("");
             let mut refreshed: Option<CachedFile> = None;
             if !project_hint.is_empty() && env_projects.iter().any(|p| p == project_hint) {
-                match try_refresh_single(cfg, &cache, file_key, project_hint, meta.as_ref(), now)
+                match try_refresh_single(cfg, cache, file_key, project_hint, meta.as_ref(), now)
                     .await
                 {
                     Ok(Some(p)) => refreshed = Some(p),
@@ -1332,7 +1338,7 @@ pub async fn load_file(cfg: &Configuration, file_key: &str) -> Result<(CachedFil
             match refreshed {
                 Some(p) => p,
                 // Final fallback: blind live fetch (cold load, or refresh fell through).
-                None => fetch_and_cache(cfg, &cache, file_key, None, now).await?,
+                None => fetch_and_cache(cfg, cache, file_key, None, now).await?,
             }
         }
     };
@@ -1343,7 +1349,7 @@ pub async fn load_file(cfg: &Configuration, file_key: &str) -> Result<(CachedFil
     // to a no-op. Loading a file without a usable synth would force the only
     // production caller (`resolver::resolve_url`) to reload synth.json from
     // disk just to learn the value we already had in our `with_lock` window.
-    let file_synth = crate::synth::with_lock(&cache, |s| s.intern_file(file_key))
+    let file_synth = crate::synth::with_lock(cache, |s| s.intern_file(file_key))
         .with_context(|| format!("interning file synth for {file_key}"))?;
     Ok((payload, file_synth))
 }
