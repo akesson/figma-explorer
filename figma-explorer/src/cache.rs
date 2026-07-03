@@ -366,7 +366,8 @@ pub struct FileMeta {
     pub bytes: Option<u64>,
     /// Epoch seconds of the last successful comments fetch for this file. None
     /// when comments have never been fetched (predates the feature, or never
-    /// polled). Drives the `comments --max-age-secs` decision.
+    /// polled). Surfaced as the freshness header of `comments` output;
+    /// `comments --refresh` re-fetches on demand.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comments_fetched_at_epoch: Option<u64>,
     /// Stable fingerprint of the comments sidecar (sorted ids + per-comment
@@ -1235,6 +1236,38 @@ fn parse_comments_lenient(raw: &Value) -> Result<Vec<Comment>> {
         }
     }
     Ok(out)
+}
+
+/// Single-file comment refresh: fetch + associate + write sidecar + stamp
+/// meta + intern comm synths — the one public entry point bundling what the
+/// prefetch/cold-load call sites of [`fetch_comments_into_meta`] do by hand.
+/// Used by `comments --refresh` (and its missing-sidecar cold path) so a
+/// single file's comments can be refreshed without a full `cache prefetch`.
+///
+/// Requires the file to already be cached (meta + tree on disk — anchoring
+/// reads the tree); errors otherwise with the standard remedy hint. Unlike
+/// `fetch_comments_into_meta` this is *not* best-effort: a fetch/parse/write
+/// failure is returned as an error (after persisting it on the meta).
+pub async fn refresh_file_comments(
+    cfg: &Configuration,
+    cache: &CacheDir,
+    file_key: &str,
+    file_synth: u32,
+) -> Result<(Vec<AssociatedComment>, FileMeta)> {
+    let mut meta = cache.read_meta(file_key)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "file {file_key} is not cached; run `figma-explorer cache prefetch` or pass the file's Figma URL first"
+        )
+    })?;
+    let now = now_epoch();
+    fetch_comments_into_meta(cfg, cache, file_key, now, &mut meta).await;
+    cache.write_meta(&meta)?;
+    if let Some(err) = &meta.comments_error {
+        anyhow::bail!("refreshing comments for {file_key}: {err}");
+    }
+    let comments = cache.read_comments(file_key)?.unwrap_or_default();
+    intern_comment_synths(cache, file_synth, &comments);
+    Ok((comments, meta))
 }
 
 /// Intern every comment id from `comments` under `file_synth`. Best-effort —

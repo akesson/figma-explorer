@@ -9,6 +9,7 @@ pub mod assets;
 pub mod cache;
 pub mod cmd;
 pub mod comment_assoc;
+pub mod comment_view;
 pub mod context;
 pub mod file_summary;
 pub mod full_cache;

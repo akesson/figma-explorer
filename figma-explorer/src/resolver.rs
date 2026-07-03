@@ -66,8 +66,9 @@ pub enum ResolveError {
     #[error("--cache-only set but {0} is not in the local cache; remove --cache-only or run `figma-explorer cache prefetch`")]
     CacheOnlyMiss(String),
     /// The id was syntactically valid and namespaced to a real entity, but no
-    /// command currently knows what to do with it. Today only `file:N:comm:M`
-    /// hits this — comment ids are output-only until the future `info` command.
+    /// command currently knows what to do with it. Currently unused — comment
+    /// ids resolve for real (consumed by `node-info` and `comments`); kept
+    /// for the reserved tags when they grow parse support.
     #[error("{id} cannot be resolved yet: {hint}")]
     NotResolvableYet { id: String, hint: String },
     #[error("internal: {0}")]

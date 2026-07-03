@@ -30,6 +30,10 @@ find        QUERY  fuzzy multi-token ancestor-chain search. --in, --type, --limi
 node-info   [ID]   curated single-target view: layout, fills, effects, text, component
                    metadata, bound variables, anchored comments. Accepts node, comment,
                    file, project, and root targets. See "Design-to-code" below.
+comments    ID     list every comment thread in a file (replies inline, newest
+                   activity first), threads under a node, or one thread
+                   (file:N:comm:M). --unresolved, --since ISO8601, --limit,
+                   --refresh (re-fetch one file's comments, no full prefetch)
 screenshot  ID     export PNG/JPG/SVG/PDF. --out, --scale, --img-format
 tokens      ID     design tokens. --as tokens|css|tailwind, --only colors,..., --scope
 assets      ID     bulk SVG/PNG export under a subtree. --out-dir
@@ -46,7 +50,7 @@ Global flags that apply everywhere: `--json` (else compact text format), `--cach
 2. **Drill in.** `figma-explorer ls file:N --depth 1` to see canvases. `--no-ignore` reveals hidden Cover/WIP/Archive canvases (filtered by default).
 3. **Search.** `figma-explorer find "employee status" --in file:28 --limit 5`. Tokens are whitespace-split; each must fuzzy-match some ancestor in the chain. Results are scored — higher score = each token landed on a more distinct ancestor.
 4. **Implement a frame.** `figma-explorer node-info file:28:2974:150299` for a one-shot LLM-friendly view (everything you need to write the JSX/CSS in one read). For visual reference + bulk assets too, use `context` instead — it bundles a screenshot + token files + an `assets/` directory.
-5. **Comments.** `figma-explorer node-info file:28` summarizes recent threads; `node-info file:28:2974:150299` inlines comments anchored to that subtree; `node-info file:28:comm:M` pulls a single thread (parent + replies) in one shot.
+5. **Comments.** `figma-explorer comments file:28` lists every thread in the file, replies inline, newest activity first — filter with `--unresolved` / `--since 2026-06`, re-fetch with `--refresh`. `comments file:28:2974:150299` restricts to threads anchored in that subtree; `comments file:28:comm:M` pulls a single thread (parent + replies). `node-info` still summarizes the 10 newest threads on a file target and inlines anchored comments under node targets.
 
 ## Design-to-code with `node-info`
 
@@ -94,4 +98,4 @@ Variables: requires the paid-tier Variables REST API. `cache prefetch` adaptivel
 - Cache lives at `$FIGMA_EXPLORER_CACHE_DIR` or `dirs::cache_dir()`. `cache clear --file-key <key>` for surgical invalidation; `cache clear` wipes everything. Per file, the cache holds: `<key>.rkyv` (structural tree for ls/find), `<key>.meta.json` (status), `<key>.comments.json` (pre-associated comments), `<key>.full.json.gz` (raw `/v1/files` body for `node-info`), and `<key>.variables.json` when the account has Variables API access.
 - `tokens --scope target` restricts to the resolved subtree's actually-used values; `--scope file` is only the published library styles; `both` (default) unions them.
 - `assets` separates flat SVG icons from PNGs from "composite" PNGs (subtrees that don't fit one image format). Check the output summary for counts and failures.
-- Comments are cached on disk and refreshed by `cache prefetch`; only `node-info` accepts comment ids — `ls`/`screenshot`/`tokens`/`context`/`assets` reject `file:N:comm:M` with a hint pointing at `node-info`.
+- Comments are cached on disk, refreshed by `cache prefetch` or per-file via `comments <ID> --refresh`; `node-info` and `comments` accept comment ids — `ls`/`screenshot`/`tokens`/`context`/`assets` reject `file:N:comm:M` with a hint.
