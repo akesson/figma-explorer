@@ -1137,6 +1137,7 @@ pub fn synthesize_file_root(
         name: meta.name.clone(),
         visible: true,
         bounds: None,
+        characters: None,
         children,
     }
 }
@@ -1515,6 +1516,7 @@ mod tests {
                 name: name.into(),
                 visible: true,
                 bounds: None,
+                characters: None,
                 children: vec![],
             })
             .collect();
@@ -1524,6 +1526,7 @@ mod tests {
             name: "doc".into(),
             visible: true,
             bounds: None,
+            characters: None,
             children,
         };
         (meta, document)
@@ -1609,6 +1612,7 @@ mod tests {
             name: "cover".into(),
             visible: true,
             bounds: None,
+            characters: None,
             children: vec![],
         };
         assert_eq!(ignored_canvas_label(&n), Some("Cover"));
@@ -1621,6 +1625,7 @@ mod tests {
             name: name.into(),
             visible: true,
             bounds: None,
+            characters: None,
             children,
         }
     }

@@ -748,12 +748,14 @@ mod tests {
             name: "root".into(),
             visible: true,
             bounds: None,
+            characters: None,
             children: vec![CacheNode {
                 id: "1:2".into(),
                 type_: "TEXT".into(),
                 name: "leaf".into(),
                 visible: true,
                 bounds: None,
+                characters: None,
                 children: vec![],
             }],
         };

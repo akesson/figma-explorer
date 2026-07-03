@@ -87,7 +87,11 @@ pub const CACHE_MAGIC: [u8; 4] = *b"FXC\0";
 
 /// Bump when `CachedFile` / `CacheNode` schema changes. A file with a
 /// different version is treated as a cache miss and silently refetched.
-pub const CACHE_SCHEMA_VERSION: u32 = 1;
+///
+/// v2 adds `CacheNode::characters` (truncated TEXT content) so `find` can
+/// match user-visible copy, not just layer names. Existing v1 caches read as
+/// a version mismatch → silent refetch on next access.
+pub const CACHE_SCHEMA_VERSION: u32 = 2;
 
 /// Combined header length: magic (4) + version (4).
 const CACHE_HEADER_LEN: usize = 8;
@@ -171,6 +175,11 @@ pub struct CacheNode {
     pub name: String,
     pub visible: bool,
     pub bounds: Option<Bounds>,
+    /// First [`CHARACTERS_CAPTURE_MAX`] chars of a TEXT node's `characters`
+    /// (its visible copy). `None` for non-text nodes and empty strings.
+    /// Captured so `find` can match user-visible text, not just layer names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub characters: Option<String>,
     #[rkyv(omit_bounds)]
     pub children: Vec<CacheNode>,
 }
@@ -209,6 +218,10 @@ pub fn project_to_cache(node: &Value) -> CacheNode {
     project_rec(node, 0)
 }
 
+/// Cap on captured TEXT content. Enough for search plus a short display
+/// snippet; the full text stays available via `node-info`'s raw-JSON sidecar.
+const CHARACTERS_CAPTURE_MAX: usize = 160;
+
 fn project_rec(node: &Value, depth: usize) -> CacheNode {
     let id = node
         .get("id")
@@ -228,6 +241,13 @@ fn project_rec(node: &Value, depth: usize) -> CacheNode {
     // Figma omits `visible` when the node is visible; missing → true.
     let visible = !matches!(node.get("visible"), Some(Value::Bool(false)));
     let bounds = node.get("absoluteBoundingBox").and_then(parse_bounds);
+    // TEXT nodes carry their visible copy in `characters`; keep a truncated
+    // prefix so `find` can match it. `chars().take()` is UTF-8-safe.
+    let characters = node
+        .get("characters")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.chars().take(CHARACTERS_CAPTURE_MAX).collect::<String>());
     let children = if depth >= crate::MAX_NODE_DEPTH {
         eprintln!(
             "cache: node tree exceeded max depth {}; truncating children of {id}",
@@ -246,6 +266,7 @@ fn project_rec(node: &Value, depth: usize) -> CacheNode {
         name,
         visible,
         bounds,
+        characters,
         children,
     }
 }
@@ -1435,7 +1456,7 @@ mod tests {
     }
 
     #[test]
-    fn project_keeps_structural_fields_drops_paint() {
+    fn project_keeps_structural_fields_and_characters_drops_paint() {
         let raw = json!({
             "id": "1:2",
             "name": "Hero",
@@ -1444,7 +1465,7 @@ mod tests {
             "fills": [{"type": "SOLID", "color": {"r": 1.0, "g": 0.0, "b": 0.0, "a": 1.0}}],
             "strokes": [],
             "effects": [],
-            "characters": "ignored",
+            "characters": "framecopy",
             "children": [
                 {"id": "1:3", "name": "Title", "type": "TEXT", "characters": "Hi", "style": {"fontSize": 32}},
                 {"id": "1:4", "name": "ignored", "type": "TEXT", "visible": false}
@@ -1457,10 +1478,29 @@ mod tests {
         assert!(s.visible);
         let bounds = s.bounds.expect("bounds preserved");
         assert_eq!(bounds.width as i64, 1440);
+        // `characters` is now captured (paint fields still dropped).
+        assert_eq!(s.characters.as_deref(), Some("framecopy"));
         assert_eq!(s.children.len(), 2);
         assert_eq!(s.children[0].name, "Title");
+        assert_eq!(s.children[0].characters.as_deref(), Some("Hi"));
         assert!(s.children[0].visible);
         assert!(!s.children[1].visible);
+    }
+
+    #[test]
+    fn project_captures_characters_truncated_utf8_safe() {
+        // 300 multi-byte chars → capped at CHARACTERS_CAPTURE_MAX, no split.
+        let long: String = "é".repeat(300);
+        let raw = json!({ "id": "1:1", "name": "T", "type": "TEXT", "characters": long });
+        let s = project_to_cache(&raw);
+        let captured = s.characters.expect("captured");
+        assert_eq!(captured.chars().count(), CHARACTERS_CAPTURE_MAX);
+        // Empty characters → None, not Some("").
+        let empty = json!({ "id": "1:2", "name": "T", "type": "TEXT", "characters": "" });
+        assert_eq!(project_to_cache(&empty).characters, None);
+        // No characters field → None.
+        let none = json!({ "id": "1:3", "name": "F", "type": "FRAME" });
+        assert_eq!(project_to_cache(&none).characters, None);
     }
 
     #[test]
@@ -1471,6 +1511,7 @@ mod tests {
             name: String::new(),
             visible: true,
             bounds: None,
+            characters: None,
             children: vec![
                 CacheNode {
                     id: "b".into(),
@@ -1478,6 +1519,7 @@ mod tests {
                     name: String::new(),
                     visible: true,
                     bounds: None,
+                    characters: None,
                     children: vec![],
                 },
                 CacheNode {
@@ -1486,12 +1528,14 @@ mod tests {
                     name: String::new(),
                     visible: true,
                     bounds: None,
+                    characters: None,
                     children: vec![CacheNode {
                         id: "d".into(),
                         type_: String::new(),
                         name: String::new(),
                         visible: true,
                         bounds: None,
+                        characters: None,
                         children: vec![],
                     }],
                 },
@@ -1603,6 +1647,7 @@ mod tests {
             name: name.into(),
             visible: true,
             bounds: None,
+            characters: None,
             children: vec![],
         }
     }
@@ -1622,13 +1667,20 @@ mod tests {
                 name: "doc".into(),
                 visible: true,
                 bounds: None,
+                characters: None,
                 children: vec![CacheNode {
                     id: "1:0".into(),
                     type_: "CANVAS".into(),
                     name: "Page".into(),
                     visible: true,
                     bounds: None,
-                    children: vec![leaf("1:1", "Hero", "FRAME")],
+                    characters: None,
+                    children: vec![{
+                        // Exercise the new `characters` field through rkyv.
+                        let mut t = leaf("1:1", "Title", "TEXT");
+                        t.characters = Some("Leave details".into());
+                        t
+                    }],
                 }],
             },
         }
