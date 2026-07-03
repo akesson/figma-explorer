@@ -320,6 +320,42 @@ pub fn render_flat_with_comments(
     max_depth: usize,
     comment_rows: &[CommentRow],
 ) -> Vec<String> {
+    render_flat_impl(root, file_synth, max_depth, comment_rows, true)
+}
+
+/// Like [`render_flat_with_comments`] but renders no COMMENT rows. Instead, a
+/// node that anchors N thread heads gets a trailing `[N comments]` suffix, and
+/// canvas-level (unanchored) threads are omitted entirely — the caller's
+/// file-level header accounts for them. Keeps `ls` output scannable when
+/// discovery, not discussion, is the goal.
+pub fn render_flat_with_comment_counts(
+    root: &CacheNode,
+    file_synth: u32,
+    max_depth: usize,
+    comment_rows: &[CommentRow],
+) -> Vec<String> {
+    render_flat_impl(root, file_synth, max_depth, comment_rows, false)
+}
+
+/// The `  [N comments]` suffix (pluralized) shared by the flat renderer and
+/// `ls`'s root/project row printer, mirroring the `[+N children]` idiom.
+pub fn comment_count_suffix(count: usize) -> String {
+    let label = if count == 1 { "comment" } else { "comments" };
+    format!("  [{count} {label}]")
+}
+
+/// Shared body of [`render_flat_with_comments`] (`inline = true`) and
+/// [`render_flat_with_comment_counts`] (`inline = false`). In inline mode each
+/// anchored thread becomes its own COMMENT row and canvas-level threads trail
+/// at depth 1; in counts mode anchored threads fold into a `[N comments]`
+/// suffix and canvas-level threads are dropped.
+fn render_flat_impl(
+    root: &CacheNode,
+    file_synth: u32,
+    max_depth: usize,
+    comment_rows: &[CommentRow],
+    inline: bool,
+) -> Vec<String> {
     let mut items: Vec<(&CacheNode, usize, Option<usize>)> = Vec::new();
     collect_visible(root, 0, max_depth, &mut items);
     if items.is_empty() {
@@ -329,7 +365,8 @@ pub fn render_flat_with_comments(
     // Group comments by anchor node id for O(1) lookup at render time.
     let (by_node, canvas) = group_comments(comment_rows);
 
-    // Width pass — id and bounds widths span node + comment rows.
+    // Width pass — id and bounds widths span node rows, plus comment rows only
+    // when they'll actually be emitted (inline mode).
     let node_id_widths = items.iter().map(|(n, _, _)| {
         if n.id.is_empty() {
             format!("file:{}", file_synth).len()
@@ -337,18 +374,28 @@ pub fn render_flat_with_comments(
             format!("file:{}:{}", file_synth, n.id).len()
         }
     });
-    let comment_id_widths = comment_rows.iter().map(|r| r.id.len());
-    let max_id_width = node_id_widths.chain(comment_id_widths).max().unwrap_or(0);
-
     let node_bounds_widths = items
         .iter()
         .map(|(n, _, _)| n.bounds.map(|b| b.compact().len()).unwrap_or(1));
-    // Comment rows always render bounds as "-" (1 char). Including 1 here
-    // is a no-op for the max() but keeps the intent visible.
-    let max_bounds_width = node_bounds_widths
-        .chain(comment_rows.iter().map(|_| 1usize))
-        .max()
-        .unwrap_or(1);
+    let (max_id_width, max_bounds_width) = if inline {
+        // Comment rows always render bounds as "-" (1 char); including 1 in the
+        // max is a no-op but keeps the intent visible.
+        (
+            node_id_widths
+                .chain(comment_rows.iter().map(|r| r.id.len()))
+                .max()
+                .unwrap_or(0),
+            node_bounds_widths
+                .chain(comment_rows.iter().map(|_| 1usize))
+                .max()
+                .unwrap_or(1),
+        )
+    } else {
+        (
+            node_id_widths.max().unwrap_or(0),
+            node_bounds_widths.max().unwrap_or(1),
+        )
+    };
 
     let ctx = FormatCtx {
         file_synth,
@@ -357,17 +404,28 @@ pub fn render_flat_with_comments(
     };
     let mut out: Vec<String> = Vec::with_capacity(items.len() + comment_rows.len());
     for (n, depth, trunc) in &items {
-        out.push(format_cache_line(n, *depth, &ctx, *trunc));
-        if let Some(rows) = by_node.get(n.id.as_str()) {
-            for row in rows {
-                out.push(format_comment_line(row, depth + 1, &ctx));
+        let anchored = by_node.get(n.id.as_str());
+        if inline {
+            out.push(format_cache_line(n, *depth, &ctx, *trunc));
+            if let Some(rows) = anchored {
+                for row in rows {
+                    out.push(format_comment_line(row, depth + 1, &ctx));
+                }
             }
+        } else {
+            let mut line = format_cache_line(n, *depth, &ctx, *trunc);
+            if let Some(rows) = anchored {
+                line.push_str(&comment_count_suffix(rows.len()));
+            }
+            out.push(line);
         }
     }
-    // Canvas-level threads: render after every anchored row. Depth 1 makes
-    // them appear as direct children of the file root.
-    for row in &canvas {
-        out.push(format_comment_line(row, 1, &ctx));
+    // Canvas-level threads: inline mode renders them after every anchored row,
+    // at depth 1 (direct children of the file root); counts mode drops them.
+    if inline {
+        for row in &canvas {
+            out.push(format_comment_line(row, 1, &ctx));
+        }
     }
     out
 }
@@ -821,6 +879,50 @@ mod tests {
             after.starts_with("  COMMENT"),
             "expected depth-1 indent, got: {after}"
         );
+    }
+
+    #[test]
+    fn flat_counts_mode_appends_suffix_and_omits_rows() {
+        let tree = sample_tree();
+        let rows = vec![
+            CommentRow {
+                id: "file:2:comm:1".into(),
+                anchor_node_id: Some("1094:66601".into()), // Title
+                display: "\"looks great\"  by @alice".into(),
+            },
+            CommentRow {
+                id: "file:2:comm:2".into(),
+                anchor_node_id: Some("1094:66601".into()), // Title (second thread)
+                display: "\"and again\"  by @bob".into(),
+            },
+        ];
+        let lines = render_flat_with_comment_counts(&tree, 2, 3, &rows);
+        let title_line = lines.iter().find(|l| l.contains("\"Title\"")).unwrap();
+        assert!(
+            title_line.ends_with("[2 comments]"),
+            "expected count suffix: {title_line}"
+        );
+        // No COMMENT rows anywhere in counts mode.
+        assert!(
+            !lines.iter().any(|l| l.contains("COMMENT")),
+            "counts mode leaked a COMMENT row: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn flat_counts_mode_drops_canvas_level_rows() {
+        let tree = sample_tree();
+        let rows = vec![CommentRow {
+            id: "file:2:comm:7".into(),
+            anchor_node_id: None, // canvas-level
+            display: "\"unanchored\"  by @carol".into(),
+        }];
+        let lines = render_flat_with_comment_counts(&tree, 2, 3, &rows);
+        assert!(
+            !lines.iter().any(|l| l.contains("comm:7")),
+            "canvas-level thread must not render in counts mode: {lines:?}"
+        );
+        assert!(!lines.iter().any(|l| l.contains("[")), "no suffixes either");
     }
 
     #[test]

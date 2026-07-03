@@ -25,8 +25,9 @@ use crate::comment_assoc::AssociatedComment;
 use crate::id::Id;
 use crate::resolver::{parse_id, render_resolve_error, ResolvedTarget, Resolver};
 use crate::tree::{
-    collect_visible, comment_row_json, group_comments, render_flat_with_comments,
-    render_subtree_json_with_comments, truncate_display, CommentRow, NAME_DISPLAY_MAX,
+    collect_visible, comment_count_suffix, comment_row_json, group_comments,
+    render_flat_with_comment_counts, render_flat_with_comments, render_subtree_json_with_comments,
+    truncate_display, CommentRow, NAME_DISPLAY_MAX,
 };
 use crate::{print, Globals, Output};
 
@@ -35,6 +36,23 @@ use crate::{print, Globals, Output};
 /// files (depth 1), canvases (depth 2), frames (depth 3). At `file:N` it
 /// means file (depth 0), canvases (depth 1), and so on.
 const DEFAULT_DEPTH: usize = 3;
+
+/// Root listings (no ID) default shallower than [`DEFAULT_DEPTH`]: just
+/// projects + files, no descent into canvases/frames. A full workspace can be
+/// dozens of files; at depth 3 that dump measured ~237KB. The drill-down
+/// commands (`ls file:N`, `ls proj:N`, or `--depth 2`) are one paste away.
+const ROOT_DEFAULT_DEPTH: usize = 1;
+
+/// Resolve the descent depth: an explicit `--depth` always wins; otherwise
+/// root listings default to [`ROOT_DEFAULT_DEPTH`] and every other target to
+/// [`DEFAULT_DEPTH`].
+fn effective_depth(explicit: Option<usize>, is_root: bool) -> usize {
+    explicit.unwrap_or(if is_root {
+        ROOT_DEFAULT_DEPTH
+    } else {
+        DEFAULT_DEPTH
+    })
+}
 
 /// Default canvas names hidden from listings unless `--no-ignore` is passed.
 /// Case-insensitive match against CANVAS-type nodes only. These names are
@@ -85,9 +103,11 @@ fn ignored_json(hidden: &BTreeSet<&'static str>) -> Value {
 /// thread is paste-ready behind the `file:N:comm:M` id for future tooling.
 const COMMENT_MSG_DISPLAY_MAX: usize = 120;
 
-/// List a node and its descendants. Honors `--depth` (default 3) at every
-/// level — root, project, file, and node alike. Comments anchored to nodes
-/// in the rendered tree always appear inline; there's no `--comments` flag.
+/// List a node and its descendants. Honors `--depth` at every level (default 3;
+/// root listings default to 1 — projects + files only). By default comment
+/// threads are summarized: a node with anchored threads shows a `[N comments]`
+/// suffix and file targets get a one-line thread-count header. Pass
+/// `--comments` to interleave the individual threads inline.
 #[derive(ClapArgs, Debug)]
 pub struct Args {
     /// Tagged or native ID, or a Figma URL. Omit to list cached projects.
@@ -103,10 +123,17 @@ pub struct Args {
     #[arg(long)]
     pub no_ignore: bool,
 
-    /// Only show resolved (`true`) or unresolved (`false`) comment threads.
-    /// Filter applies to thread heads; replies aren't rendered as separate
-    /// rows in `ls` regardless. Default: show every thread.
+    /// Render individual comment thread rows inline under their anchor nodes
+    /// (YAML). Off by default: anchored threads collapse to a `[N comments]`
+    /// suffix plus a `#` thread-count header on file targets. JSON always
+    /// carries the full comment arrays regardless of this flag.
     #[arg(long)]
+    pub comments: bool,
+
+    /// Only show resolved (`true`) or unresolved (`false`) comment threads.
+    /// Filters the inline thread rows, so it requires `--comments`. Replies
+    /// aren't rendered as separate rows in `ls` regardless.
+    #[arg(long, requires = "comments")]
     pub resolved: Option<bool>,
 
     /// Only show nodes whose name contains PATTERN (case-insensitive
@@ -122,16 +149,26 @@ impl Args {
     pub async fn run(self, cfg: &Configuration, globals: &Globals) -> Result<()> {
         let resolver = Resolver::new(globals.cache_only)?;
         let format = globals.output;
-        let depth = self.depth.unwrap_or(DEFAULT_DEPTH);
+        let explicit_depth = self.depth;
 
         let show_all = self.no_ignore;
         let resolved = self.resolved;
+        let inline_comments = self.comments;
         // Lowercase the needle once; case-insensitive substring matching
         // downstream. (`--name ""` matches everything — a harmless no-op.)
         let name_filter = self.name.as_deref().map(str::to_lowercase);
         let name_filter = name_filter.as_deref();
         match self.id.as_deref() {
-            None => render_root(&resolver, depth, format, show_all, resolved, name_filter),
+            None => render_root(
+                &resolver,
+                effective_depth(explicit_depth, true),
+                explicit_depth.is_none(),
+                format,
+                show_all,
+                resolved,
+                inline_comments,
+                name_filter,
+            ),
             Some(s) => {
                 let id = parse_id(s).map_err(|e| anyhow::anyhow!("{e}"))?;
                 // Promote a bare native id to a qualified one when --in
@@ -144,17 +181,25 @@ impl Args {
                     .await
                     .map_err(|e| render_resolve_error(e, format))?;
                 match target {
-                    ResolvedTarget::Root => {
-                        render_root(&resolver, depth, format, show_all, resolved, name_filter)
-                    }
+                    ResolvedTarget::Root => render_root(
+                        &resolver,
+                        effective_depth(explicit_depth, true),
+                        explicit_depth.is_none(),
+                        format,
+                        show_all,
+                        resolved,
+                        inline_comments,
+                        name_filter,
+                    ),
                     ResolvedTarget::Project { synth, project_id } => render_project(
                         &resolver,
                         synth,
                         &project_id,
-                        depth,
+                        effective_depth(explicit_depth, false),
                         format,
                         show_all,
                         resolved,
+                        inline_comments,
                         name_filter,
                     ),
                     ResolvedTarget::File {
@@ -166,10 +211,11 @@ impl Args {
                         synth,
                         &meta,
                         &document.document,
-                        depth,
+                        effective_depth(explicit_depth, false),
                         format,
                         show_all,
                         resolved,
+                        inline_comments,
                         name_filter,
                     ),
                     ResolvedTarget::Node {
@@ -187,9 +233,10 @@ impl Args {
                             file_synth,
                             &meta,
                             &node,
-                            depth,
+                            effective_depth(explicit_depth, false),
                             format,
                             resolved,
+                            inline_comments,
                             name_filter,
                         )
                     }
@@ -227,6 +274,7 @@ fn project_rows(
     show_all: bool,
     hidden: &mut BTreeSet<&'static str>,
     resolved_filter: Option<bool>,
+    inline_comments: bool,
     name_filter: Option<&str>,
     match_count: &mut usize,
 ) -> Vec<Row> {
@@ -266,6 +314,7 @@ fn project_rows(
                     show_all,
                     hidden,
                     resolved_filter,
+                    inline_comments,
                     name_filter,
                     match_count,
                 );
@@ -327,12 +376,15 @@ fn project_files_json(
 /// the cache; files whose payload is missing or fails to decode are emitted
 /// as a file row only (no descent), so a partially populated cache still
 /// produces useful output.
+#[allow(clippy::too_many_arguments)]
 fn render_root(
     resolver: &Resolver,
     depth: usize,
+    depth_hint: bool,
     format: Output,
     show_all: bool,
     resolved_filter: Option<bool>,
+    inline_comments: bool,
     name_filter: Option<&str>,
 ) -> Result<()> {
     let synth = resolver.synth();
@@ -359,6 +411,11 @@ fn render_root(
 
     match format {
         Output::Yaml => {
+            if depth_hint {
+                println!(
+                    "# depth {ROOT_DEFAULT_DEPTH} (projects + files) — use `ls file:N` / `ls proj:N` or --depth 2 to descend"
+                );
+            }
             let mut rows: Vec<Row> = Vec::new();
             for (psynth, _pid, pname, files) in &groups {
                 rows.extend(project_rows(
@@ -370,6 +427,7 @@ fn render_root(
                     show_all,
                     &mut hidden,
                     resolved_filter,
+                    inline_comments,
                     name_filter,
                     &mut matches,
                 ));
@@ -437,6 +495,10 @@ struct Row {
     /// this payload verbatim. Used by comment rows whose trailing data
     /// (author, reply count) doesn't fit the standard `TYPE "name"` shape.
     raw_payload: Option<String>,
+    /// Counts-mode `[N comments]` suffix count for this node's anchored
+    /// threads. `None` in inline mode (threads render as their own rows) and
+    /// for nodes with no anchored threads.
+    comment_count: Option<usize>,
 }
 
 impl Row {
@@ -452,6 +514,7 @@ impl Row {
             name,
             truncated: None,
             raw_payload: None,
+            comment_count: None,
         }
     }
 
@@ -468,6 +531,7 @@ impl Row {
             name: String::new(),
             truncated: None,
             raw_payload: Some(display),
+            comment_count: None,
         }
     }
 }
@@ -506,6 +570,9 @@ fn format_rows(rows: &[Row]) -> String {
         if let Some(n) = r.truncated {
             out.push_str(&format!("  [+{n} children]"));
         }
+        if let Some(c) = r.comment_count {
+            out.push_str(&comment_count_suffix(c));
+        }
         out.push('\n');
     }
     out
@@ -531,6 +598,7 @@ fn append_descent_rows(
     show_all: bool,
     hidden: &mut BTreeSet<&'static str>,
     resolved_filter: Option<bool>,
+    inline_comments: bool,
     name_filter: Option<&str>,
     match_count: &mut usize,
 ) {
@@ -561,6 +629,14 @@ fn append_descent_rows(
             node.type_.clone()
         };
         let row_depth = file_depth + sub_depth;
+        let anchored = by_node.get(node.id.as_str());
+        // Counts mode: fold the anchored-thread count into a `[N comments]`
+        // suffix on the node row instead of emitting a row per thread.
+        let comment_count = if inline_comments {
+            None
+        } else {
+            anchored.map(|a| a.len())
+        };
         rows.push(Row {
             id: format!("file:{}:{}", file_synth, node.id),
             bounds: node
@@ -572,24 +648,30 @@ fn append_descent_rows(
             name: truncate_display(&node.name, NAME_DISPLAY_MAX).into_owned(),
             truncated,
             raw_payload: None,
+            comment_count,
         });
-        if let Some(anchored) = by_node.get(node.id.as_str()) {
-            for cr in anchored {
-                rows.push(Row::comment(
-                    cr.id.clone(),
-                    row_depth + 1,
-                    cr.display.clone(),
-                ));
+        if inline_comments {
+            if let Some(anchored) = anchored {
+                for cr in anchored {
+                    rows.push(Row::comment(
+                        cr.id.clone(),
+                        row_depth + 1,
+                        cr.display.clone(),
+                    ));
+                }
             }
         }
     }
-    // Canvas-level threads fall under the FILE row at file_depth + 1.
-    for cr in canvas {
-        rows.push(Row::comment(
-            cr.id.clone(),
-            file_depth + 1,
-            cr.display.clone(),
-        ));
+    // Canvas-level threads fall under the FILE row at file_depth + 1 — only in
+    // inline mode; in counts mode the file-level header accounts for them.
+    if inline_comments {
+        for cr in canvas {
+            rows.push(Row::comment(
+                cr.id.clone(),
+                file_depth + 1,
+                cr.display.clone(),
+            ));
+        }
     }
 }
 
@@ -609,6 +691,64 @@ fn load_comment_rows(
         _ => return Vec::new(),
     };
     build_comment_rows(&comments, resolver, file_synth, resolved_filter)
+}
+
+/// Read the pre-associated comments sidecar for `file_key`, tolerating a
+/// missing/unreadable/empty sidecar by returning an empty vector. Unlike
+/// [`load_comment_rows`] this hands back the raw `AssociatedComment`s so a
+/// caller can both derive [`CommentRow`]s and compute [`comment_stats`] from a
+/// single read.
+fn read_comments_lenient(resolver: &Resolver, file_key: &str) -> Vec<AssociatedComment> {
+    resolver
+        .cache()
+        .read_comments(file_key)
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+}
+
+/// Thread-count summary for a file's comment sidecar. Counts thread heads
+/// (`parent_id == None`), including canvas-level (unanchored) threads.
+struct CommentStats {
+    total_threads: usize,
+    unresolved: usize,
+}
+
+/// Tally thread heads and how many are still open. Replies are ignored.
+fn comment_stats(comments: &[AssociatedComment]) -> CommentStats {
+    let mut total_threads = 0usize;
+    let mut unresolved = 0usize;
+    for c in comments {
+        if c.parent_id.is_some() {
+            continue;
+        }
+        total_threads += 1;
+        if c.resolved_at.is_none() {
+            unresolved += 1;
+        }
+    }
+    CommentStats {
+        total_threads,
+        unresolved,
+    }
+}
+
+/// The counts-mode `#` header for a file target: how many comment threads the
+/// file carries and how to read them. `None` when the file has no threads
+/// (stay silent rather than print a zero).
+fn comment_summary_header(file_synth: u32, stats: &CommentStats) -> Option<String> {
+    if stats.total_threads == 0 {
+        return None;
+    }
+    let label = if stats.total_threads == 1 {
+        "comment thread"
+    } else {
+        "comment threads"
+    };
+    Some(format!(
+        "# {} {label} ({} unresolved) — use: comments file:{file_synth} [--grep <word>]",
+        stats.total_threads, stats.unresolved
+    ))
 }
 
 /// Build `CommentRow`s from a slice of already-loaded `AssociatedComment`s.
@@ -758,6 +898,7 @@ fn render_project(
     format: Output,
     show_all: bool,
     resolved_filter: Option<bool>,
+    inline_comments: bool,
     name_filter: Option<&str>,
 ) -> Result<()> {
     let synth = resolver.synth();
@@ -784,6 +925,7 @@ fn render_project(
                 show_all,
                 &mut hidden,
                 resolved_filter,
+                inline_comments,
                 name_filter,
                 &mut matches,
             );
@@ -832,6 +974,7 @@ fn render_file(
     format: Output,
     show_all: bool,
     resolved_filter: Option<bool>,
+    inline_comments: bool,
     name_filter: Option<&str>,
 ) -> Result<()> {
     let mut hidden: BTreeSet<&'static str> = BTreeSet::new();
@@ -840,7 +983,10 @@ fn render_file(
     if let Some(needle) = name_filter {
         synthetic_root = prune_root_children(&synthetic_root, needle, depth, &mut matches);
     }
-    let mut comment_rows = load_comment_rows(resolver, &meta.file_key, file_synth, resolved_filter);
+    // Read the raw sidecar once: the summary header needs thread/unresolved
+    // counts (including canvas-level threads), while the rows need CommentRows.
+    let assoc = read_comments_lenient(resolver, &meta.file_key);
+    let mut comment_rows = build_comment_rows(&assoc, resolver, file_synth, resolved_filter);
     if name_filter.is_some() {
         comment_rows.retain(|r| r.anchor_node_id.is_some());
     }
@@ -850,9 +996,22 @@ fn render_file(
             if let Some(pattern) = name_filter {
                 print_name_filter_comment(pattern, matches);
             }
-            let lines =
-                render_flat_with_comments(&synthetic_root, file_synth, depth, &comment_rows);
-            println!("{}", lines.join("\n"));
+            if inline_comments {
+                let lines =
+                    render_flat_with_comments(&synthetic_root, file_synth, depth, &comment_rows);
+                println!("{}", lines.join("\n"));
+            } else {
+                if let Some(header) = comment_summary_header(file_synth, &comment_stats(&assoc)) {
+                    println!("{header}");
+                }
+                let lines = render_flat_with_comment_counts(
+                    &synthetic_root,
+                    file_synth,
+                    depth,
+                    &comment_rows,
+                );
+                println!("{}", lines.join("\n"));
+            }
             Ok(())
         }
         Output::Json => {
@@ -896,6 +1055,7 @@ fn render_node_subtree(
     depth: usize,
     format: Output,
     resolved_filter: Option<bool>,
+    inline_comments: bool,
     name_filter: Option<&str>,
 ) -> Result<()> {
     let mut matches = 0usize;
@@ -912,7 +1072,14 @@ fn render_node_subtree(
             if let Some(pattern) = name_filter {
                 print_name_filter_comment(pattern, matches);
             }
-            let lines = render_flat_with_comments(node, file_synth, depth, &comment_rows);
+            // No file-level thread-count header here — a subtree only shows a
+            // slice of the file's threads, so a whole-file count would mislead.
+            // Per-node `[N comments]` suffixes remain accurate.
+            let lines = if inline_comments {
+                render_flat_with_comments(node, file_synth, depth, &comment_rows)
+            } else {
+                render_flat_with_comment_counts(node, file_synth, depth, &comment_rows)
+            };
             println!("{}", lines.join("\n"));
             Ok(())
         }
@@ -1214,6 +1381,111 @@ mod tests {
         let id: Id = "0:0".parse().unwrap();
         let err = apply_scope(id, Some("proj:1")).unwrap_err();
         assert!(err.to_string().contains("must name a file"), "got: {err}");
+    }
+
+    #[test]
+    fn effective_depth_defaults_root_to_one() {
+        assert_eq!(effective_depth(None, true), ROOT_DEFAULT_DEPTH);
+        assert_eq!(effective_depth(None, false), DEFAULT_DEPTH);
+        // Explicit --depth always wins, root or not.
+        assert_eq!(effective_depth(Some(5), true), 5);
+        assert_eq!(effective_depth(Some(0), false), 0);
+    }
+
+    #[test]
+    fn format_rows_appends_comment_count_suffix() {
+        let mut row = Row::header("file:1:1:2".into(), 0, "FRAME", "Header".into());
+        row.comment_count = Some(3);
+        assert!(
+            format_rows(&[row]).contains("  [3 comments]"),
+            "expected pluralized suffix"
+        );
+        let mut one = Row::header("file:1:1:3".into(), 0, "FRAME", "Footer".into());
+        one.comment_count = Some(1);
+        assert!(format_rows(&[one]).contains("  [1 comment]"), "singular");
+        let none = Row::header("file:1:1:4".into(), 0, "FRAME", "Body".into());
+        assert!(
+            !format_rows(&[none]).contains("comment"),
+            "no suffix when None"
+        );
+    }
+
+    /// Minimal `AssociatedComment` for the stats tests: a head or reply, open
+    /// or resolved, anchored to a node id or canvas-level (`None`).
+    fn stat_comment(
+        id: &str,
+        parent: Option<&str>,
+        resolved: bool,
+        node_id: Option<&str>,
+    ) -> AssociatedComment {
+        use crate::comment_assoc::{Anchor, AnchorKind, AssociationMethod, NodeRef};
+        AssociatedComment {
+            comment_id: id.into(),
+            message: format!("msg {id}"),
+            author: "a".into(),
+            created_at: "2026-01-01".into(),
+            resolved_at: resolved.then(|| "2026-01-02".to_string()),
+            parent_id: parent.map(str::to_string),
+            order_id: None,
+            reactions: 0,
+            anchor: Anchor {
+                kind: AnchorKind::FrameOffset,
+                explicit_node_id: node_id.map(str::to_string),
+                canvas_point: None,
+                canvas_rect: None,
+            },
+            node: node_id.map(|n| NodeRef {
+                node_id: n.into(),
+                type_: "FRAME".into(),
+                name: "N".into(),
+                path: vec![],
+            }),
+            method: AssociationMethod::Explicit,
+            stale_node_id: None,
+        }
+    }
+
+    #[test]
+    fn comment_stats_counts_heads_including_canvas_level() {
+        let comments = vec![
+            stat_comment("h1", None, false, Some("1:2")), // open, anchored
+            stat_comment("h2", None, true, None),         // resolved, canvas-level
+            stat_comment("r1", Some("h1"), false, Some("1:2")), // reply — ignored
+        ];
+        let stats = comment_stats(&comments);
+        assert_eq!(stats.total_threads, 2, "two heads, reply excluded");
+        assert_eq!(stats.unresolved, 1, "only h1 is open");
+    }
+
+    #[test]
+    fn comment_summary_header_formats_and_hides_zero() {
+        let stats = CommentStats {
+            total_threads: 52,
+            unresolved: 12,
+        };
+        let header = comment_summary_header(15, &stats).unwrap();
+        assert_eq!(
+            header,
+            "# 52 comment threads (12 unresolved) — use: comments file:15 [--grep <word>]"
+        );
+        // Singular label + zero-thread suppression.
+        assert!(comment_summary_header(
+            15,
+            &CommentStats {
+                total_threads: 1,
+                unresolved: 0
+            }
+        )
+        .unwrap()
+        .contains("1 comment thread ("));
+        assert!(comment_summary_header(
+            15,
+            &CommentStats {
+                total_threads: 0,
+                unresolved: 0
+            }
+        )
+        .is_none());
     }
 
     /// Build a minimal DOCUMENT CacheNode with the given canvas children.
@@ -1545,6 +1817,7 @@ mod tests {
             false,
             &mut hidden,
             None,
+            false,
             None,
             &mut matches,
         );
@@ -1554,5 +1827,100 @@ mod tests {
         assert!(out.contains(&format!("file:{fsynth}")), "{out}");
         assert!(out.contains("FILE  \"Demo\""), "{out}");
         assert!(out.contains("FRAME  \"Header\""), "{out}");
+    }
+
+    /// Counts mode (default): a node with anchored threads gets a
+    /// `[N comments]` suffix, no COMMENT rows, no canvas-level rows.
+    #[tokio::test]
+    async fn project_rows_counts_mode_sets_suffix_no_comment_rows() {
+        use crate::comment_assoc::{
+            Anchor, AnchorKind, AssociatedComment, AssociationMethod, NodeRef,
+        };
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = CacheDir::new(tmp.path());
+        cache.ensure().unwrap();
+        let doc = json!({
+            "id": "0:0", "name": "doc", "type": "DOCUMENT",
+            "children": [
+                { "id": "0:1", "name": "Home", "type": "CANVAS",
+                  "children": [{ "id": "1:2", "name": "Header", "type": "FRAME",
+                                 "absoluteBoundingBox": { "x": 0.0, "y": 0.0, "width": 100.0, "height": 40.0 } }] }
+            ],
+        });
+        let file_ref = FileRef {
+            file_key: "abc".into(),
+            name: "Demo".into(),
+            last_modified: "2026-01-01".into(),
+            project_id: "p1".into(),
+            project_name: "Proj".into(),
+        };
+        let payload = build_cached_file(&file_ref, &doc, 0);
+        cache.write_file("abc", &payload).unwrap();
+        cache
+            .write_meta(&FileMeta::from_success(&file_ref, &payload, 0, 0))
+            .unwrap();
+        // One thread head anchored to the Header frame (1:2).
+        let comment = AssociatedComment {
+            comment_id: "c1".into(),
+            message: "looks good".into(),
+            author: "alice".into(),
+            created_at: "2026-01-02".into(),
+            resolved_at: None,
+            parent_id: None,
+            order_id: None,
+            reactions: 0,
+            anchor: Anchor {
+                kind: AnchorKind::FrameOffset,
+                explicit_node_id: Some("1:2".into()),
+                canvas_point: None,
+                canvas_rect: None,
+            },
+            node: Some(NodeRef {
+                node_id: "1:2".into(),
+                type_: "FRAME".into(),
+                name: "Header".into(),
+                path: vec![],
+            }),
+            method: AssociationMethod::Explicit,
+            stale_node_id: None,
+        };
+        cache.write_comments("abc", &[comment]).unwrap();
+        crate::synth::with_lock(&cache, |s| {
+            s.intern_project("p1");
+            s.intern_file("abc");
+        })
+        .unwrap();
+
+        let resolver = Resolver::from_cache(CacheDir::new(tmp.path()), true).unwrap();
+        let synth = resolver.synth();
+        let psynth = *synth.projects.get("p1").unwrap();
+        let fsynth = synth.file_synth("abc").unwrap();
+        let meta = resolver.cache().read_meta("abc").unwrap().unwrap();
+
+        let mut hidden = BTreeSet::new();
+        let mut matches = 0usize;
+        let rows = project_rows(
+            &resolver,
+            psynth,
+            "Proj",
+            &[(fsynth, meta)],
+            3,
+            false,
+            &mut hidden,
+            None,
+            false, // counts mode
+            None,
+            &mut matches,
+        );
+        let out = format_rows(&rows);
+        assert!(
+            out.contains("FRAME  \"Header\"  [1 comment]"),
+            "expected suffix on the anchored node: {out}"
+        );
+        assert!(
+            !out.contains("COMMENT"),
+            "counts mode must not emit COMMENT rows: {out}"
+        );
     }
 }

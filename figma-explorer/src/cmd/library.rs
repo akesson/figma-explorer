@@ -100,18 +100,77 @@ impl SearchArgs {
         // mismatch degrades to "no resolvable ids" rather than aborting.
         let synth = SynthState::load(&cache_dir).unwrap_or_default();
 
-        let mut hits = search_catalog(&catalog, needle, self.r#type);
+        let (mut hits, self_score) = search_catalog(&catalog, needle, self.r#type);
+        // When any hit clears the strong floor, drop the weak ones (with a
+        // transparency line). When none do, keep a few weak leads, labeled.
+        let any_strong = hits.iter().any(|h| h.strong);
+        let no_strong_match = !hits.is_empty() && !any_strong;
+        let weak_hidden = if any_strong {
+            hits.iter().filter(|h| !h.strong).count()
+        } else {
+            0
+        };
+        if any_strong {
+            hits.retain(|h| h.strong);
+        }
         let total_matches = hits.len();
-        hits.truncate(self.limit);
+        let cap = if no_strong_match {
+            WEAK_HITS_SHOWN.min(self.limit)
+        } else {
+            self.limit
+        };
+        hits.truncate(cap);
 
-        render(&catalog, &hits, total_matches, needle, &synth, format)
+        let outcome = SearchOutcome {
+            no_strong_match,
+            self_score,
+            weak_hidden,
+        };
+        render(
+            &catalog,
+            &hits,
+            total_matches,
+            &outcome,
+            needle,
+            &synth,
+            format,
+        )
     }
 }
+
+/// A hit counts as "strong" when its raw score reaches this fraction of the
+/// query's self-score (the parsed pattern scored against the query text itself
+/// — the achievable maximum for whitespace-separated alphanumeric queries; see
+/// nucleo-matcher `score.rs`). Calibration on real catalog names: variant-name
+/// junk for "textarea" (`"Text=False, Checkbox=True, …"`) lands at 0.66–0.80;
+/// genuine word-boundary matches score ≥0.98; single-dropped-letter typos
+/// ≈0.89. camelCase word-starts (≈0.79) fall below and surface as labeled weak
+/// leads rather than confident hits. Tunable.
+const STRONG_THRESHOLD_FRACTION: f64 = 0.85;
+
+/// How many weak hits to surface (clearly labeled) when nothing is strong — an
+/// honest miss still gives the user a few leads to chase.
+const WEAK_HITS_SHOWN: usize = 3;
 
 /// A catalog entry that matched the query, with its fuzzy score.
 struct ScoredEntry<'a> {
     entry: &'a CatalogEntry,
     score: u32,
+    /// Whether `score` clears [`STRONG_THRESHOLD_FRACTION`] of the query's
+    /// self-score. Weak hits are hidden when any strong hit exists.
+    strong: bool,
+}
+
+/// Strong/weak classification outcome threaded from `run` into `render`.
+struct SearchOutcome {
+    /// True when matches exist but none cleared the strong floor — the render
+    /// switches to the "no strong match, here are weak leads" path.
+    no_strong_match: bool,
+    /// The query's self-score (score ceiling); surfaced in JSON for tuning.
+    self_score: u32,
+    /// Count of weak hits dropped because strong hits existed. Drives the
+    /// `# N weaker matches hidden` transparency line.
+    weak_hidden: usize,
 }
 
 /// Cache-first catalog load. Returns the cached catalog when it's present,
@@ -183,15 +242,27 @@ fn augment_fetch_error(e: anyhow::Error) -> anyhow::Error {
 
 /// Fuzzy-rank every catalog entry whose `name` matches `needle`. Higher score
 /// first; ties broken by shorter name, then name ascending, then key — fully
-/// deterministic. Returns *all* matches; the caller truncates to `--limit`.
+/// deterministic. Returns *all* matches plus the query's self-score (the
+/// achievable maximum, used to classify hits as strong/weak); the caller
+/// truncates to `--limit`.
 fn search_catalog<'a>(
     catalog: &'a TeamCatalog,
     needle: &str,
     kind: Option<EntryKind>,
-) -> Vec<ScoredEntry<'a>> {
+) -> (Vec<ScoredEntry<'a>>, u32) {
     let mut matcher = Matcher::new(nucleo_matcher::Config::DEFAULT);
     let pattern = Pattern::parse(needle, CaseMatching::Ignore, Normalization::Smart);
     let mut buf: Vec<char> = Vec::new();
+
+    // The pattern scored against the query text itself: for whitespace-
+    // separated alphanumeric queries this is the exact score ceiling, so every
+    // real hit falls at or below it. Zero (unusual — e.g. fzf operator syntax)
+    // disables the floor: everything classifies strong, i.e. today's behavior.
+    let mut self_buf: Vec<char> = Vec::new();
+    let self_score = pattern
+        .score(Utf32Str::new(needle, &mut self_buf), &mut matcher)
+        .unwrap_or(0);
+    let strong_floor = STRONG_THRESHOLD_FRACTION * self_score as f64;
 
     let mut hits: Vec<ScoredEntry<'a>> = Vec::new();
     for k in [
@@ -206,7 +277,12 @@ fn search_catalog<'a>(
             buf.clear();
             let haystack = Utf32Str::new(&entry.name, &mut buf);
             if let Some(score) = pattern.score(haystack, &mut matcher) {
-                hits.push(ScoredEntry { entry, score });
+                let strong = self_score == 0 || score as f64 >= strong_floor;
+                hits.push(ScoredEntry {
+                    entry,
+                    score,
+                    strong,
+                });
             }
         }
     }
@@ -224,7 +300,7 @@ fn search_catalog<'a>(
             .then_with(|| a.entry.name.cmp(&b.entry.name))
             .then_with(|| a.entry.key.cmp(&b.entry.key))
     });
-    hits
+    (hits, self_score)
 }
 
 /// The paste-ready `file:N:node_id` for an entry's source file, when that file
@@ -258,10 +334,12 @@ fn human_age(secs: u64) -> String {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render(
     catalog: &TeamCatalog,
     hits: &[ScoredEntry<'_>],
     total_matches: usize,
+    outcome: &SearchOutcome,
     needle: &str,
     synth: &SynthState,
     format: Output,
@@ -278,12 +356,28 @@ fn render(
                 catalog.styles.len(),
                 human_age(age),
             );
-            if truncated {
+            if outcome.no_strong_match {
+                // Every match was weak — lead with an honest miss, then show a
+                // few closest leads (labeled `(weak)` in the rows below).
+                println!(
+                    "# no strong match for \"{needle}\" — showing {} closest weak hit{} (of {total_matches})",
+                    hits.len(),
+                    if hits.len() == 1 { "" } else { "s" },
+                );
+            } else if truncated {
                 println!(
                     "# showing {} of {} matches — use --limit N to see more",
                     hits.len(),
                     total_matches,
                 );
+            }
+            if outcome.weak_hidden > 0 {
+                let label = if outcome.weak_hidden == 1 {
+                    "match"
+                } else {
+                    "matches"
+                };
+                println!("# {} weaker {label} hidden", outcome.weak_hidden);
             }
             if hits.is_empty() {
                 // Distinguish a genuine zero-match search from `--limit 0`,
@@ -319,6 +413,10 @@ fn render(
                 if id == "—" {
                     tail.push_str(&format!("  file={}:{}", h.entry.file_key, h.entry.node_id));
                 }
+                // In the no-strong-match path every shown hit is a weak lead.
+                if outcome.no_strong_match {
+                    tail.push_str("  (weak)");
+                }
                 out.push_str(&format!(
                     "{id:<id_w$}  | {kind:<13}  {score:>5}  \"{name}\"  {tail}\n",
                     id = id,
@@ -342,6 +440,7 @@ fn render(
                         "kind": kind_label(h.entry),
                         "score": h.score,
                         "key": h.entry.key,
+                        "strong": h.strong,
                         "file_key": h.entry.file_key,
                         "node_id": h.entry.node_id,
                         "component_set": h.entry.component_set,
@@ -367,6 +466,8 @@ fn render(
                     "total_matches": total_matches,
                     "shown": hits.len(),
                     "truncated": truncated,
+                    "no_strong_match": outcome.no_strong_match,
+                    "self_score": outcome.self_score,
                     "hits": hit_values,
                 }),
                 format,
@@ -420,16 +521,27 @@ mod tests {
             vec![],
             vec![],
         );
-        let hits = search_catalog(&cat, "Button", None);
+        let hits = search(&cat, "Button", None);
         assert!(!hits.is_empty());
         assert_eq!(hits[0].entry.name, "Button", "exact match ranks first");
+        assert!(hits[0].strong, "an exact match is strong");
+    }
+
+    /// Thin wrapper dropping the self-score for tests that only assert on the
+    /// hit set (ranking, filtering, counts).
+    fn search<'a>(
+        cat: &'a TeamCatalog,
+        needle: &str,
+        kind: Option<EntryKind>,
+    ) -> Vec<ScoredEntry<'a>> {
+        search_catalog(cat, needle, kind).0
     }
 
     #[test]
     fn fuzzy_match_tolerates_a_dropped_letter() {
         let cat = catalog(vec![entry("Button", EntryKind::Component)], vec![], vec![]);
         // "buttn" is a subsequence of "button" — the fuzzy matcher finds it.
-        assert_eq!(search_catalog(&cat, "buttn", None).len(), 1);
+        assert_eq!(search(&cat, "buttn", None).len(), 1);
     }
 
     #[test]
@@ -442,7 +554,7 @@ mod tests {
             vec![],
             vec![],
         );
-        let hits = search_catalog(&cat, "primary button", None);
+        let hits = search(&cat, "primary button", None);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].entry.name, "Primary Button");
     }
@@ -454,23 +566,23 @@ mod tests {
             vec![entry("Card Variants", EntryKind::ComponentSet)],
             vec![entry("Card Shadow", EntryKind::Style)],
         );
-        let only_styles = search_catalog(&cat, "card", Some(EntryKind::Style));
+        let only_styles = search(&cat, "card", Some(EntryKind::Style));
         assert_eq!(only_styles.len(), 1);
         assert_eq!(only_styles[0].entry.kind, EntryKind::Style);
-        assert_eq!(search_catalog(&cat, "card", None).len(), 3);
+        assert_eq!(search(&cat, "card", None).len(), 3);
     }
 
     #[test]
     fn no_match_returns_empty() {
         let cat = catalog(vec![entry("Button", EntryKind::Component)], vec![], vec![]);
-        assert!(search_catalog(&cat, "zzzznomatchqx", None).is_empty());
+        assert!(search(&cat, "zzzznomatchqx", None).is_empty());
     }
 
     #[test]
     fn search_is_case_insensitive() {
         let cat = catalog(vec![entry("Button", EntryKind::Component)], vec![], vec![]);
-        assert_eq!(search_catalog(&cat, "BUTTON", None).len(), 1);
-        assert_eq!(search_catalog(&cat, "button", None).len(), 1);
+        assert_eq!(search(&cat, "BUTTON", None).len(), 1);
+        assert_eq!(search(&cat, "button", None).len(), 1);
     }
 
     #[test]
@@ -482,9 +594,76 @@ mod tests {
         let mut b = entry("Same", EntryKind::Component);
         b.key = "key-a".into();
         let cat = catalog(vec![a, b], vec![], vec![]);
-        let hits = search_catalog(&cat, "Same", None);
+        let hits = search(&cat, "Same", None);
         assert_eq!(hits.len(), 2);
         assert_eq!(hits[0].entry.key, "key-a", "ties break by key ascending");
+    }
+
+    /// Realistic design-system names for the noise-floor tests: a genuine
+    /// component, the variant-property junk string, and a near-miss.
+    fn noise_catalog() -> TeamCatalog {
+        catalog(
+            vec![
+                entry("Text Input", EntryKind::Component),
+                entry(
+                    "Text=False, Checkbox=True, Color=Gray",
+                    EntryKind::Component,
+                ),
+                entry("Tag Input", EntryKind::Component),
+            ],
+            vec![],
+            vec![],
+        )
+    }
+
+    #[test]
+    fn textarea_query_hits_no_strong_match_path() {
+        // "textarea" only subsequence-matches the variant-junk string (there's
+        // no 'a' after "text" in "Text Input"/"Tag Input") — and that match is
+        // weak, so the whole search has no strong hit.
+        let cat = noise_catalog();
+        let hits = search(&cat, "textarea", None);
+        assert!(!hits.is_empty(), "the junk string does fuzzy-match");
+        assert!(
+            hits.iter().all(|h| !h.strong),
+            "no hit should clear the strong floor: {:?}",
+            hits.iter()
+                .map(|h| (&h.entry.name, h.score))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn text_input_query_is_strong() {
+        // "text input" needs both atoms; the junk lacks an 'i' for "input" and
+        // "Tag Input" lacks an 'e' for "text", so only "Text Input" matches.
+        let cat = noise_catalog();
+        let hits = search(&cat, "text input", None);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].entry.name, "Text Input");
+        assert!(hits[0].strong, "an exact word-boundary match is strong");
+    }
+
+    #[test]
+    fn typo_inpt_is_strong_on_input() {
+        // Single dropped letter: "inpt" ⊂ "input", ratio ≈0.886 ≥ 0.85. This
+        // test pins the calibration floor — retuning below ~0.89 trips it.
+        let cat = catalog(vec![entry("Input", EntryKind::Component)], vec![], vec![]);
+        let hits = search(&cat, "inpt", None);
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].strong, "a one-letter typo stays strong");
+    }
+
+    #[test]
+    fn self_score_bounds_all_hits() {
+        // The self-score is the achievable ceiling: no hit outscores it.
+        let cat = noise_catalog();
+        let (hits, self_score) = search_catalog(&cat, "textarea", None);
+        assert!(!hits.is_empty());
+        assert!(
+            hits.iter().all(|h| h.score <= self_score),
+            "self_score {self_score} must bound every hit"
+        );
     }
 
     #[test]
