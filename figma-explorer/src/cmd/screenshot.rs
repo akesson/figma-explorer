@@ -33,6 +33,11 @@ pub struct Args {
 
 impl Args {
     pub async fn run(self, cfg: &Configuration, globals: &Globals) -> Result<()> {
+        // Rendering (and even the render-URL request) always hits Figma's
+        // `/images` API; there is no cached image to serve offline.
+        if globals.cache_only {
+            anyhow::bail!("screenshot needs a live fetch; drop --cache-only");
+        }
         let resolver = Resolver::new(globals.cache_only)?;
         let format = globals.output;
         let id = parse_id(&self.id).map_err(|e| anyhow!("{e}"))?;
@@ -115,5 +120,28 @@ impl Args {
                 print(&out, format)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cache_only_rejected_before_any_fetch() {
+        let args = Args {
+            id: "file:1".into(),
+            img_format: Format::Png,
+            scale: 2.0,
+            out: None,
+        };
+        let globals = Globals {
+            output: crate::Output::Yaml,
+            cache_only: true,
+            scope: None,
+        };
+        // Bails before constructing the resolver or hitting the network.
+        let err = args.run(&Configuration::new(), &globals).await.unwrap_err();
+        assert!(err.to_string().contains("--cache-only"), "got: {err}");
     }
 }

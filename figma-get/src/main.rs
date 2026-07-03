@@ -19,6 +19,7 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    figma_common::reset_sigpipe();
     figma_common::load_envs();
     let cli = Cli::parse();
     let cfg = build_config(cli.token.as_deref())?;

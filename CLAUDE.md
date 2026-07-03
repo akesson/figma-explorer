@@ -49,7 +49,7 @@ One **team-scoped** sidecar lives outside `files/`: `teams/{team_id}.catalog.jso
 
 Which lane each subcommand uses:
 - *Structural only* (no step 2): `ls`, `find`.
-- *Resolve, then fetch live*: `tokens`, `assets`, `screenshot`, `context`.
+- *Resolve, then fetch live*: `tokens`, `assets`, `screenshot`, `context`. These need fields the cache drops (fills/strokes/type styles) or the `/images` API, so there is nothing to serve offline — they refuse up front under `--cache-only` rather than resolving and then silently hitting the network.
 - *Resolve, then read sidecar (with live fetch as fallback)*: `node-info` (consumes `.full.json.gz` for offline-correct paint/text/effect data; only fetches live when the sidecar is absent and `--cache-only` is not set); `comments` (consumes `.comments.json`; fetches live when the sidecar is absent or `--refresh` is passed — one file's comments, never a full prefetch).
 - *Cache plane*: `cache prefetch` bypasses the resolver entirely and writes meta+payload+sidecars by walking project listings.
 - *Team-catalog plane*: `library search` also bypasses the resolver — it takes no tagged ID. It reads the team-scoped catalog sidecar, lazily fetching from the team-library endpoints when the sidecar is absent or older than `CATALOG_TTL_SECS` (24h; `--refresh` forces it).
