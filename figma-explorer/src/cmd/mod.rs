@@ -11,6 +11,7 @@ pub mod context;
 pub mod find;
 pub mod library;
 pub mod ls;
+pub mod mark;
 pub mod node_info;
 pub mod screenshot;
 pub mod tokens;
@@ -43,6 +44,10 @@ pub enum Command {
     /// (`file:N:comm:M`). Reads the cached comments sidecar; `--refresh`
     /// re-fetches one file's comments without a full `cache prefetch`.
     Comments(comments::Args),
+    /// Curated keyword→node marks: `mark add`/`rm`/`list`. Write down a node
+    /// once you've identified it, then resolve it forever after as `mark:<key>`
+    /// (and `find`/`library search` surface matching marks first).
+    Mark(mark::Args),
     /// Maintain the local file cache (prefetch / clear).
     Cache(cache::Args),
 }
@@ -59,6 +64,7 @@ impl Command {
             Self::Context(a) => a.run(cfg, globals).await,
             Self::NodeInfo(a) => a.run(cfg, globals).await,
             Self::Comments(a) => a.run(cfg, globals).await,
+            Self::Mark(a) => a.run(cfg, globals).await,
             Self::Cache(a) => a.run(cfg, globals).await,
         }
     }

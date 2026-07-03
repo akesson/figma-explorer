@@ -13,6 +13,7 @@ use figma_api::apis::configuration::Configuration;
 use crate::cache::{self, CacheDir, CacheNode, CachedFile, EntryStatus, FileMeta};
 use crate::comment_assoc::AssociatedComment;
 use crate::id::Id;
+use crate::marks::MarkStore;
 use crate::node_index::NodeIndex;
 use crate::synth::SynthState;
 use crate::url::ParsedUrl;
@@ -88,6 +89,9 @@ pub struct Resolver {
     /// Built on first bare-node lookup. None of the tagged paths need it,
     /// so common operations (`file:N`, `file:N:x:y`, URL) pay zero cost here.
     node_index: OnceCell<NodeIndex>,
+    /// Loaded on first `mark:<key>` resolution. Cheap (a small JSON file), but
+    /// deferred so the common tagged paths never touch it.
+    marks: OnceCell<MarkStore>,
     cache_only: bool,
 }
 
@@ -108,6 +112,7 @@ impl Resolver {
             cache,
             synth,
             node_index: OnceCell::new(),
+            marks: OnceCell::new(),
             cache_only,
         })
     }
@@ -135,6 +140,18 @@ impl Resolver {
         Ok(self.node_index.get_or_init(|| idx))
     }
 
+    /// Load the mark store on first call, cache it for the rest of the
+    /// invocation. A corrupt `marks.json` surfaces as [`ResolveError::Internal`]
+    /// here (direct `mark:<key>` resolution) — unlike the read-only `find` /
+    /// `library` injection, which degrades to "no marks".
+    pub fn marks(&self) -> Result<&MarkStore, ResolveError> {
+        if let Some(m) = self.marks.get() {
+            return Ok(m);
+        }
+        let store = MarkStore::load(&self.cache).map_err(ResolveError::internal)?;
+        Ok(self.marks.get_or_init(|| store))
+    }
+
     /// Resolve an [`Id`] to a concrete target.
     ///
     /// `cfg` is consulted only when the target's file is missing from the
@@ -151,6 +168,7 @@ impl Resolver {
             Id::Node { file, node } => self.resolve_node(cfg, *file, node).await,
             Id::Comment { file, comm } => self.resolve_comment(*file, *comm),
             Id::BareNode(node_id) => self.resolve_bare(cfg, node_id).await,
+            Id::Mark(key) => self.resolve_mark(cfg, key).await,
             Id::Url(parsed) => self.resolve_url(cfg, parsed).await,
         }
     }
@@ -294,6 +312,117 @@ impl Resolver {
                 })
             }
         }
+    }
+
+    /// Resolve `mark:<key>` through the mark store.
+    ///
+    /// - Unknown key → [`ResolveError::NotCached`] listing known keys (capped).
+    /// - Multi-node mark → [`ResolveError::NotResolvableYet`] with the
+    ///   paste-ready ids so the caller can pick one; a mark that fans out to
+    ///   several nodes has no single target.
+    /// - Single-node mark → resolves exactly like the underlying node, so
+    ///   `node-info mark:k`, `screenshot mark:k`, and `--in mark:k` work with
+    ///   zero per-command changes.
+    async fn resolve_mark(
+        &self,
+        cfg: &Configuration,
+        key: &str,
+    ) -> Result<ResolvedTarget, ResolveError> {
+        let store = self.marks()?;
+        let mark = store.get(key).ok_or_else(|| {
+            let mut known: Vec<&str> = store.keys().collect();
+            known.sort_unstable();
+            let shown: Vec<&str> = known.iter().take(10).copied().collect();
+            let more = known.len().saturating_sub(shown.len());
+            let list = if shown.is_empty() {
+                "no marks yet — add one with `mark add <key> <ID>`".to_owned()
+            } else {
+                let suffix = if more > 0 {
+                    format!(", … (+{more} more; `mark list`)")
+                } else {
+                    String::new()
+                };
+                format!("known marks: {}{suffix}", shown.join(", "))
+            };
+            ResolveError::NotCached(format!("mark:{key} (unknown key; {list})"))
+        })?;
+
+        match mark.nodes.as_slice() {
+            [] => Err(ResolveError::NotCached(format!(
+                "mark:{key} has no nodes (re-add it with `mark add {key} <ID>`)"
+            ))),
+            [single] => {
+                let (file_key, node_id, stamp_name) = (
+                    single.file_key.clone(),
+                    single.node_id.clone(),
+                    single.stamp.name.clone(),
+                );
+                self.resolve_mark_node(cfg, key, &file_key, &node_id, &stamp_name)
+                    .await
+            }
+            many => {
+                let ids: Vec<String> = many
+                    .iter()
+                    .map(|mn| {
+                        self.synth
+                            .file_synth(&mn.file_key)
+                            .map(|n| format!("file:{n}:{}", mn.node_id))
+                            .unwrap_or_else(|| format!("{}:{}", mn.file_key, mn.node_id))
+                    })
+                    .collect();
+                Err(ResolveError::NotResolvableYet {
+                    id: format!("mark:{key}"),
+                    hint: format!(
+                        "mark points at {} nodes; target one directly: {}",
+                        many.len(),
+                        ids.join(", ")
+                    ),
+                })
+            }
+        }
+    }
+
+    /// Resolve a single mark node (native `file_key` + `node_id`) to a
+    /// [`ResolvedTarget::Node`]. Mirrors [`Self::resolve_url`]'s synth handling:
+    /// use the interned synth when known, otherwise cold-fetch to mint one
+    /// (or `CacheOnlyMiss` under `--cache-only`), then read the node.
+    async fn resolve_mark_node(
+        &self,
+        cfg: &Configuration,
+        mark_key: &str,
+        file_key: &str,
+        node_id: &str,
+        stamp_name: &str,
+    ) -> Result<ResolvedTarget, ResolveError> {
+        let display = format!("mark:{mark_key}");
+        let synth = match self.synth.file_synth(file_key) {
+            Some(s) => s,
+            None if self.cache_only => return Err(ResolveError::CacheOnlyMiss(display)),
+            None => {
+                let (_payload, s) =
+                    cache::load_file(cfg, &self.cache, file_key)
+                        .await
+                        .map_err(|e| {
+                            ResolveError::Internal(format!(
+                                "fetching {file_key} for {display}: {e:#}"
+                            ))
+                        })?;
+                s
+            }
+        };
+        let (meta, payload) = self.read_file_or_fetch(cfg, &display, file_key).await?;
+        let node = find_node(&payload.document, node_id).ok_or_else(|| {
+            ResolveError::NotCached(format!(
+                "mark:{mark_key} points at node {node_id} (\"{stamp_name}\") but it is no longer \
+                 in the file — the design may have moved or deleted it. Run `cache prefetch` then \
+                 `mark list` to check its status."
+            ))
+        })?;
+        Ok(ResolvedTarget::Node {
+            file_synth: synth,
+            meta,
+            node,
+        })
     }
 
     async fn resolve_url(
@@ -865,5 +994,104 @@ mod tests {
         let id: Id = "file:1:comm:99".parse().unwrap();
         let err = r.resolve(&dummy_cfg(), &id).await.unwrap_err();
         assert!(matches!(err, ResolveError::NotCached(_)), "got {err:?}");
+    }
+
+    // ── mark resolution ──────────────────────────────────────────────────
+
+    /// Seed a mark into the resolver's cache dir. Must run before the first
+    /// `mark:` resolution so the resolver's OnceCell picks it up.
+    fn seed_mark(tmp: &tempfile::TempDir, key: &str, nodes: Vec<crate::marks::MarkNode>) {
+        let cache = CacheDir::new(tmp.path());
+        crate::marks::with_lock(&cache, |store| {
+            store.upsert(crate::marks::Mark {
+                key: key.into(),
+                aliases: vec![],
+                nodes,
+                note: None,
+            });
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    fn mark_node(file_key: &str, node_id: &str, name: &str) -> crate::marks::MarkNode {
+        crate::marks::MarkNode {
+            file_key: file_key.into(),
+            node_id: node_id.into(),
+            stamp: crate::marks::Stamp {
+                name: name.into(),
+                path: vec![],
+                at_epoch: 0,
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn single_node_mark_resolves_to_the_node() {
+        let (g, r) = fixture_with_two_files();
+        seed_mark(&g, "hdr", vec![mark_node("file-a", "1:2", "Header")]);
+        let id: Id = "mark:hdr".parse().unwrap();
+        match r.resolve(&dummy_cfg(), &id).await.unwrap() {
+            ResolvedTarget::Node {
+                file_synth, node, ..
+            } => {
+                assert_eq!(file_synth, 1, "file-a's synth");
+                assert_eq!(node.id, "1:2");
+                assert_eq!(node.name, "Header");
+            }
+            other => panic!("expected Node, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn multi_node_mark_is_not_resolvable_yet_with_candidate_ids() {
+        let (g, r) = fixture_with_two_files();
+        seed_mark(
+            &g,
+            "both",
+            vec![
+                mark_node("file-a", "1:2", "Header"),
+                mark_node("file-b", "9:9", "Banner"),
+            ],
+        );
+        let id: Id = "mark:both".parse().unwrap();
+        match r.resolve(&dummy_cfg(), &id).await.unwrap_err() {
+            ResolveError::NotResolvableYet { id, hint } => {
+                assert_eq!(id, "mark:both");
+                // Both nodes' paste-ready synth ids appear in the hint.
+                assert!(hint.contains("file:1:1:2"), "hint: {hint}");
+                assert!(hint.contains("file:2:9:9"), "hint: {hint}");
+            }
+            other => panic!("expected NotResolvableYet, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_mark_key_lists_known_keys() {
+        let (g, r) = fixture_with_two_files();
+        seed_mark(&g, "alpha", vec![mark_node("file-a", "1:2", "Header")]);
+        let id: Id = "mark:nope".parse().unwrap();
+        match r.resolve(&dummy_cfg(), &id).await.unwrap_err() {
+            ResolveError::NotCached(msg) => {
+                assert!(msg.contains("unknown key"), "msg: {msg}");
+                assert!(msg.contains("alpha"), "lists known keys: {msg}");
+            }
+            other => panic!("expected NotCached, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn mark_pointing_at_deleted_node_gives_useful_error() {
+        let (g, r) = fixture_with_two_files();
+        // Node 7:7 doesn't exist in file-a.
+        seed_mark(&g, "ghost", vec![mark_node("file-a", "7:7", "Was Here")]);
+        let id: Id = "mark:ghost".parse().unwrap();
+        match r.resolve(&dummy_cfg(), &id).await.unwrap_err() {
+            ResolveError::NotCached(msg) => {
+                assert!(msg.contains("7:7"), "names the node id: {msg}");
+                assert!(msg.contains("Was Here"), "names the stamped name: {msg}");
+            }
+            other => panic!("expected NotCached, got {other:?}"),
+        }
     }
 }

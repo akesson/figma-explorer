@@ -17,6 +17,7 @@ use serde_json::{json, Value};
 
 use crate::cache::{CacheDir, EntryStatus};
 use crate::comment_assoc::AssociatedComment;
+use crate::marks::{self, MarkStore};
 use crate::node_search::{multi_token_search, SearchHit};
 use crate::resolver::{parse_id, render_resolve_error, ResolvedTarget, Resolver};
 use crate::tree::{truncate_display, NAME_DISPLAY_MAX};
@@ -77,6 +78,9 @@ impl Args {
         // when `--in` scoped the search. Surfaced in the output so users see
         // that no-`--in` means cross-file, not "current file".
         let mut searched_files: Option<usize> = None;
+        // When `--in` scopes to one file, remember its key so mark injection
+        // below can be limited to marks that reference the same file.
+        let mut scope_file_key: Option<String> = None;
         // (file_synth, file_key) of every file searched — drives the
         // comment-mention hint (a query that misses layer names often hits the
         // designers' discussion, which is written in user vocabulary).
@@ -95,6 +99,7 @@ impl Args {
                         meta,
                         document,
                     } => {
+                        scope_file_key = resolver.synth().file_key(synth).map(|s| s.to_owned());
                         searched_targets.push((synth, meta.file_key.clone()));
                         let hits = multi_token_search(
                             &document.document,
@@ -111,6 +116,8 @@ impl Args {
                         meta,
                         node,
                     } => {
+                        scope_file_key =
+                            resolver.synth().file_key(file_synth).map(|s| s.to_owned());
                         searched_targets.push((file_synth, meta.file_key.clone()));
                         let hits = multi_token_search(&node, &tokens, type_filter, usize::MAX);
                         for h in hits {
@@ -170,6 +177,17 @@ impl Args {
         let total_matches = all_hits.len();
         all_hits.truncate(self.limit);
 
+        // Fold in matching marks — a marked entity should always lead, even
+        // when the ordinary search finds nothing (that's the payoff case).
+        // Read-only and non-fatal: a corrupt store degrades to no marks.
+        let mark_store = MarkStore::load_lenient(resolver.cache());
+        let mut mark_views =
+            marks::search_marks(&mark_store, &joined, resolver.cache(), resolver.synth());
+        if let Some(fk) = &scope_file_key {
+            mark_views.retain(|v| v.nodes.iter().any(|n| &n.file_key == fk));
+        }
+        let mark_block = marks::render_mark_rows(&mark_views);
+
         // Comment-mention hint: which of the searched files discuss the query
         // in their comment threads. A name-search miss ("tooltip") often lands
         // in the designers' discussion, which is written in user vocabulary.
@@ -193,6 +211,8 @@ impl Args {
                         total_matches
                     );
                 }
+                // Marks lead, ahead of everything else.
+                print!("{mark_block}");
                 // Mention hint sits with the headers — most valuable exactly
                 // when there are zero node hits (the query missed layer names).
                 for (file_synth, threads) in &mentions {
@@ -283,6 +303,7 @@ impl Args {
                         "total_matches": total_matches,
                         "shown": all_hits.len(),
                         "truncated": truncated,
+                        "marks": marks::marks_json(&mark_views),
                         "hits": hits,
                         "comment_mentions": comment_mentions_json,
                     }),

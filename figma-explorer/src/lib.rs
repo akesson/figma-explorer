@@ -15,6 +15,7 @@ pub mod file_summary;
 pub mod full_cache;
 pub mod geometry;
 pub mod id;
+pub mod marks;
 pub mod node;
 pub mod node_index;
 pub mod node_search;

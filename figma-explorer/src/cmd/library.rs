@@ -19,6 +19,7 @@ use nucleo_matcher::{
 use serde_json::{json, Value};
 
 use crate::cache::{self, CacheDir};
+use crate::marks::{self, MarkStore, ScoredMarkView};
 use crate::synth::SynthState;
 use crate::team_catalog::{self, CatalogEntry, EntryKind, TeamCatalog};
 use crate::tree::{truncate_display, NAME_DISPLAY_MAX};
@@ -121,6 +122,11 @@ impl SearchArgs {
         };
         hits.truncate(cap);
 
+        // Fold in matching marks ahead of catalog hits — same payoff as `find`,
+        // but spanning the whole mark table (library search has no scope).
+        let mark_store = MarkStore::load_lenient(&cache_dir);
+        let mark_views = marks::search_marks(&mark_store, needle, &cache_dir, &synth);
+
         let outcome = SearchOutcome {
             no_strong_match,
             self_score,
@@ -133,6 +139,7 @@ impl SearchArgs {
             &outcome,
             needle,
             &synth,
+            &mark_views,
             format,
         )
     }
@@ -342,6 +349,7 @@ fn render(
     outcome: &SearchOutcome,
     needle: &str,
     synth: &SynthState,
+    mark_views: &[ScoredMarkView],
     format: Output,
 ) -> Result<()> {
     let age = cache::now_epoch().saturating_sub(catalog.fetched_at_epoch);
@@ -356,6 +364,8 @@ fn render(
                 catalog.styles.len(),
                 human_age(age),
             );
+            // Marks lead, ahead of catalog hits.
+            print!("{}", marks::render_mark_rows(mark_views));
             if outcome.no_strong_match {
                 // Every match was weak — lead with an honest miss, then show a
                 // few closest leads (labeled `(weak)` in the rows below).
@@ -468,6 +478,7 @@ fn render(
                     "truncated": truncated,
                     "no_strong_match": outcome.no_strong_match,
                     "self_score": outcome.self_score,
+                    "marks": marks::marks_json(mark_views),
                     "hits": hit_values,
                 }),
                 format,

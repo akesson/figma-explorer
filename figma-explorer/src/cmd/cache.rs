@@ -704,4 +704,25 @@ mod tests {
         assert!(cache.files_dir().exists());
         assert!(cache.teams_dir().exists());
     }
+
+    #[test]
+    fn clear_all_sidecars_preserves_root_state_files() {
+        // `synth.json` and `marks.json` live in the cache root, not under
+        // `files/`/`teams/`, so a clear must leave them intact — otherwise
+        // stable synth ids and curated marks would evaporate on every clear.
+        let td = TempDir::new().unwrap();
+        let cache = CacheDir::new(td.path());
+        cache.ensure().unwrap();
+        std::fs::write(cache.file_path("abc"), b"payload").unwrap();
+        let synth_json = cache.root.join("synth.json");
+        let marks_json = cache.root.join("marks.json");
+        std::fs::write(&synth_json, br#"{"version":1,"projects":{},"files":{}}"#).unwrap();
+        std::fs::write(&marks_json, br#"{"version":1,"marks":[]}"#).unwrap();
+
+        clear_all_sidecars(&cache).unwrap();
+
+        assert!(!cache.file_path("abc").exists(), "file payload swept");
+        assert!(synth_json.exists(), "synth.json preserved across clear");
+        assert!(marks_json.exists(), "marks.json preserved across clear");
+    }
 }
