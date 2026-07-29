@@ -20,18 +20,25 @@ use crate::comment_assoc::AssociatedComment;
 use crate::marks::{self, MarkStore};
 use crate::node_search::{multi_token_search, SearchHit};
 use crate::resolver::{parse_id, render_resolve_error, ResolvedTarget, Resolver};
+use crate::search_query::Query;
 use crate::tree::{truncate_display, NAME_DISPLAY_MAX};
 use crate::{print, Globals, Output};
 
-/// Locate nodes by a multi-token ancestor-chain query. Each whitespace
-/// token must fuzzy-match some ancestor name on the root→node path; leaf
-/// hits rank highest. Top `--limit` hits returned. Searches EVERY cached
-/// file by default; pass the global `--in file:N` (or `file:N:x:y`) to
-/// scope to one file or subtree.
+/// Locate nodes by a multi-token ancestor-chain query. Each term must match
+/// some ancestor name (or visible text) on the root→node path; leaf hits
+/// rank highest. Top `--limit` hits returned. Searches EVERY cached file by
+/// default; pass the global `--in file:N` (or `file:N:x:y`) to scope to one
+/// file or subtree.
+///
+/// Query syntax (web-search style): bare words fuzzy-match with implicit
+/// AND; "quoted phrases" require the exact contiguous text — the lane for
+/// hunting rendered copy (note the shell eats outer quotes, so write
+/// find '"Approved by you"'); uppercase OR alternates adjacent terms
+/// (a b OR c = a AND (b OR c)); -term excludes chains containing it.
 #[derive(ClapArgs, Debug)]
 pub struct Args {
-    /// Query phrase (one or more words). Each whitespace-separated token must
-    /// fuzzy-match some ancestor name for a node to be a hit.
+    /// Query: bare words (fuzzy, implicit AND), "exact phrases", OR
+    /// alternation, -exclusions. E.g.: '"leave bar" wallchart -mobile'.
     #[arg(required = true, num_args = 1..)]
     pub query: Vec<String>,
 
@@ -53,10 +60,10 @@ impl Args {
         let in_ = globals.scope.as_deref();
 
         let joined = self.query.join(" ");
-        let tokens: Vec<&str> = joined.split_whitespace().collect();
-        if tokens.is_empty() {
-            anyhow::bail!("query is empty");
-        }
+        let query = Query::parse(&joined).map_err(|e| anyhow!("{e}"))?;
+        // What mark search and the comment-mention hint should see: positive
+        // term texts only, operators and exclusions stripped.
+        let positive = query.positive_text();
 
         let type_refs: Vec<&str> = self.r#type.iter().map(String::as_str).collect();
         let type_filter = if type_refs.is_empty() {
@@ -101,12 +108,8 @@ impl Args {
                     } => {
                         scope_file_key = resolver.synth().file_key(synth).map(|s| s.to_owned());
                         searched_targets.push((synth, meta.file_key.clone()));
-                        let hits = multi_token_search(
-                            &document.document,
-                            &tokens,
-                            type_filter,
-                            usize::MAX,
-                        );
+                        let hits =
+                            multi_token_search(&document.document, &query, type_filter, usize::MAX);
                         for h in hits {
                             all_hits.push(scoped_from_hit(synth, &h));
                         }
@@ -119,7 +122,7 @@ impl Args {
                         scope_file_key =
                             resolver.synth().file_key(file_synth).map(|s| s.to_owned());
                         searched_targets.push((file_synth, meta.file_key.clone()));
-                        let hits = multi_token_search(&node, &tokens, type_filter, usize::MAX);
+                        let hits = multi_token_search(&node, &query, type_filter, usize::MAX);
                         for h in hits {
                             all_hits.push(scoped_from_hit(file_synth, &h));
                         }
@@ -154,7 +157,7 @@ impl Args {
                     searched += 1;
                     searched_targets.push((file_synth, m.file_key.clone()));
                     let hits =
-                        multi_token_search(&payload.document, &tokens, type_filter, usize::MAX);
+                        multi_token_search(&payload.document, &query, type_filter, usize::MAX);
                     for h in hits {
                         all_hits.push(scoped_from_hit(file_synth, &h));
                     }
@@ -182,7 +185,7 @@ impl Args {
         // Read-only and non-fatal: a corrupt store degrades to no marks.
         let mark_store = MarkStore::load_lenient(resolver.cache());
         let mut mark_views =
-            marks::search_marks(&mark_store, &joined, resolver.cache(), resolver.synth());
+            marks::search_marks(&mark_store, &positive, resolver.cache(), resolver.synth());
         if let Some(fk) = &scope_file_key {
             mark_views.retain(|v| v.nodes.iter().any(|n| &n.file_key == fk));
         }
@@ -192,8 +195,8 @@ impl Args {
         // in their comment threads. A name-search miss ("tooltip") often lands
         // in the designers' discussion, which is written in user vocabulary.
         // Sidecars are small JSON, so this is cheap even cross-file.
-        let query_lower = joined.to_lowercase();
-        let mentions = comment_mentions(resolver.cache(), &searched_targets, &query_lower);
+        let needle_lower = positive.to_lowercase();
+        let mentions = comment_mentions(resolver.cache(), &searched_targets, &needle_lower);
 
         // Render. Output format mirrors `ls` (id-first, qualified) so a
         // user can grab any line's first column and paste it into another
@@ -222,7 +225,7 @@ impl Args {
                         "comment threads"
                     };
                     println!(
-                        "# {threads} {label} mention \"{joined}\" — try: comments file:{file_synth} --grep \"{joined}\""
+                        "# {threads} {label} mention \"{positive}\" — try: comments file:{file_synth} --grep \"{positive}\""
                     );
                 }
                 if all_hits.is_empty() {
@@ -297,7 +300,16 @@ impl Args {
                 print(
                     &json!({
                         "query": joined,
-                        "tokens": tokens,
+                        "groups": query
+                            .groups
+                            .iter()
+                            .map(|g| g.alts.iter().map(|t| t.display()).collect::<Vec<_>>())
+                            .collect::<Vec<_>>(),
+                        "excludes": query
+                            .excludes
+                            .iter()
+                            .map(|t| t.display())
+                            .collect::<Vec<_>>(),
                         "scope": in_,
                         "searched_files": searched_files,
                         "total_matches": total_matches,

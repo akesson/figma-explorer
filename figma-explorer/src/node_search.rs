@@ -16,6 +16,7 @@ use serde_json::Value;
 
 use crate::cache::CacheNode;
 use crate::node::{children, id};
+use crate::search_query::{Query, Term};
 
 /// Find a node by exact node id anywhere in the tree. Node ids are stable
 /// identifiers; we don't filter on visibility here.
@@ -97,41 +98,112 @@ const CONSECUTIVE_PAIR_BONUS: f64 = 0.10;
 /// would score ~4× lower than the same word in a short name.
 const TEXT_NORM_CAP: f64 = 64.0;
 
-/// Search for nodes whose ancestor chain matches every token in `tokens`.
+/// Raw score per phrase character on an exact substring hit, before lane
+/// normalization. nucleo's per-char base is 16 plus bonuses; 20 keeps an
+/// exact contiguous phrase slightly ahead of a same-length fuzzy match —
+/// a phrase is stronger evidence than scattered subsequence chars.
+const PHRASE_CHAR_SCORE: f64 = 20.0;
+
+/// A query term compiled for the walk: fuzzy terms carry a nucleo pattern,
+/// phrases a pre-lowercased needle. `display` feeds `TokenMatch::token`.
+enum CompiledTerm {
+    Fuzzy {
+        pattern: Pattern,
+        display: String,
+    },
+    Phrase {
+        needle_lower: String,
+        chars: usize,
+        display: String,
+    },
+}
+
+fn compile_term(t: &Term) -> CompiledTerm {
+    match t {
+        Term::Fuzzy(s) => CompiledTerm::Fuzzy {
+            pattern: Pattern::parse(s, CaseMatching::Ignore, Normalization::Smart),
+            display: t.display(),
+        },
+        Term::Phrase(s) => CompiledTerm::Phrase {
+            needle_lower: s.to_lowercase(),
+            chars: s.chars().count(),
+            display: t.display(),
+        },
+    }
+}
+
+/// Raw (un-normalized) score of one term against one haystack. Fuzzy terms
+/// use nucleo; phrases require a contiguous case-insensitive substring.
+fn raw_term_score(
+    term: &CompiledTerm,
+    haystack: &str,
+    matcher: &mut Matcher,
+    buf: &mut Vec<char>,
+) -> Option<f64> {
+    match term {
+        CompiledTerm::Fuzzy { pattern, .. } => {
+            buf.clear();
+            pattern
+                .score(nucleo_matcher::Utf32Str::new(haystack, buf), matcher)
+                .map(|s| s as f64)
+        }
+        CompiledTerm::Phrase {
+            needle_lower,
+            chars,
+            ..
+        } => haystack
+            .to_lowercase()
+            .contains(needle_lower.as_str())
+            .then_some(PHRASE_CHAR_SCORE * *chars as f64),
+    }
+}
+
+/// Search for nodes whose ancestor chain satisfies every group of `query`.
 /// Returns up to `limit` hits ranked by aggregate score.
 ///
 /// Algorithm:
 /// 1. DFS through visible nodes, maintaining the root→node path.
-/// 2. For each candidate, every token must fuzzy-match (nucleo) the name of
-///    some ancestor in the path, and each token must be assigned to a
-///    **different** ancestor (otherwise one verbose name can satisfy every
-///    token on its own — the failure mode that motivated this rewrite).
-/// 3. Length-normalize each per-(token, ancestor) score by dividing the raw
-///    nucleo score by `sqrt(name_chars)` so a 130-char prose name doesn't
-///    tie a 9-char semantic name on the same query word.
-/// 4. Pick the best legal assignment (distinct path index per token) that
+/// 2. Nodes with any `query.excludes` term matching anywhere on the chain
+///    (name or text, case-insensitive substring) are dropped outright.
+/// 3. For each candidate, every AND-group must match the name or visible
+///    text of some ancestor in the path (a group matches through its best
+///    OR-alternative), and each group must be assigned to a **different**
+///    ancestor (otherwise one verbose name can satisfy every group on its
+///    own — the failure mode that motivated this design).
+/// 4. Length-normalize each per-(group, ancestor) score by dividing the raw
+///    score by `sqrt(name_chars)` so a 130-char prose name doesn't tie a
+///    9-char semantic name on the same query word. Fuzzy terms score via
+///    nucleo; quoted phrases require a contiguous substring and score
+///    `PHRASE_CHAR_SCORE`/char, ranking exact copy hits above fuzzy ones.
+/// 5. Pick the best legal assignment (distinct path index per group) that
 ///    maximizes the weighted sum, with `LEAF_WEIGHT_DECAY` per step away
-///    from the leaf and `CONSECUTIVE_PAIR_BONUS` for adjacent-token pairs
+///    from the leaf and `CONSECUTIVE_PAIR_BONUS` for adjacent-group pairs
 ///    that landed on adjacent path indices in query order.
-/// 5. If no legal assignment exists (any token unmatched, or `tokens.len() >
-///    path.len()`), drop the node.
-/// 6. Apply `type_filter` post-walk: if set, drop candidates whose `type_`
+/// 6. If no legal assignment exists (any group unmatched, or more groups
+///    than ancestors), drop the node.
+/// 7. Apply `type_filter` post-walk: if set, drop candidates whose `type_`
 ///    isn't in the filter (case-insensitive).
-/// 7. Sort by score descending, take top `limit`.
+/// 8. Sort by score descending, take top `limit`.
 pub fn multi_token_search<'a>(
     root: &'a CacheNode,
-    tokens: &[&str],
+    query: &Query,
     type_filter: Option<&[&str]>,
     limit: usize,
 ) -> Vec<SearchHit<'a>> {
-    if tokens.is_empty() {
+    if query.groups.is_empty() {
         return Vec::new();
     }
 
     let mut matcher = Matcher::new(nucleo_matcher::Config::DEFAULT);
-    let patterns: Vec<Pattern> = tokens
+    let compiled: Vec<Vec<CompiledTerm>> = query
+        .groups
         .iter()
-        .map(|t| Pattern::parse(t, CaseMatching::Ignore, Normalization::Smart))
+        .map(|g| g.alts.iter().map(compile_term).collect())
+        .collect();
+    let excludes_lower: Vec<String> = query
+        .excludes
+        .iter()
+        .map(|t| t.text().to_lowercase())
         .collect();
 
     let type_filter_lower: Option<Vec<String>> =
@@ -150,62 +222,82 @@ pub fn multi_token_search<'a>(
                 return;
             }
         }
-        // Distinct-ancestor constraint is infeasible if there are more tokens
+        // Distinct-ancestor constraint is infeasible if there are more groups
         // than ancestors. The assignment bitmask is also a u64, so cap depth.
-        if tokens.len() > path.len() || path.len() > 64 {
+        if compiled.len() > path.len() || path.len() > 64 {
+            return;
+        }
+        // Exclusion: any `-term` matching anywhere on the chain kills the
+        // node. Substring semantics (not fuzzy) so exclusion stays predictable.
+        if !excludes_lower.is_empty()
+            && path.iter().any(|a| {
+                excludes_lower.iter().any(|ex| {
+                    a.name.to_lowercase().contains(ex)
+                        || a.characters
+                            .as_deref()
+                            .is_some_and(|c| c.to_lowercase().contains(ex))
+                })
+            })
+        {
             return;
         }
 
-        // Build candidates[t] = every (path_index, normalized_score,
-        // ancestor_name) where token t fuzzy-matches the ancestor. The
-        // assignment search below then picks one entry per token, no path
-        // index reused.
-        let mut candidates: Vec<Vec<TokenCandidate>> = Vec::with_capacity(tokens.len());
+        // Build candidates[g] = every (path_index, normalized_score,
+        // ancestor_name) where group g matches the ancestor via its best
+        // OR-alternative. The assignment search below then picks one entry
+        // per group, no path index reused.
+        let mut candidates: Vec<Vec<TokenCandidate>> = Vec::with_capacity(compiled.len());
         let mut buf: Vec<char> = Vec::new();
-        for pattern in &patterns {
+        for group in &compiled {
             let mut cands: Vec<TokenCandidate> = Vec::new();
             for (pi, ancestor) in path.iter().enumerate() {
-                // Name lane: nucleo score ÷ sqrt(name_chars). Empty names score
-                // nothing (nucleo returns None on an empty haystack anyway).
-                let name_score = if ancestor.name.is_empty() {
-                    None
-                } else {
-                    buf.clear();
-                    pattern
-                        .score(
-                            nucleo_matcher::Utf32Str::new(&ancestor.name, &mut buf),
-                            &mut matcher,
-                        )
-                        .map(|s| {
-                            (s as f64) / (ancestor.name.chars().count() as f64).max(1.0).sqrt()
-                        })
-                };
-                // Text lane: same, over the node's visible copy, normalized by a
-                // capped length so a word in a paragraph isn't over-penalized.
-                let text_score = ancestor.characters.as_deref().and_then(|chars| {
-                    buf.clear();
-                    pattern
-                        .score(nucleo_matcher::Utf32Str::new(chars, &mut buf), &mut matcher)
-                        .map(|s| {
+                // Best alternative for this (group, ancestor) pair.
+                let mut best: Option<TokenCandidate> = None;
+                for term in group {
+                    // Name lane: raw score ÷ sqrt(name_chars). Empty names
+                    // score nothing.
+                    let name_score = if ancestor.name.is_empty() {
+                        None
+                    } else {
+                        raw_term_score(term, &ancestor.name, &mut matcher, &mut buf)
+                            .map(|s| s / (ancestor.name.chars().count() as f64).max(1.0).sqrt())
+                    };
+                    // Text lane: same, over the node's visible copy, normalized
+                    // by a capped length so a word in a paragraph isn't
+                    // over-penalized.
+                    let text_score = ancestor.characters.as_deref().and_then(|chars| {
+                        raw_term_score(term, chars, &mut matcher, &mut buf).map(|s| {
                             let norm_len = (chars.chars().count() as f64).clamp(1.0, TEXT_NORM_CAP);
-                            (s as f64) / norm_len.sqrt()
+                            s / norm_len.sqrt()
                         })
-                });
-                // Take the better lane; the name lane wins ties (Figma
-                // auto-names TEXT nodes with their content, so exact ties are
-                // common and a redundant `text:"…"` snippet adds nothing).
-                let (normalized, matched_characters) = match (name_score, text_score) {
-                    (Some(n), Some(t)) if t > n => (t, ancestor.characters.clone()),
-                    (Some(n), _) => (n, None),
-                    (None, Some(t)) => (t, ancestor.characters.clone()),
-                    (None, None) => continue,
-                };
-                cands.push(TokenCandidate {
-                    path_index: pi,
-                    normalized,
-                    ancestor_name: ancestor.name.clone(),
-                    matched_characters,
-                });
+                    });
+                    // Take the better lane; the name lane wins ties (Figma
+                    // auto-names TEXT nodes with their content, so exact ties
+                    // are common and a redundant `text:"…"` snippet adds
+                    // nothing).
+                    let (normalized, matched_characters) = match (name_score, text_score) {
+                        (Some(n), Some(t)) if t > n => (t, ancestor.characters.clone()),
+                        (Some(n), _) => (n, None),
+                        (None, Some(t)) => (t, ancestor.characters.clone()),
+                        (None, None) => continue,
+                    };
+                    if best.as_ref().is_none_or(|b| normalized > b.normalized) {
+                        let display = match term {
+                            CompiledTerm::Fuzzy { display, .. }
+                            | CompiledTerm::Phrase { display, .. } => display.clone(),
+                        };
+                        best = Some(TokenCandidate {
+                            path_index: pi,
+                            normalized,
+                            ancestor_name: ancestor.name.clone(),
+                            matched_characters,
+                            term_display: display,
+                        });
+                    }
+                }
+                if let Some(b) = best {
+                    cands.push(b);
+                }
             }
             if cands.is_empty() {
                 return;
@@ -220,9 +312,8 @@ pub fn multi_token_search<'a>(
 
         let matches_out: Vec<TokenMatch> = assignment
             .iter()
-            .enumerate()
-            .map(|(i, c)| TokenMatch {
-                token: tokens[i].to_string(),
+            .map(|c| TokenMatch {
+                token: c.term_display.clone(),
                 path_index: c.path_index,
                 matched_name: c.ancestor_name.clone(),
                 token_score: c.normalized,
@@ -247,8 +338,8 @@ pub fn multi_token_search<'a>(
     hits
 }
 
-/// One candidate ancestor for a token: the path index, the length-normalized
-/// nucleo score, and the ancestor's name (kept for `TokenMatch` attribution).
+/// One candidate ancestor for a group: the path index, the length-normalized
+/// score, and the ancestor's name (kept for `TokenMatch` attribution).
 #[derive(Clone, Debug)]
 struct TokenCandidate {
     path_index: usize,
@@ -257,6 +348,8 @@ struct TokenCandidate {
     /// The node's `characters`, present only when the text lane beat the name
     /// lane for this candidate. Threaded into `TokenMatch::matched_characters`.
     matched_characters: Option<String>,
+    /// Display form of the winning OR-alternative (phrases keep their quotes).
+    term_display: String,
 }
 
 /// Find the best assignment of tokens to distinct path indices that
@@ -358,6 +451,11 @@ where
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Parse a query string for tests — all plain-token unless stated.
+    fn q(s: &str) -> Query {
+        Query::parse(s).unwrap()
+    }
 
     fn doc() -> Value {
         json!({
@@ -469,7 +567,7 @@ mod tests {
     #[test]
     fn multi_token_chain_match_locates_leaf_under_full_chain() {
         let d = wallchart_doc();
-        let hits = multi_token_search(&d, &["wallchart", "grid", "filter", "button"], None, 5);
+        let hits = multi_token_search(&d, &q("wallchart grid filter button"), None, 5);
         assert!(!hits.is_empty(), "expected at least one hit");
         // The top hit must be the button INSIDE Filter (1:4), not the
         // sibling distractors at 1:6 or 2:2.
@@ -481,7 +579,7 @@ mod tests {
         let d = wallchart_doc();
         // "filter" doesn't exist on the Sidebar branch — the Sidebar Button
         // (2:2) must NOT appear in the hits.
-        let hits = multi_token_search(&d, &["wallchart", "filter", "button"], None, 10);
+        let hits = multi_token_search(&d, &q("wallchart filter button"), None, 10);
         for h in &hits {
             assert_ne!(
                 h.node.id, "2:2",
@@ -497,7 +595,7 @@ mod tests {
         // ancestor-only-Button on 1:6 (sibling of Filter, name "Button").
         // The chain query "wallchart grid filter button" should prefer 1:4
         // because the leaf token "button" lines up with the leaf node.
-        let hits = multi_token_search(&d, &["wallchart", "grid", "filter", "button"], None, 5);
+        let hits = multi_token_search(&d, &q("wallchart grid filter button"), None, 5);
         let pos_14 = hits.iter().position(|h| h.node.id == "1:4");
         let pos_16 = hits.iter().position(|h| h.node.id == "1:6");
         match (pos_14, pos_16) {
@@ -512,7 +610,7 @@ mod tests {
         let d = wallchart_doc();
         // With type=TEXT, only the TEXT leaf under Filter ("Label", id 1:5)
         // can match, and only if all tokens still hit on its chain.
-        let hits = multi_token_search(&d, &["wallchart", "grid", "filter"], Some(&["TEXT"]), 10);
+        let hits = multi_token_search(&d, &q("wallchart grid filter"), Some(&["TEXT"]), 10);
         assert!(!hits.is_empty());
         assert!(hits.iter().all(|h| h.node.type_ == "TEXT"));
         assert!(hits.iter().any(|h| h.node.id == "1:5"));
@@ -520,8 +618,14 @@ mod tests {
 
     #[test]
     fn multi_token_empty_query_returns_empty() {
+        // `Query::parse` refuses an empty query, so build the degenerate
+        // value directly — the search must still handle it gracefully.
         let d = wallchart_doc();
-        let hits = multi_token_search(&d, &[], None, 10);
+        let empty = Query {
+            groups: vec![],
+            excludes: vec![],
+        };
+        let hits = multi_token_search(&d, &empty, None, 10);
         assert!(hits.is_empty());
     }
 
@@ -550,7 +654,7 @@ mod tests {
         // Ancestors {doc, Page} don't contain "wallchart", "filter", or
         // "widget" — those words live solely on the leaf. All three tokens
         // want the same path index, which the distinct constraint forbids.
-        let hits = multi_token_search(&doc, &["wallchart", "filter", "widget"], None, 10);
+        let hits = multi_token_search(&doc, &q("wallchart filter widget"), None, 10);
         assert!(
             hits.iter().all(|h| h.node.id != "1:1"),
             "leaf 1:1 leaked despite no distinct-ancestor assignment: {:?}",
@@ -575,7 +679,7 @@ mod tests {
                 vec![cache_leaf("1:1", "Leaf", "FRAME")],
             )],
         );
-        let hits = multi_token_search(&doc, &["doc", "page", "leaf", "extra", "more"], None, 10);
+        let hits = multi_token_search(&doc, &q("doc page leaf extra more"), None, 10);
         assert!(hits.is_empty());
     }
 
@@ -606,7 +710,7 @@ mod tests {
                 ],
             )],
         );
-        let hits = multi_token_search(&doc, &["employees"], None, 5);
+        let hits = multi_token_search(&doc, &q("employees"), None, 5);
         assert!(!hits.is_empty(), "expected at least one hit");
         assert_eq!(
             hits[0].node.id,
@@ -643,7 +747,7 @@ mod tests {
                 )],
             )],
         );
-        let hits = multi_token_search(&doc, &["tooltip"], None, 5);
+        let hits = multi_token_search(&doc, &q("tooltip"), None, 5);
         assert_eq!(hits[0].node.id, "1:1", "matched via characters");
         assert!(
             hits[0]
@@ -668,7 +772,7 @@ mod tests {
                 vec![cache_text("1:1", "", "Overtime details")],
             )],
         );
-        let hits = multi_token_search(&doc, &["overtime"], None, 5);
+        let hits = multi_token_search(&doc, &q("overtime"), None, 5);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].node.id, "1:1");
     }
@@ -688,7 +792,7 @@ mod tests {
                 vec![cache_text("1:1", "Submit", "Submit")],
             )],
         );
-        let hits = multi_token_search(&doc, &["submit"], None, 5);
+        let hits = multi_token_search(&doc, &q("submit"), None, 5);
         assert_eq!(hits[0].node.id, "1:1");
         assert!(
             hits[0]
@@ -696,6 +800,97 @@ mod tests {
                 .iter()
                 .all(|m| m.matched_characters.is_none()),
             "name lane should win the tie — no text snippet"
+        );
+    }
+
+    #[test]
+    fn phrase_requires_contiguous_substring() {
+        // The July-2026 hunt: rendered copy "Approved by you on Friday…".
+        // A quoted phrase must match it, and must NOT match copy that has
+        // all the words scattered non-contiguously.
+        let doc = cache_node(
+            "0:0",
+            "doc",
+            "DOCUMENT",
+            vec![cache_node(
+                "1:0",
+                "Home",
+                "CANVAS",
+                vec![
+                    cache_text("1:1", "Label", "Approved by you on Friday 01 November 2024"),
+                    cache_text("1:2", "Label", "by the way, you were on shift Friday"),
+                ],
+            )],
+        );
+        let hits = multi_token_search(&doc, &q("\"by you on Friday\""), None, 10);
+        assert_eq!(hits.len(), 1, "only the contiguous copy matches");
+        assert_eq!(hits[0].node.id, "1:1");
+        assert!(
+            hits[0].matches[0].matched_characters.is_some(),
+            "phrase hit should carry the text snippet"
+        );
+        assert_eq!(hits[0].matches[0].token, "\"by you on Friday\"");
+    }
+
+    #[test]
+    fn phrase_outranks_fuzzy_scatter_on_same_copy() {
+        // Same words, one node exact-contiguous, one scattered. The unquoted
+        // fuzzy query matches both; the phrase's higher per-char score must
+        // rank the exact copy first even for the fuzzy-matched competitor.
+        let doc = cache_node(
+            "0:0",
+            "doc",
+            "DOCUMENT",
+            vec![cache_node(
+                "1:0",
+                "Home",
+                "CANVAS",
+                vec![
+                    cache_text("1:1", "A", "Approved by you on Friday"),
+                    cache_leaf("1:2", "Approved bar you Friday on", "FRAME"),
+                ],
+            )],
+        );
+        let hits = multi_token_search(&doc, &q("\"Approved by you\" Home"), None, 10);
+        assert!(!hits.is_empty());
+        assert_eq!(hits[0].node.id, "1:1", "exact phrase target must lead");
+    }
+
+    #[test]
+    fn or_group_matches_either_alternative() {
+        let doc = cache_node(
+            "0:0",
+            "doc",
+            "DOCUMENT",
+            vec![cache_node(
+                "1:0",
+                "Home",
+                "CANVAS",
+                vec![
+                    cache_leaf("1:1", "Approved badge", "FRAME"),
+                    cache_leaf("1:2", "Declined badge", "FRAME"),
+                    cache_leaf("1:3", "Pending badge", "FRAME"),
+                ],
+            )],
+        );
+        let hits = multi_token_search(&doc, &q("approved OR declined"), None, 10);
+        let ids: Vec<&str> = hits.iter().map(|h| h.node.id.as_str()).collect();
+        assert!(ids.contains(&"1:1"), "approved matched: {ids:?}");
+        assert!(ids.contains(&"1:2"), "declined matched: {ids:?}");
+        assert!(!ids.contains(&"1:3"), "pending must not match: {ids:?}");
+    }
+
+    #[test]
+    fn exclusion_drops_chains_containing_term() {
+        let d = wallchart_doc();
+        // "button" alone hits Filter's, Grid's sibling, and Sidebar's
+        // buttons; -sidebar must drop the Sidebar branch entirely.
+        let hits = multi_token_search(&d, &q("button -sidebar"), None, 10);
+        assert!(!hits.is_empty());
+        assert!(
+            hits.iter().all(|h| h.node.id != "2:2"),
+            "Sidebar button leaked past -sidebar: {:?}",
+            hits.iter().map(|h| &h.node.id).collect::<Vec<_>>()
         );
     }
 
@@ -719,7 +914,7 @@ mod tests {
                 ],
             )],
         );
-        let hits = multi_token_search(&doc, &["tooltip"], None, 5);
+        let hits = multi_token_search(&doc, &q("tooltip"), None, 5);
         assert_eq!(
             hits[0].node.id,
             "1:1",
