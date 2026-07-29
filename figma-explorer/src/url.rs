@@ -54,6 +54,24 @@ pub fn parse(url: &str) -> Result<ParsedUrl> {
     Ok(ParsedUrl { file_key, node_id })
 }
 
+/// Inverse of [`decode_node_id`]: render a native node id the way figma.com
+/// URLs spell it (`5:12` → `5-12`, instance separators `;` → `%3B`).
+pub fn encode_node_id(id: &str) -> String {
+    id.replace(':', "-").replace(';', "%3B")
+}
+
+/// Canonical figma.com URL for a file or a node within it. Always uses the
+/// `/design/` form — Figma redirects it to the right editor.
+pub fn figma_url(file_key: &str, node_id: Option<&str>) -> String {
+    match node_id {
+        Some(id) => format!(
+            "https://www.figma.com/design/{file_key}/?node-id={}",
+            encode_node_id(id)
+        ),
+        None => format!("https://www.figma.com/design/{file_key}/"),
+    }
+}
+
 fn decode_node_id(raw: &str) -> String {
     // The URL encodes the colon as `-` (e.g. 5-12 → 5:12). Some links also
     // percent-encode the colon as %3A — handle both. Instance ids separate
@@ -105,5 +123,17 @@ mod tests {
     #[test]
     fn rejects_non_figma_url() {
         assert!(parse("https://example.com/design/abc").is_err());
+    }
+
+    #[test]
+    fn figma_url_round_trips_through_parse() {
+        for node in ["5:12", "I880:3606;2816:36646"] {
+            let url = figma_url("AbCdEf123", Some(node));
+            let p = parse(&url).unwrap();
+            assert_eq!(p.file_key, "AbCdEf123");
+            assert_eq!(p.node_id.as_deref(), Some(node));
+        }
+        let p = parse(&figma_url("AbCdEf123", None)).unwrap();
+        assert_eq!(p.node_id, None);
     }
 }

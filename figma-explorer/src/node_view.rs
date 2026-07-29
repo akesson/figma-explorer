@@ -37,6 +37,7 @@ use crate::node::rgba_to_hex;
 ///   the top-level `variables` block (variables referenced by kept paint
 ///   sections are still hoisted regardless — see `Collector`)
 /// - `Comments` → the anchored-comments block (`node-info`-level)
+/// - `Pages` → the page list; file targets only (rejected on node targets)
 ///
 /// Identity (id/type/name + modifier flags) is always emitted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, clap::ValueEnum)]
@@ -54,6 +55,7 @@ pub enum Section {
     Styles,
     Variables,
     Comments,
+    Pages,
 }
 
 /// Output-shaping knobs for the curated node view.
