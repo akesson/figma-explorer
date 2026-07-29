@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Web-search query syntax for `find`** — the syntax every agent already
+  knows from Google/GitHub: bare words stay fuzzy tokens with implicit AND
+  (unchanged); `"quoted phrases"` require the exact contiguous text
+  (case-insensitive) — the lane for hunting rendered copy like
+  `find '"Approved by you"'`; uppercase `OR` alternates adjacent terms
+  (`a b OR c` = a AND (b OR c)); `-term` / `-"phrase"` exclude any chain
+  containing them; uppercase `AND` is accepted as a no-op. Lowercase
+  `or`/`and` remain ordinary tokens, and mid-word hyphens (`night-shift`)
+  stay literal. Exact-phrase hits score above same-length fuzzy matches, so
+  copy searches rank the real thing first. Note the shell eats outer
+  quotes: write `find '"exact phrase" context'`.
+
 - `cache status` — offline report of what the cache holds: per-file rows
   (synth id, name, key, project, payload age, node count) with sidecar
   presence/age for full/comments/variables, plus totals, team-catalog state,

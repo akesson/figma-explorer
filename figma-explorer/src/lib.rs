@@ -22,6 +22,7 @@ pub mod node_search;
 pub mod node_view;
 pub mod resolver;
 pub mod screenshot;
+pub mod search_query;
 pub mod styles;
 pub mod synth;
 pub mod team_catalog;
