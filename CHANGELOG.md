@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `cache status` — offline report of what the cache holds: per-file rows
+  (synth id, name, key, project, payload age, node count) with sidecar
+  presence/age for full/comments/variables, plus totals, team-catalog state,
+  and mark count. Ends agents introspecting the cache directory by hand (and
+  getting it wrong).
+- `node-info` now emits a ready-made figma.com `url:` — on the `target` block
+  for node targets (deep link with `node-id=`) and on every `file` block —
+  so reports can link straight into Figma without hand-assembling URLs from
+  the raw `key`.
+- `--only` now works on **file** targets too: `meta` (just the counts),
+  `pages`, `component`, `styles`, `variables`, `comments` filter the file
+  summary. Node-only sections on a file target (and the new `pages` section
+  on a node target) are rejected with a hint instead of silently emitting
+  nothing.
+
 - **Marks** — a curated keyword→node database (`mark add`/`rm`/`list`, and a new
   `mark:<key>` id). Once you've positively identified a node, `mark add <key>
   <ID> [--alias …] [--note …]` writes the mapping down so the expensive

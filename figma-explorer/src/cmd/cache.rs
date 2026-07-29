@@ -7,7 +7,7 @@ use anyhow::Result;
 use clap::{Args as ClapArgs, Subcommand};
 use figma_api::apis::configuration::Configuration;
 use futures::stream::{self, StreamExt};
-use serde_json::json;
+use serde_json::{json, Value};
 
 use crate::cache::{
     self, build_cached_file, default_dir, fetch_comments_into_meta, CacheDir, EntryStatus,
@@ -46,6 +46,10 @@ pub enum CacheCommand {
     /// Delete cached entries. Without --file-key, clears all cached files
     /// and team catalogs (synth IDs are preserved).
     Clear(ClearArgs),
+    /// Report what the cache holds: per-file payload age and sidecar
+    /// presence (full/comments/variables), team catalogs, marks. Offline —
+    /// never touches the network.
+    Status(StatusArgs),
 }
 
 #[derive(ClapArgs, Debug)]
@@ -101,12 +105,16 @@ pub struct ClearArgs {
     pub file_key: Option<String>,
 }
 
+#[derive(ClapArgs, Debug)]
+pub struct StatusArgs {}
+
 impl Args {
     pub async fn run(self, cfg: &Configuration, globals: &Globals) -> Result<()> {
         let format = globals.output;
         match self.command {
             CacheCommand::Prefetch(a) => a.run(cfg, format).await,
             CacheCommand::Clear(a) => a.run(format),
+            CacheCommand::Status(a) => a.run(format),
         }
     }
 }
@@ -595,6 +603,155 @@ impl ClearArgs {
     }
 }
 
+impl StatusArgs {
+    pub fn run(self, format: Output) -> Result<()> {
+        let cache_dir = CacheDir::new(default_dir());
+        let now = cache::now_epoch();
+        let synth_state = crate::synth::SynthState::load(&cache_dir)?;
+        let metas = cache_dir.list_metas()?;
+
+        // Per-file rows, ordered by synth id (unassigned sink to the end).
+        let mut keyed: Vec<(u32, Value)> = metas
+            .iter()
+            .map(|m| {
+                let synth = synth_state.file_synth(&m.file_key);
+                let status = match m.status {
+                    EntryStatus::Ok => "ok",
+                    EntryStatus::NotExportable => "not_exportable",
+                    EntryStatus::Failed => "failed",
+                };
+                // Sidecar presence is meta ∧ on-disk: a meta claiming a
+                // sidecar that was deleted out-of-band must not report it.
+                let full_age = m
+                    .full_fetched_at_epoch
+                    .filter(|_| cache_dir.full_path(&m.file_key).exists())
+                    .map(|t| age(now, t));
+                let variables_age = m
+                    .variables_fetched_at_epoch
+                    .filter(|_| cache_dir.variables_path(&m.file_key).exists())
+                    .map(|t| age(now, t));
+                let comments_age = m.comments_fetched_at_epoch.map(|t| age(now, t));
+                let mut row = serde_json::Map::new();
+                row.insert(
+                    "id".into(),
+                    match synth {
+                        Some(s) => json!(format!("file:{s}")),
+                        None => Value::Null,
+                    },
+                );
+                row.insert("name".into(), json!(m.name));
+                row.insert("key".into(), json!(m.file_key));
+                row.insert("project".into(), json!(m.project_name));
+                row.insert("status".into(), json!(status));
+                row.insert("fetched".into(), json!(age(now, m.cached_at_epoch)));
+                if let Some(n) = m.node_count {
+                    row.insert("nodes".into(), json!(n));
+                }
+                row.insert(
+                    "sidecars".into(),
+                    json!({
+                        "full": full_age,
+                        "comments": comments_age,
+                        "variables": variables_age,
+                    }),
+                );
+                if let Some(e) = &m.error {
+                    row.insert("error".into(), json!(e));
+                }
+                if let Some(e) = &m.variables_error {
+                    let short = if e.contains("403") {
+                        "no Variables REST API access (403)"
+                    } else {
+                        e.as_str()
+                    };
+                    row.insert("variables_error".into(), json!(short));
+                }
+                (synth.unwrap_or(u32::MAX), Value::Object(row))
+            })
+            .collect();
+        keyed.sort_by_key(|(s, _)| *s);
+        let files: Vec<Value> = keyed.into_iter().map(|(_, v)| v).collect();
+
+        let count = |f: &dyn Fn(&FileMeta) -> bool| metas.iter().filter(|m| f(m)).count();
+        let disk_bytes: u64 = metas
+            .iter()
+            .flat_map(|m| [m.bytes, m.full_bytes, m.variables_bytes])
+            .flatten()
+            .sum();
+        let totals = json!({
+            "files": metas.len(),
+            "ok": count(&|m| m.status == EntryStatus::Ok),
+            "failed": count(&|m| m.status == EntryStatus::Failed),
+            "not_exportable": count(&|m| m.status == EntryStatus::NotExportable),
+            "with_full": count(&|m| m.full_fetched_at_epoch.is_some()
+                && cache_dir.full_path(&m.file_key).exists()),
+            "with_comments": count(&|m| m.comments_fetched_at_epoch.is_some()),
+            "with_variables": count(&|m| m.variables_fetched_at_epoch.is_some()
+                && cache_dir.variables_path(&m.file_key).exists()),
+            "disk_mb": disk_bytes / (1024 * 1024),
+        });
+
+        let team_catalogs = list_team_catalogs(&cache_dir, now);
+        let marks = crate::marks::MarkStore::load_lenient(&cache_dir)
+            .marks
+            .len();
+
+        let summary = json!({
+            "cache_dir": cache_dir.root.display().to_string(),
+            "totals": totals,
+            "files": files,
+            "team_catalogs": team_catalogs,
+            "marks": marks,
+        });
+        print(&summary, format)
+    }
+}
+
+/// Enumerate `teams/*.catalog.json.gz` and describe each catalog. Tolerant:
+/// an unreadable sidecar becomes an `error` row rather than failing status.
+fn list_team_catalogs(cache_dir: &CacheDir, now: u64) -> Vec<Value> {
+    const SUFFIX: &str = ".catalog.json.gz";
+    let dir = cache_dir.teams_dir();
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(team_id) = name.strip_suffix(SUFFIX) else {
+            continue;
+        };
+        match team_catalog::read_catalog(cache_dir, team_id) {
+            Ok(Some(c)) => out.push(json!({
+                "team_id": c.team_id,
+                "components": c.components.len(),
+                "component_sets": c.component_sets.len(),
+                "styles": c.styles.len(),
+                "fetched": age(now, c.fetched_at_epoch),
+                "stale": team_catalog::is_stale(c.fetched_at_epoch, now, cache::CATALOG_TTL_SECS),
+            })),
+            Ok(None) => out.push(json!({
+                "team_id": team_id,
+                "error": "unreadable or outdated schema — will refetch on next `library search`",
+            })),
+            Err(e) => out.push(json!({ "team_id": team_id, "error": format!("{e:#}") })),
+        }
+    }
+    out
+}
+
+/// Compact "how long ago" for status rows: `42s`, `17m`, `5h`, `3d`.
+/// Clock-skew safe — a timestamp in the future reads as `0s`.
+fn age(now: u64, then: u64) -> String {
+    let secs = now.saturating_sub(then);
+    match secs {
+        0..=59 => format!("{secs}s"),
+        60..=3599 => format!("{}m", secs / 60),
+        3600..=86_399 => format!("{}h", secs / 3600),
+        _ => format!("{}d", secs / 86_400),
+    }
+}
+
 /// Sweep every per-file sidecar and every team-scoped catalog sidecar from
 /// the cache. `synth.json` is intentionally left intact so synth IDs stay
 /// stable across a clear. Returns `(deleted, errors)`.
@@ -684,6 +841,15 @@ fn truncate(s: &str, max: usize) -> String {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn age_buckets() {
+        assert_eq!(age(100, 100), "0s");
+        assert_eq!(age(100, 160), "0s", "future timestamp reads as fresh");
+        assert_eq!(age(1000, 900), "1m");
+        assert_eq!(age(10_000, 0), "2h");
+        assert_eq!(age(200_000, 0), "2d");
+    }
 
     #[test]
     fn clear_all_sidecars_sweeps_files_and_teams() {

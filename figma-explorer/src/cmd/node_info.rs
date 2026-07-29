@@ -20,7 +20,7 @@
 use std::collections::BTreeSet;
 
 use anyhow::{anyhow, Result};
-use clap::Args as ClapArgs;
+use clap::{Args as ClapArgs, ValueEnum};
 use figma_api::apis::configuration::Configuration;
 use serde_json::{json, Map, Value};
 
@@ -97,7 +97,9 @@ pub struct Args {
     /// `--only fills,strokes`. Identity (id/type/name) is always emitted,
     /// and variables/styles referenced by a kept section still hoist to the
     /// top-level blocks. `--only prototype` / `--only meta` imply those
-    /// opt-in sections. Node targets only.
+    /// opt-in sections. On a *file* target the valid sections are
+    /// `meta,pages,component,styles,variables,comments` — they filter the
+    /// file summary (`meta` keeps just the counts).
     #[arg(long, value_enum, value_delimiter = ',',
           conflicts_with_all = ["raw", "no_variables", "no_comments"])]
     pub only: Vec<Section>,
@@ -119,17 +121,39 @@ impl Args {
             }
         };
 
-        // `--only` narrows node views; on any other target kind the filter
-        // would be silently ignored — reject it so agents notice.
-        if !self.only.is_empty() && !matches!(target, ResolvedTarget::Node { .. }) {
-            let kind = match &target {
-                ResolvedTarget::Root => "the root listing",
-                ResolvedTarget::Project { .. } => "a project",
-                ResolvedTarget::File { .. } => "a file",
-                ResolvedTarget::Comment { .. } => "a comment",
-                ResolvedTarget::Node { .. } => unreachable!(),
-            };
-            anyhow::bail!("--only applies to node targets; the id resolved to {kind}");
+        // `--only` narrows node views and file summaries; on any other target
+        // kind the filter would be silently ignored — reject it so agents
+        // notice. Per-kind section validity is checked too: a filter that
+        // selects nothing would otherwise emit an empty view with no hint.
+        if !self.only.is_empty() {
+            match &target {
+                ResolvedTarget::Node { .. } => {
+                    if self.only.contains(&Section::Pages) {
+                        anyhow::bail!(
+                            "--only pages applies to file targets; on a node use `ls` for structure"
+                        );
+                    }
+                }
+                ResolvedTarget::File { .. } => {
+                    if let Some(bad) = self.only.iter().find(|s| !file_section(**s)) {
+                        anyhow::bail!(
+                            "--only {} applies to node targets; on a file the valid sections are meta,pages,component,styles,variables,comments",
+                            bad.to_possible_value().map(|v| v.get_name().to_owned()).unwrap_or_else(|| format!("{bad:?}"))
+                        );
+                    }
+                }
+                other => {
+                    let kind = match other {
+                        ResolvedTarget::Root => "the root listing",
+                        ResolvedTarget::Project { .. } => "a project",
+                        ResolvedTarget::Comment { .. } => "a comment",
+                        _ => unreachable!(),
+                    };
+                    anyhow::bail!(
+                        "--only applies to node and file targets; the id resolved to {kind}"
+                    );
+                }
+            }
         }
 
         let opts = view_options(&self);
@@ -143,7 +167,18 @@ impl Args {
                 synth,
                 meta,
                 document,
-            } => emit_file(cfg, &resolver, synth, &meta, &document, globals.cache_only).await?,
+            } => {
+                emit_file(
+                    cfg,
+                    &resolver,
+                    synth,
+                    &meta,
+                    &document,
+                    globals.cache_only,
+                    &self.only,
+                )
+                .await?
+            }
             ResolvedTarget::Node {
                 file_synth,
                 meta,
@@ -272,6 +307,7 @@ async fn emit_node(
         json!({
             "kind": "node",
             "id": format!("file:{file_synth}:{}", node.id),
+            "url": crate::url::figma_url(&meta.file_key, Some(&node.id)),
             "path": path,
         }),
     );
@@ -358,6 +394,7 @@ fn emit_comment(
 // File / project / root targets
 // ───────────────────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 async fn emit_file(
     cfg: &Configuration,
     resolver: &Resolver,
@@ -365,6 +402,7 @@ async fn emit_file(
     meta: &FileMeta,
     document: &crate::cache::CachedFile,
     cache_only: bool,
+    only: &[Section],
 ) -> Result<Value> {
     let cache = resolver.cache();
     let file_root = load_full(cfg, cache, &meta.file_key, cache_only).await?;
@@ -392,6 +430,7 @@ async fn emit_file(
             );
         }
     }
+    let summary = filter_file_summary(summary, only);
     Ok(json!({
         "target": {
             "kind": "file",
@@ -401,6 +440,63 @@ async fn emit_file(
         "file": file_block_with_doc_info(synth, meta, document),
         "file_summary": summary,
     }))
+}
+
+/// Sections that make sense on a *file* target — they map to keys of the
+/// `file_summary` block rather than per-node view sections.
+fn file_section(s: Section) -> bool {
+    matches!(
+        s,
+        Section::Meta
+            | Section::Pages
+            | Section::Component
+            | Section::Styles
+            | Section::Variables
+            | Section::Comments
+    )
+}
+
+/// Apply `--only` to a built `file_summary`: keep only the keys the selected
+/// sections map to. An empty selection keeps everything. `meta` keeps just
+/// `counts`; `component` covers both `components` and `component_sets`.
+fn filter_file_summary(summary: Value, only: &[Section]) -> Value {
+    if only.is_empty() {
+        return summary;
+    }
+    let Value::Object(map) = summary else {
+        return summary;
+    };
+    let mut keep: BTreeSet<&str> = BTreeSet::new();
+    for s in only {
+        match s {
+            Section::Meta => {
+                keep.insert("counts");
+            }
+            Section::Pages => {
+                keep.insert("pages");
+            }
+            Section::Component => {
+                keep.insert("components");
+                keep.insert("component_sets");
+            }
+            Section::Styles => {
+                keep.insert("styles");
+            }
+            Section::Variables => {
+                keep.insert("variable_collections");
+            }
+            Section::Comments => {
+                keep.insert("recent_comments");
+                keep.insert("comments_hint");
+            }
+            _ => {}
+        }
+    }
+    Value::Object(
+        map.into_iter()
+            .filter(|(k, _)| keep.contains(k.as_str()))
+            .collect(),
+    )
 }
 
 fn emit_project(resolver: &Resolver, synth: u32, project_id: &str) -> Result<Value> {
@@ -616,6 +712,7 @@ fn file_block(synth: u32, meta: &FileMeta) -> Value {
     json!({
         "key": meta.file_key,
         "name": meta.name,
+        "url": crate::url::figma_url(&meta.file_key, None),
         "project_id": meta.project_id,
         "project_name": meta.project_name,
         "synth": synth,
@@ -627,6 +724,7 @@ fn file_block_with_doc_info(synth: u32, meta: &FileMeta, doc: &crate::cache::Cac
     json!({
         "key": meta.file_key,
         "name": meta.name,
+        "url": crate::url::figma_url(&meta.file_key, None),
         "project_id": meta.project_id,
         "project_name": meta.project_name,
         "synth": synth,
@@ -648,6 +746,73 @@ mod tests {
 
     fn parse(argv: &[&str]) -> Result<Args, clap::Error> {
         TestCli::try_parse_from(argv).map(|c| c.args)
+    }
+
+    #[test]
+    fn filter_file_summary_maps_sections_to_keys() {
+        let summary = json!({
+            "counts": {"nodes": 1},
+            "pages": [],
+            "components": [],
+            "component_sets": [],
+            "styles": [],
+            "variable_collections": [],
+            "recent_comments": [],
+            "comments_hint": "hint",
+        });
+
+        let all = filter_file_summary(summary.clone(), &[]);
+        assert_eq!(all, summary, "empty --only keeps everything");
+
+        let meta = filter_file_summary(summary.clone(), &[Section::Meta]);
+        let keys: Vec<&str> = meta
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(|k| k.as_str())
+            .collect();
+        assert_eq!(keys, ["counts"], "--only meta keeps just the counts");
+
+        // Key order follows the original summary's insertion order.
+        let comp = filter_file_summary(summary.clone(), &[Section::Component]);
+        let keys: Vec<&str> = comp
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(|k| k.as_str())
+            .collect();
+        assert_eq!(keys, ["components", "component_sets"]);
+
+        let comments = filter_file_summary(summary, &[Section::Comments]);
+        let keys: Vec<&str> = comments
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(|k| k.as_str())
+            .collect();
+        assert_eq!(keys, ["recent_comments", "comments_hint"]);
+    }
+
+    #[test]
+    fn file_section_accepts_summary_sections_only() {
+        for s in [
+            Section::Meta,
+            Section::Pages,
+            Section::Component,
+            Section::Styles,
+            Section::Variables,
+            Section::Comments,
+        ] {
+            assert!(file_section(s), "{s:?} is valid on file targets");
+        }
+        for s in [
+            Section::Fills,
+            Section::Layout,
+            Section::Text,
+            Section::Prototype,
+        ] {
+            assert!(!file_section(s), "{s:?} is node-only");
+        }
     }
 
     #[test]
