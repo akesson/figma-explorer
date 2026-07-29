@@ -31,8 +31,10 @@ ls          [ID]   tree under a node (or root; root defaults to depth 1 =
                    (substring filter; keeps matches + ancestors). Comments are
                    summarized by default (a [N comments] suffix + file header);
                    --comments restores inline thread rows (--resolved needs it)
-find        QUERY  fuzzy multi-token ancestor-chain search across ALL cached
-                   files (add --in file:N to scope). --type, --limit. Matching
+find        QUERY  search across ALL cached files (add --in file:N to scope) —
+                   layer names and visible text. Web-search syntax: bare words =
+                   fuzzy AND, "quoted phrase" = exact contiguous text, uppercase
+                   OR alternates, -term excludes. --type, --limit. Matching
                    marks lead (★ rows); also flags files whose comment threads
                    mention the query.
 mark        add KEY ID... [--alias A]... [--note N] [--force] | rm KEY | list
@@ -58,6 +60,7 @@ assets      ID     bulk SVG/PNG export under a subtree. --out-dir
 context     ID     bundle: tree.txt + screenshot.png + styles/ + assets/. --out-dir
                    tree.txt uses the same flat pipe-rail format as ls/find
 cache       prefetch [--no-full|--no-variables|--no-catalog|--force] | clear [--file-key K]
+            | status  (offline report: per-file age + sidecars, catalog, marks)
 ```
 
 Global flags that apply everywhere: `--json` (else compact text format), `--cache-only` (no live fetches), `--in <ID>` (scope; `find` searches inside it, `ls` uses it to qualify a bare native id like `0:0`).
@@ -66,7 +69,7 @@ Global flags that apply everywhere: `--json` (else compact text format), `--cach
 
 1. **Discover.** `figma-explorer ls` to see projects and top-level files (depth 1 by default — no canvas/frame dump). Note the `proj:N` / `file:N` ids.
 2. **Drill in.** `figma-explorer ls file:N --depth 1` to see canvases. `--no-ignore` reveals hidden Cover/WIP/Archive canvases (filtered by default). A `[N comments]` suffix flags nodes with discussion; `--comments` inlines the threads.
-3. **Search.** `figma-explorer find "employee status" --limit 5` searches **every cached file** — don't loop over files. Narrow with `--in file:28` when you already know where to look. Tokens are whitespace-split; each must fuzzy-match some ancestor name **or the node's visible text** (`characters`) — so `find "leave details"` finds a button whose layer is named "Button Label" but whose copy reads "Leave details" (shown as a `text:"…"` line under the hit). Results are scored — higher score = each token landed on a more distinct ancestor. If a name search still comes up empty, `find` tells you when the query appears in the file's comments — chase it with `comments file:N --grep <word>` (designers describe things in your vocabulary, not the layer names).
+3. **Search.** `figma-explorer find "employee status" --limit 5` searches **every cached file** — don't loop over files. Narrow with `--in file:28` when you already know where to look. Tokens are whitespace-split; each must fuzzy-match some ancestor name **or the node's visible text** (`characters`) — so `find "leave details"` finds a button whose layer is named "Button Label" but whose copy reads "Leave details" (shown as a `text:"…"` line under the hit). When you're hunting **rendered copy verbatim**, quote it: `find '"Approved by you"'` requires the exact contiguous text (case-insensitive) and ranks it above fuzzy scatter — note the single quotes outside so the shell keeps the double quotes. Uppercase `OR` alternates adjacent terms (`banner approved OR declined`); `-term` excludes any chain containing it; lowercase `or` and mid-word hyphens stay literal. Results are scored — higher score = each token landed on a more distinct ancestor. If a name search still comes up empty, `find` tells you when the query appears in the file's comments — chase it with `comments file:N --grep <word>` (designers describe things in your vocabulary, not the layer names).
 4. **Search the design system.** When you're hunting a *component or style* rather than a feature screen, `figma-explorer library search "date picker" --type component-set` spans the whole published team library — no file id needed. Feature screens aren't in the catalog; those live via `ls`/`find`. The catalog caches for 24h (`--refresh` to force).
 5. **Implement a frame.** `figma-explorer node-info file:28:2974:150299` for a one-shot LLM-friendly view (everything you need to write the JSX/CSS in one read). For visual reference + bulk assets too, use `context` instead — it bundles a screenshot + token files + an `assets/` directory.
 6. **Comments.** `figma-explorer comments file:28` lists every thread in the file, replies inline, newest activity first — filter with `--unresolved` / `--since 2026-06`, re-fetch with `--refresh`. `comments file:28:2974:150299` restricts to threads anchored in that subtree; `comments file:28:comm:M` pulls a single thread (parent + replies). `node-info` still summarizes the 10 newest threads on a file target and inlines anchored comments under node targets.
@@ -77,8 +80,9 @@ Global flags that apply everywhere: `--json` (else compact text format), `--cach
 `node-info` is the right command when you're translating a Figma node to application code. Output shape is uniform across target kinds:
 
 ```
-target: { kind: node|comment|file|project|root, id, path: [{id,type,name}, ...] }
-file:   { key, name, synth, last_modified, ... }
+target: { kind: node|comment|file|project|root, id, path: [{id,type,name}, ...],
+          url }   (node targets carry a ready-made figma.com deep link)
+file:   { key, name, synth, url, last_modified, ... }
 node:   id, type, name, bounds, constraints, corner?, fills?, strokes?, stroke?,
         effects?, layout?, layout_child?, text?, component?, prototype?,
         styles?, bound_variables?, comments?, children?  (snake_case throughout)
@@ -94,7 +98,7 @@ Defaults are tuned for "useful but not overwhelming":
 - Comments anchored to the target or its subtree are inlined under `node.comments`. Pass `--no-comments` to skip.
 
 Useful flags:
-- `--only fills,layout,…` — restrict output to named sections instead of grepping the full dump. Sections: fills, strokes, effects, geometry, corner, layout, text, component, prototype, meta, styles, variables, comments. Identity (id/type/name) always stays; hoisted variables keep only what kept sections reference.
+- `--only fills,layout,…` — restrict output to named sections instead of grepping the full dump. Node sections: fills, strokes, effects, geometry, corner, layout, text, component, prototype, meta, styles, variables, comments. On a **file** target, `--only meta,pages,component,styles,variables,comments` filters the file summary instead (`meta` = just the counts). Identity (id/type/name) always stays; hoisted variables keep only what kept sections reference. Mismatched sections are rejected with a hint, not silently empty.
 - `--depth N` / `--no-children` — limit subtree depth.
 - `--max-nodes N` — emit a `truncated` block instead of dumping huge frames.
 - `--prototype` — include interactions/transitions (off by default).
@@ -115,6 +119,7 @@ Variables: requires the paid-tier Variables REST API. `cache prefetch` adaptivel
 ## Tips
 
 - For bare node ids (`x:y`) from a URL or designer DM, always pair with `--in file:N` to avoid ambiguity across files.
+- `cache status` shows what's actually cached — per-file payload age, which sidecars (full/comments/variables) exist, team-catalog state, mark count — entirely offline. Check it before debugging a `--cache-only` miss instead of poking at the cache directory by hand.
 - `--cache-only` is the right default for read-heavy automation; let `cache prefetch` populate first. `node-info` honors this strictly — a missing sidecar errors with a "run cache prefetch" hint instead of silently hitting the network.
 - Cache lives at `$FIGMA_EXPLORER_CACHE_DIR` or `dirs::cache_dir()`. `cache clear --file-key <key>` for surgical invalidation; `cache clear` wipes everything **except** `synth.json` and `marks.json` (so ids and marks stay stable).
 - `tokens --scope target` restricts to the resolved subtree's actually-used values; `--scope file` is only the published library styles; `both` (default) unions them.

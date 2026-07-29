@@ -4,14 +4,16 @@ A command-line tool for navigating, inspecting, and exporting from Figma files v
 
 ## What it does
 
-- **`ls`** / **`find`** — navigate projects, files, and node trees by name without copy-pasting node ids.
-- **`node-info`** — single-target view with layout, fills, strokes, effects, text, bound variables, and comments. Designed to be pasted into an agent prompt.
+- **`ls`** / **`find`** — navigate projects, files, and node trees by name or visible text without copy-pasting node ids. `find` speaks web-search syntax: `"exact phrases"`, uppercase `OR`, `-exclusion`.
+- **`node-info`** — single-target view with layout, fills, strokes, effects, text, bound variables, comments, and a ready-made figma.com `url:`. Designed to be pasted into an agent prompt.
+- **`comments`** — list a file's comment threads (replies inline, newest first), threads under a node, or a single thread; filter with `--unresolved` / `--since` / `--grep`.
+- **`mark`** — curated keyword→node bookmarks (`mark add key file:N:x:y --alias …`); `find` and `library search` surface matching marks ahead of their own hits, and `mark:key` resolves anywhere an id is accepted.
 - **`library search`** — fuzzy search across a team's published component library (components, component sets, styles).
 - **`screenshot`** — export a node as PNG / JPG / SVG / PDF.
 - **`tokens`** — extract design tokens (colors, fonts, sizes, spacing).
 - **`assets`** — bulk-export every icon/image below a node.
 - **`context`** — aggregate: tree + screenshot + tokens + assets for a node.
-- **`cache prefetch`** — pre-warm a local cache so subsequent commands are offline-fast.
+- **`cache prefetch`** / **`cache status`** — pre-warm a local cache so subsequent commands are offline-fast, and report what it holds (per-file age, sidecars, catalog) without touching the network.
 
 All commands share a tagged-id grammar — `proj:N`, `file:N`, `file:N:x:y`, or a full `figma.com` URL — so you never paste raw node identifiers by hand.
 
@@ -75,6 +77,9 @@ figma-explorer ls file:2
 
 # Find a node by name across every cached file
 figma-explorer find "Button / Primary"
+
+# Hunt rendered copy with an exact phrase (single-quote so the shell keeps the double quotes)
+figma-explorer find '"Approved by you"'
 
 # ...or scope the search to one file
 figma-explorer --in file:2 find "Button / Primary"
