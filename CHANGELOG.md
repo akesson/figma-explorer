@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-08-22
+
+### Changed
+
+- **npm releases now publish via npm Trusted Publishing (OIDC)** instead of a
+  long-lived `NPM_TOKEN`. Packages carry provenance attestations. No
+  user-facing changes to the CLI.
+
 ## [0.2.0] - 2026-07-29
 
 ### Added
