@@ -16,7 +16,6 @@ jobs:
     runs-on: ubuntu-22.04
     permissions:
       id-token: write # required for OIDC trusted publishing
-      contents: read
     env:
       PLAN: ${{ inputs.plan }}
     steps:
