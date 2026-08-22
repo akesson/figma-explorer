@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-08-22
+
+### Fixed
+
+- **npm package for 0.2.1 was never published** — the OIDC publish job used a
+  placeholder auth token written by `actions/setup-node`. Fixed; 0.2.2 is the
+  first release on npm via Trusted Publishing. No CLI changes.
+
 ## [0.2.1] - 2026-08-22
 
 ### Changed
