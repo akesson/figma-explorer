@@ -25,10 +25,12 @@ jobs:
           pattern: artifacts-*
           path: npm/
           merge-multiple: true
+      # Deliberately NO `registry-url:` here: it makes setup-node write an
+      # `_authToken=${NODE_AUTH_TOKEN}` line into .npmrc with a placeholder
+      # value, and npm then uses that (dead) token instead of OIDC -> E404.
       - uses: actions/setup-node@v6
         with:
           node-version: '22.x'
-          registry-url: 'https://registry.npmjs.org'
       # Trusted publishing needs npm >= 11.5.1; Node 22's bundled npm may be older.
       - run: npm install -g npm@latest
       - run: npm --version
@@ -37,5 +39,5 @@ jobs:
       - run: |
           for release in $(echo "$PLAN" | jq --compact-output '.releases[] | select([.artifacts[] | endswith("-npm-package.tar.gz")] | any)'); do
             pkg=$(echo "$release" | jq '.artifacts[] | select(endswith("-npm-package.tar.gz"))' --raw-output)
-            npm publish --access public "./npm/${pkg}"
+            npm publish --access public --loglevel verbose "./npm/${pkg}"
           done
