@@ -10,7 +10,7 @@ repository = "https://github.com/akesson/figma-explorer"
 # Config for 'dist'
 [workspace.metadata.dist]
 # The preferred dist version to use in CI (Cargo.toml SemVer syntax)
-cargo-dist-version = "0.31.0"
+cargo-dist-version = "0.32.0"
 # CI backends to support
 ci = "github"
 # The installers to generate for each app
@@ -24,7 +24,7 @@ formula = "figma-explorer"
 # A namespace to use when publishing this package to the npm registry
 npm-scope = "@akesson"
 # Publish jobs to run in CI
-publish-jobs = ["homebrew", "npm"]
+publish-jobs = ["homebrew", "./publish-npm"]
 # Which actions to run on pull requests
 pr-run-mode = "plan"
 # Path that installers should place binaries in
