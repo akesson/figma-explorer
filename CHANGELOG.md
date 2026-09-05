@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`node-info` output is ~4–5× smaller with nothing implementation-relevant
+  dropped.** Measured on a 475-node screen: 634 KB → 141 KB YAML. What changed
+  in the curated view (`--raw` is untouched):
+  - Hidden (`visible: false`) children are pruned and listed on the parent as
+    `hidden_children: [{id, name, type}]` — they were 65% of the output and,
+    worse, their descendants were indistinguishable from visible nodes.
+    `--include-hidden` restores them; a hidden target is always rendered.
+  - Defaults are elided: `constraints: LEFT/TOP`, `layout.wrap: NO_WRAP`,
+    axis `sizing: AUTO` / `align: MIN`, text alignment LEFT/TOP,
+    `line_height_unit: PIXELS`.
+  - `bounds` is parent-relative on descendants; flow children of an
+    auto-layout parent carry only `width`/`height`. `size` appears only when
+    it differs from the bounding box (rotation).
+  - Colors are `hex` only; the float channels are gone from fills, strokes,
+    gradient stops and effects.
+  - Text style drops `font_post_script_name`, `line_height_percent`,
+    `line_height_percent_font_size` (all restate other fields).
+  - `layout_child.sizing` is one `"H/V"` string; padding is one number when
+    uniform, else `[top, right, bottom, left]`.
+  - `component.component_properties` is split into `variants` and
+    `properties` with plain scalar values and Figma's `#n:m` name suffixes
+    stripped (kept when stripping would collide). `property_refs` is emitted
+    on the target and inside component definitions only.
+  - Geometry leaves below the target (VECTOR, BOOLEAN_OPERATION, STAR, LINE,
+    REGULAR_POLYGON) drop `constraints` / `layout_child`; fills and strokes
+    stay so icon color tokens remain visible.
+  - Bound variables are referenced by short handles (`v1`, `v2`, … in
+    first-seen order). The top-level `variables` block is keyed by handle and
+    always carries the raw `id`, plus name/values when the Variables sidecar
+    is available. The 60-character `VariableID:` strings no longer repeat
+    per use.
+- `scripts/node_info_lossless.py` — checks a curated view against `--raw` for
+  the same target (node set, hidden listing, bounds reconstruction, paints,
+  layout, text, component props, variable handles).
+
 ## [0.2.2] - 2026-08-22
 
 ### Fixed

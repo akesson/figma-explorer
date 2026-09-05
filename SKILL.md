@@ -83,18 +83,23 @@ Global flags that apply everywhere: `--json` (else compact text format), `--cach
 target: { kind: node|comment|file|project|root, id, path: [{id,type,name}, ...],
           url }   (node targets carry a ready-made figma.com deep link)
 file:   { key, name, synth, url, last_modified, ... }
-node:   id, type, name, bounds, constraints, corner?, fills?, strokes?, stroke?,
+node:   id, type, name, bounds, constraints?, corner?, fills?, strokes?, stroke?,
         effects?, layout?, layout_child?, text?, component?, prototype?,
-        styles?, bound_variables?, comments?, children?  (snake_case throughout)
-variables:    { <VariableID>: { name, collection, resolved_type, values_by_mode, scopes } }
+        styles?, bound_variables?, comments?, children?, hidden_children?
+        (snake_case throughout)
+variables:    { v1: { id: <VariableID>, name?, collection?, resolved_type?, values_by_mode?, scopes? }, v2: … }
 styles_index: { <S:id>: { key, name, description, type } }
 truncated:    { reason, omitted_count, omitted_node_ids, hint }  (only when capped)
 ```
 
 Defaults are tuned for "useful but not overwhelming":
-- Empty arrays / default values (`visible: true`, `rotation: 0`, `opacity: 1`) are omitted.
-- Children: full subtree by default, capped at `--max-nodes 500`; per-node detail tiers down past depth 0 (effects/prototype/meta drop from descendants).
-- Variables and named styles are **hoisted to top-level blocks** and referenced by id from each node — no duplication of token data across 40 children.
+- Empty arrays / default values (`visible: true`, `rotation: 0`, `opacity: 1`, `constraints: LEFT/TOP`, `wrap: NO_WRAP`) are omitted.
+- **Hidden children are pruned.** A `visible: false` child is listed on its parent as `hidden_children: [{id, name, type}]` and its subtree is skipped — hidden subtrees are component-slot alternates that never render, and in a real screen they were 65% of the output. `--include-hidden` renders them; a hidden *target* is always rendered.
+- `bounds` is absolute on the target and **parent-relative on descendants**; a flow child of an auto-layout parent carries only `width`/`height` (its position is the layout's output, not your input). Absolutely positioned children keep an `x`/`y` offset from the parent.
+- Colors are `hex` only (`#rrggbb` / `#rrggbbaa`). Padding is one number when uniform, else `[top, right, bottom, left]`. `layout_child.sizing` is `"H/V"` (`FIXED|HUG|FILL`).
+- `component.variants` holds variant assignments (`Intent: Success`), `component.properties` the boolean/text/instance-swap props as plain scalars, with Figma's `#n:m` name suffixes stripped.
+- Children: full subtree by default, capped at `--max-nodes 500`; per-node detail tiers down past depth 0 (effects/prototype/meta drop from descendants; geometry leaves such as VECTOR drop constraints/layout_child but keep fills so icon color tokens stay visible).
+- Variables are referenced by **short handles** (`v1`, `v2`, … in first-seen order) and named styles by id; both are **hoisted to top-level blocks** (`variables`, `styles_index`) — no duplication of token data across 40 children. Without the Variables sidecar each `vN` entry is just `{id}`, which still shows which properties share a token.
 - Comments anchored to the target or its subtree are inlined under `node.comments`. Pass `--no-comments` to skip.
 
 Useful flags:
@@ -104,6 +109,7 @@ Useful flags:
 - `--prototype` — include interactions/transitions (off by default).
 - `--meta` — include `dev_status`, `annotations`, `export_settings` (off by default).
 - `--rich-text` — emit per-character-range `text.overrides` for inline links/colored spans.
+- `--include-hidden` — render `visible: false` subtrees instead of listing them under `hidden_children`.
 - `--no-variables` — skip the hoisted `variables` block.
 - `--raw` — escape hatch: dump the raw Figma JSON (camelCase) for the target. Use when the curated view drops something you need.
 

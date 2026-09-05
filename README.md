@@ -5,7 +5,7 @@ A command-line tool for navigating, inspecting, and exporting from Figma files v
 ## What it does
 
 - **`ls`** / **`find`** — navigate projects, files, and node trees by name or visible text without copy-pasting node ids. `find` speaks web-search syntax: `"exact phrases"`, uppercase `OR`, `-exclusion`.
-- **`node-info`** — single-target view with layout, fills, strokes, effects, text, bound variables, comments, and a ready-made figma.com `url:`. Designed to be pasted into an agent prompt.
+- **`node-info`** — single-target view with layout, fills, strokes, effects, text, bound variables, comments, and a ready-made figma.com `url:`. Hidden subtrees are pruned (listed as `hidden_children`), defaults elided, and variables referenced by short handles, so a full screen is a few dozen KB rather than hundreds. Designed to be pasted into an agent prompt.
 - **`comments`** — list a file's comment threads (replies inline, newest first), threads under a node, or a single thread; filter with `--unresolved` / `--since` / `--grep`.
 - **`mark`** — curated keyword→node bookmarks (`mark add key file:N:x:y --alias …`); `find` and `library search` surface matching marks ahead of their own hits, and `mark:key` resolves anywhere an id is accepted.
 - **`library search`** — fuzzy search across a team's published component library (components, component sets, styles).

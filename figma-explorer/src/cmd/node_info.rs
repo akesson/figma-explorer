@@ -88,6 +88,13 @@ pub struct Args {
     #[arg(long)]
     pub no_comments: bool,
 
+    /// Render hidden (`visible: false`) children instead of pruning them.
+    /// By default a hidden child is listed on its parent under
+    /// `hidden_children: [{id, name, type}]` and its subtree is skipped —
+    /// hidden subtrees are component-slot alternates that never render.
+    #[arg(long)]
+    pub include_hidden: bool,
+
     /// Emit the raw Figma JSON for the target node (camelCase, untouched).
     /// Useful when the curated view drops a field you need.
     #[arg(long)]
@@ -230,6 +237,7 @@ fn view_options(args: &Args) -> ViewOptions {
         meta: args.meta || selected(Section::Meta),
         rich_text: args.rich_text,
         only,
+        include_hidden: args.include_hidden,
     }
 }
 
@@ -293,12 +301,7 @@ async fn emit_node(
     } else {
         full_cache::read_variables(cache, &meta.file_key)?
     };
-    // Snapshot the variable refs before we hand `&mut collector` to the
-    // variables block — `build_variables_block` may record warnings via the
-    // collector, which would alias the immutable borrow if we passed the set
-    // directly.
-    let var_refs = collector.variables.clone();
-    let variables = build_variables_block(vars_root.as_ref(), &var_refs, &mut collector);
+    let variables = build_variables_block(vars_root.as_ref(), &mut collector);
     let styles_index = build_styles_index_block(&file_root, &collector.styles);
 
     let mut out = Map::new();
@@ -313,11 +316,13 @@ async fn emit_node(
     );
     out.insert("file".into(), file_block(file_synth, meta));
     out.insert("node".into(), view);
-    if variables.as_object().is_some_and(|m| !m.is_empty()) {
+    let has_refs = variables.as_object().is_some_and(|m| !m.is_empty());
+    if has_refs {
         out.insert("variables".into(), variables);
-    } else if !args.no_variables && args.only.is_empty() {
-        // The sidecar-unavailable note is a diagnostics nicety — noise under
-        // a deliberately narrowed `--only` view.
+    }
+    if has_refs && vars_root.is_none() && !args.no_variables && args.only.is_empty() {
+        // The handles above map to bare ids only. Say why, once — but not
+        // under a deliberately narrowed `--only` view.
         if let Some(err) = meta.variables_error.as_deref() {
             // Don't pollute on success; surface only when the user asked and
             // we have a hint as to why we don't have variables data.
