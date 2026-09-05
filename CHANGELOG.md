@@ -7,6 +7,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`node-info` output is ~4–5× smaller with nothing implementation-relevant
+  dropped.** Measured on a 475-node screen: 634 KB → 141 KB YAML. What changed
+  in the curated view (`--raw` is untouched):
+  - Hidden (`visible: false`) children are pruned and listed on the parent as
+    `hidden_children: [{id, name, type}]` — they were 65% of the output and,
+    worse, their descendants were indistinguishable from visible nodes.
+    `--include-hidden` restores them; a hidden target is always rendered, and
+    so is a hidden layer inside a COMPONENT definition whose visibility is
+    wired to a BOOLEAN property (its `property_refs` are the wiring an
+    implementer needs). A comment anchored to a pruned node is tagged
+    `anchor_rendered: false`.
+  - Defaults are elided: `constraints: LEFT/TOP`, `layout.wrap: NO_WRAP`,
+    axis `sizing: AUTO` / `align: MIN`, text alignment LEFT/TOP,
+    `line_height_unit: PIXELS`.
+  - `bounds` is parent-relative on descendants; flow children of an
+    auto-layout parent carry only `width`/`height`. A CANVAS has no box, so
+    a page's children are relative to the canvas origin (Figma's absolute
+    coordinates). `size` appears only when it differs from the bounding box
+    (rotation).
+  - Colors are `hex` only; the float channels are gone from fills, strokes,
+    gradient stops and effects.
+  - Text style drops `font_post_script_name`, `line_height_percent`,
+    `line_height_percent_font_size` (all restate other fields).
+  - `layout_child.sizing` is one `"H/V"` string; padding is one number when
+    uniform, else `[top, right, bottom, left]`.
+  - `component.component_properties` is split into `variants` and
+    `properties` with plain scalar values and Figma's `#n:m` name suffixes
+    stripped (kept when stripping would collide). An INSTANCE_SWAP prop keeps
+    its allowed swap targets as `preferred`. `property_refs` is emitted on
+    the target and inside component definitions only.
+  - Geometry leaves below the target (VECTOR, BOOLEAN_OPERATION, STAR, LINE,
+    REGULAR_POLYGON) drop only the layout block that cannot apply to them —
+    `constraints` when they are flow children of an auto-layout parent,
+    `layout_child` when the parent has no auto-layout — so a FILL-width
+    divider LINE keeps its sizing; fills and strokes stay so icon color
+    tokens remain visible.
+  - Bound variables are referenced by short handles (`v1`, `v2`, … in
+    first-seen order). The top-level `variables` block is keyed by handle and
+    always carries the raw `id`, plus name/values when the Variables sidecar
+    is available. The 60-character `VariableID:` strings no longer repeat
+    per use.
+  - Node-level `bound_variables` no longer repeats `fills[i]`/`strokes[i]`
+    entries that the paint itself already carries as `bound_variable` (half
+    of the map on a real screen). Entries the paints don't mirror are kept.
+  - Floats are rounded to 3 decimals (`14.40007495880127` → `14.4`): Figma
+    stores f32 and the REST API prints it as f64. The top-level `variables`
+    block gets the same treatment.
+  - `--no-variables` once again omits the `variables` block entirely; when a
+    sidecar is present but some handles point at library-owned variables, a
+    `variables_note` says how many could not be resolved locally.
+- **YAML output uses flow style for leaf containers** (`bounds: {width: 24,
+  height: 24}`, `padding: [0, 12, 0, 12]`, one record per row in lists)
+  instead of `serde_yaml`'s all-block rendering, via the new `yaml_out`
+  printer. Still standard YAML; a `node-info` view goes from 4,564 to 2,464
+  lines and 31.3k to 27.8k tokens. Non-ASCII keys are no longer escaped
+  (`💠 Before Icon`, not `\u{1f4a0} Before Icon`) and integral floats print
+  as `12`, not `12.0`. Multi-line text renders as a `|-` literal block.
+  Quoting is conservative enough for YAML 1.1 parsers (PyYAML, Psych):
+  `687:45` and `10:5` are quoted (base 60 would read them as integers),
+  `1,000` and `2026-9-5` too, large floats print as `1.5e+20`, a leading
+  `:`/`?` is quoted inside `{}`/`[]`, and U+2028/U+2029, NEL, DEL and the C1
+  range are `\uXXXX`-escaped rather than written raw (libyaml refuses the
+  whole document otherwise — Shift+Enter in a Figma text layer produces
+  U+2028). Applies to every command's YAML output.
+- **`--json` is compact**, not pretty-printed. Pretty JSON was the most
+  token-expensive rendering of all (37% more than the YAML default on the
+  same view); `jq` does not care.
+- `scripts/node_info_lossless.py` — checks a curated view against `--raw` for
+  the same target (node set, hidden listing, bounds reconstruction, paints,
+  layout, text, component props, variable handles).
+
 ## [0.2.2] - 2026-08-22
 
 ### Fixed

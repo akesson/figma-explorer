@@ -9,14 +9,32 @@
 //!
 //! Conventions:
 //! - All output keys are `snake_case`.
-//! - Empty arrays and default values are omitted (e.g. `fills: []` doesn't appear).
-//! - Bound variables and named styles are emitted as ids only; the lookup is
-//!   hoisted to the top-level `variables` / `styles_index` blocks to avoid
-//!   per-node duplication of token data.
+//! - Empty arrays and default values are omitted (e.g. `fills: []` doesn't
+//!   appear, nor does `constraints: {LEFT, TOP}` — Figma's default).
+//! - Hidden children (`visible: false`) are pruned by default and listed on
+//!   the parent as `hidden_children: [{id, name, type}]`; a hidden *target* is
+//!   still rendered, and so is a hidden layer inside a component definition
+//!   whose visibility is driven by a BOOLEAN property (the property wiring
+//!   and the layer's styling are what an implementer needs).
+//!   `ViewOptions::include_hidden` restores every subtree.
+//! - `bounds` is absolute on the target and parent-relative on descendants;
+//!   flow children of an auto-layout parent carry only `width`/`height`
+//!   because their position is derived by the layout. A CANVAS has no box,
+//!   so a page's children are relative to the canvas origin — which is
+//!   exactly Figma's absolute coordinates.
+//! - Bound variables are emitted as short handles (`v1`, `v2`, …) assigned in
+//!   encounter order; the handle → id/name/value lookup is hoisted to the
+//!   top-level `variables` block, named styles to `styles_index`, so token
+//!   data isn't duplicated per node.
+//! - Colors are emitted as `hex` only (`#rrggbb` / `#rrggbbaa`); the float
+//!   channels are available via `node-info --raw`.
 //! - Children at depth ≥ 1 drop `effects`, `prototype`, `export_settings`,
-//!   `dev_status`, `annotations` to keep subtree output compact.
+//!   `dev_status`, `annotations` to keep subtree output compact; geometry
+//!   leaves (VECTOR & co.) also drop the layout block that cannot apply to
+//!   them: `constraints` when they are flow children of an auto-layout
+//!   parent, `layout_child` when the parent has no auto-layout.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde_json::{json, Map, Value};
 
@@ -80,6 +98,11 @@ pub struct ViewOptions {
     /// filter applies per node at every depth; identity and the `children`
     /// recursion are unaffected.
     pub only: Option<BTreeSet<Section>>,
+    /// Render `visible: false` children instead of pruning them into the
+    /// parent's `hidden_children` list. Off by default — hidden subtrees are
+    /// component-slot alternates that don't render, and in a real screen
+    /// they were 65% of the output.
+    pub include_hidden: bool,
 }
 
 impl ViewOptions {
@@ -98,6 +121,7 @@ impl Default for ViewOptions {
             meta: false,
             rich_text: false,
             only: None,
+            include_hidden: false,
         }
     }
 }
@@ -111,9 +135,18 @@ impl Default for ViewOptions {
 /// caller can attach a `truncated` block when `max_nodes` was hit.
 #[derive(Debug, Default)]
 pub struct Collector {
-    /// Set of `VariableID:...` strings encountered via `boundVariables`
-    /// (on the node itself, on paints, on effects, etc.).
-    pub variables: BTreeSet<String>,
+    /// `VariableID:...` strings encountered via `boundVariables` (on the
+    /// node itself, on paints, on effects, etc.) in encounter order; index
+    /// `i` is handle `v{i+1}`. Nodes reference variables by handle (see
+    /// [`Collector::var_ref`]) and the top-level `variables` block maps
+    /// handle → id (+ resolved data).
+    pub var_handles: Vec<String>,
+    /// Reverse index of `var_handles` so interning stays O(1).
+    var_index: HashMap<String, usize>,
+    /// Ids of every node the view rendered (target + descendants). Lets the
+    /// caller tell whether something that points at a node — an anchored
+    /// comment, say — points at a node the reader can actually see.
+    pub emitted_ids: BTreeSet<String>,
     /// Set of `S:...` style ids encountered via the node's `styles` map.
     pub styles: BTreeSet<String>,
     /// How many descendants have been emitted (excluding the target itself).
@@ -143,6 +176,23 @@ pub struct UnknownShape {
 impl Collector {
     pub fn truncated(&self) -> bool {
         !self.omitted_ids.is_empty()
+    }
+
+    /// Intern a `VariableID:...` string and return its short handle (`v1`,
+    /// `v2`, … in first-seen order). Every place the view emits a variable
+    /// reference goes through here so the same id always renders as the
+    /// same handle, and the `variables` block can list each id once.
+    pub fn var_ref(&mut self, id: &str) -> String {
+        let idx = match self.var_index.get(id) {
+            Some(&i) => i,
+            None => {
+                self.var_handles.push(id.to_owned());
+                let i = self.var_handles.len() - 1;
+                self.var_index.insert(id.to_owned(), i);
+                i
+            }
+        };
+        var_handle(idx)
     }
 
     /// Record an unknown-shape warning. De-duplicated on the (location,
@@ -232,6 +282,57 @@ const LAYOUT_KEY_PREFIXES: &[&str] = &[
 /// so the LLM consumer knows the value wasn't normalized.
 const KNOWN_RESOLVED_TYPES: &[&str] = &["COLOR", "FLOAT", "STRING", "BOOLEAN"];
 
+/// Node types whose subtree is pure geometry (icon path internals). At
+/// depth ≥ 1 these drop `constraints` and `layout_child`: they describe how
+/// a path scales inside its icon frame, which no implementation reproduces —
+/// the icon ships as an SVG. Fills/strokes stay (they carry the color token).
+const GEOMETRY_LEAF_TYPES: &[&str] = &[
+    "VECTOR",
+    "BOOLEAN_OPERATION",
+    "STAR",
+    "LINE",
+    "REGULAR_POLYGON",
+];
+
+/// Handle string for the `i`-th interned variable (0-based).
+fn var_handle(i: usize) -> String {
+    format!("v{}", i + 1)
+}
+
+/// Is this node a geometry leaf below the target (see `GEOMETRY_LEAF_TYPES`)?
+fn is_geometry_leaf(node: &Value, depth: usize) -> bool {
+    depth > 0
+        && node
+            .get("type")
+            .and_then(Value::as_str)
+            .is_some_and(|t| GEOMETRY_LEAF_TYPES.contains(&t))
+}
+
+/// Does `parent` lay its children out (any `layoutMode` but NONE)?
+fn parent_has_auto_layout(parent: Option<&Value>) -> bool {
+    parent
+        .and_then(|p| p.get("layoutMode"))
+        .and_then(Value::as_str)
+        .is_some_and(|m| m != "NONE")
+}
+
+/// Is `node` positioned by its parent's auto-layout (as opposed to being
+/// absolutely positioned inside it, or living in a plain frame)?
+fn is_flow_child(node: &Value, parent: Option<&Value>) -> bool {
+    parent_has_auto_layout(parent)
+        && node.get("layoutPositioning").and_then(Value::as_str) != Some("ABSOLUTE")
+}
+
+/// Is the child's `visible` flag wired to a component property? Such a
+/// layer is hidden in the definition only until the property is set, so it
+/// is rendered even though `visible: false` (inside a component definition).
+fn has_visible_property_ref(node: &Value) -> bool {
+    node.get("componentPropertyReferences")
+        .and_then(|r| r.get("visible"))
+        .and_then(Value::as_str)
+        .is_some_and(|s| !s.is_empty())
+}
+
 // ───────────────────────────────────────────────────────────────────────────
 // Top-level entry point
 // ───────────────────────────────────────────────────────────────────────────
@@ -241,19 +342,65 @@ const KNOWN_RESOLVED_TYPES: &[&str] = &["COLOR", "FLOAT", "STRING", "BOOLEAN"];
 /// variable / style ids were referenced and which children (if any) were
 /// dropped by the node cap.
 pub fn build_node_view(node: &Value, opts: &ViewOptions, collector: &mut Collector) -> Value {
-    build_view_recursive(node, opts, collector, /* depth_from_target */ 0)
+    // `componentPropertyReferences` (which prop drives which node) is only
+    // meaningful when the target itself is a component definition — inside
+    // an instance it's noise on every descendant.
+    let root_is_component = node
+        .get("type")
+        .and_then(Value::as_str)
+        .is_some_and(|t| matches!(t, "COMPONENT" | "COMPONENT_SET"));
+    let ctx = WalkCtx { root_is_component };
+    let mut view = build_view_recursive(
+        node, None, opts, collector, /* depth_from_target */ 0, &ctx,
+    );
+    round_floats(&mut view);
+    view
+}
+
+/// Figma stores geometry as f32 and the REST API prints it as f64, so a
+/// 14.4-wide icon arrives as `14.40007495880127`. Three decimals keep
+/// sub-pixel precision (and every colour channel exact) while dropping the
+/// noise. Applied once over the finished view so every section gets it.
+pub fn round_floats(v: &mut Value) {
+    match v {
+        Value::Number(n) => {
+            if n.is_f64() {
+                if let Some(f) = n.as_f64() {
+                    let r = (f * 1000.0).round() / 1000.0;
+                    if r != f {
+                        if let Some(num) = serde_json::Number::from_f64(r) {
+                            *v = Value::Number(num);
+                        }
+                    }
+                }
+            }
+        }
+        Value::Object(m) => m.values_mut().for_each(round_floats),
+        Value::Array(a) => a.iter_mut().for_each(round_floats),
+        _ => {}
+    }
+}
+
+/// Facts about the target that every level of the walk needs.
+struct WalkCtx {
+    root_is_component: bool,
 }
 
 fn build_view_recursive(
     node: &Value,
+    parent: Option<&Value>,
     opts: &ViewOptions,
     collector: &mut Collector,
     depth: usize,
+    ctx: &WalkCtx,
 ) -> Value {
     let mut out = Map::new();
     // Attribution for any unknown-shape warnings raised below. Empty when
     // the node lacks an `id` (rare; defensive against bad input).
     let node_id = node.get("id").and_then(Value::as_str).unwrap_or("");
+    if !node_id.is_empty() {
+        collector.emitted_ids.insert(node_id.to_owned());
+    }
 
     // Each `add_*` helper appends its section to `out` in source order; the
     // order of these calls IS the output key order (serde_json Map is
@@ -263,20 +410,20 @@ fn build_view_recursive(
     // knowing which node it belongs to.
     add_identity_and_modifiers(&mut out, node);
     if opts.wants(Section::Geometry) {
-        add_geometry(&mut out, node);
+        add_geometry(&mut out, node, parent, depth);
     }
     if opts.wants(Section::Corner) {
         add_corner(&mut out, node);
     }
     add_paint_layers(&mut out, node, opts, collector, node_id, depth);
     if opts.wants(Section::Layout) {
-        add_layout(&mut out, node, collector, node_id, depth);
+        add_layout(&mut out, node, parent, collector, node_id, depth);
     }
     if opts.wants(Section::Text) {
         add_text(&mut out, node, opts, collector);
     }
     if opts.wants(Section::Component) {
-        add_component(&mut out, node);
+        add_component(&mut out, node, collector, node_id, depth, ctx);
     }
     if opts.wants(Section::Prototype) {
         add_prototype(&mut out, node, opts);
@@ -294,7 +441,22 @@ fn build_view_recursive(
     if allow_deeper {
         if let Some(arr) = node.get("children").and_then(Value::as_array) {
             let mut out_children: Vec<Value> = Vec::new();
+            let mut hidden: Vec<Value> = Vec::new();
             for child in arr {
+                // Hidden subtrees are pruned before the node cap so they
+                // neither consume the budget nor masquerade as visible. The
+                // exception is a property-driven layer in a component
+                // definition (`visible` bound to a BOOLEAN prop): it renders
+                // whenever the prop is on, so its wiring and styling stay.
+                let property_driven = ctx.root_is_component && has_visible_property_ref(child);
+                if !opts.include_hidden && !crate::node::is_visible(child) && !property_driven {
+                    hidden.push(json!({
+                        "id": child.get("id").cloned().unwrap_or(Value::Null),
+                        "name": child.get("name").cloned().unwrap_or(Value::Null),
+                        "type": child.get("type").cloned().unwrap_or(Value::Null),
+                    }));
+                    continue;
+                }
                 if collector.emitted_descendants >= opts.max_nodes {
                     if let Some(id) = child.get("id").and_then(Value::as_str) {
                         collector.omitted_ids.push(id.to_owned());
@@ -302,11 +464,14 @@ fn build_view_recursive(
                     continue;
                 }
                 collector.emitted_descendants += 1;
-                let v = build_view_recursive(child, opts, collector, depth + 1);
+                let v = build_view_recursive(child, Some(node), opts, collector, depth + 1, ctx);
                 out_children.push(v);
             }
             if !out_children.is_empty() {
                 out.insert("children".into(), Value::Array(out_children));
+            }
+            if !hidden.is_empty() {
+                out.insert("hidden_children".into(), Value::Array(hidden));
             }
         }
     }
@@ -360,12 +525,29 @@ fn add_identity_and_modifiers(out: &mut Map<String, Value>, node: &Value) {
 
 /// Bounds, size, non-identity transform, constraints, and responsive size
 /// constraints.
-fn add_geometry(out: &mut Map<String, Value>, node: &Value) {
-    if let Some(b) = node.get("absoluteBoundingBox") {
-        out.insert("bounds".into(), b.clone());
+///
+/// `bounds` is absolute (canvas coordinates) on the target and
+/// parent-relative on descendants. A flow child of an auto-layout parent
+/// gets only `width`/`height`: its x/y is an output of the layout, not an
+/// input to the implementation.
+fn add_geometry(out: &mut Map<String, Value>, node: &Value, parent: Option<&Value>, depth: usize) {
+    let abs = node.get("absoluteBoundingBox");
+    if let Some(b) = abs {
+        let bounds = match parent {
+            Some(p) if depth > 0 => relative_bounds(b, node, p),
+            _ => b.clone(),
+        };
+        out.insert("bounds".into(), bounds);
     }
     if let Some(s) = node.get("size") {
-        out.insert("size".into(), s.clone());
+        // `size` is the untransformed size; it only adds information when it
+        // differs from the bounding box (rotation / skew).
+        let same = abs.is_some_and(|b| {
+            approx_eq(b.get("width"), s.get("x")) && approx_eq(b.get("height"), s.get("y"))
+        });
+        if !same {
+            out.insert("size".into(), s.clone());
+        }
     }
     if let Some(t) = node.get("relativeTransform") {
         // Only emit when non-identity (any non-zero off-diagonal or non-1/0).
@@ -374,7 +556,12 @@ fn add_geometry(out: &mut Map<String, Value>, node: &Value) {
         }
     }
     if let Some(c) = node.get("constraints") {
-        out.insert("constraints".into(), c.clone());
+        // A geometry leaf laid out by its parent's auto-layout never uses
+        // its constraints; anywhere else they decide how it resizes.
+        let inapplicable = is_geometry_leaf(node, depth) && is_flow_child(node, parent);
+        if !is_default_constraints(c) && !inapplicable {
+            out.insert("constraints".into(), c.clone());
+        }
     }
     // Size constraints (used in responsive auto-layout).
     if let Some(min_w) = node.get("minWidth") {
@@ -457,6 +644,7 @@ fn add_paint_layers(
 fn add_layout(
     out: &mut Map<String, Value>,
     node: &Value,
+    parent: Option<&Value>,
     collector: &mut Collector,
     node_id: &str,
     depth: usize,
@@ -466,9 +654,14 @@ fn add_layout(
             out.insert("layout".into(), build_layout(node, collector, node_id));
         }
     }
-    let layout_child = build_layout_child(node);
-    if !layout_child.is_empty() {
-        out.insert("layout_child".into(), Value::Object(layout_child));
+    // A geometry leaf's layout-child settings only mean something when a
+    // parent auto-layout reads them (a FILL-width divider line, say).
+    let inapplicable = is_geometry_leaf(node, depth) && !parent_has_auto_layout(parent);
+    if !inapplicable {
+        let layout_child = build_layout_child(node);
+        if !layout_child.is_empty() {
+            out.insert("layout_child".into(), Value::Object(layout_child));
+        }
     }
     if let Some(grids) = node.get("layoutGrids").and_then(Value::as_array) {
         if !grids.is_empty() && depth == 0 {
@@ -492,14 +685,25 @@ fn add_text(
 }
 
 /// Component / instance metadata and component-property references.
-fn add_component(out: &mut Map<String, Value>, node: &Value) {
-    let component = build_component(node);
+fn add_component(
+    out: &mut Map<String, Value>,
+    node: &Value,
+    collector: &mut Collector,
+    node_id: &str,
+    depth: usize,
+    ctx: &WalkCtx,
+) {
+    let component = build_component(node, collector, node_id);
     if !component.is_empty() {
         out.insert("component".into(), Value::Object(component));
     }
-    if let Some(refs) = node.get("componentPropertyReferences") {
-        if !refs.is_null() && refs.as_object().is_some_and(|m| !m.is_empty()) {
-            out.insert("property_refs".into(), refs.clone());
+    // Property references matter on the target itself and anywhere inside a
+    // component definition; inside an instance subtree they're wiring noise.
+    if depth == 0 || ctx.root_is_component {
+        if let Some(refs) = node.get("componentPropertyReferences") {
+            if !refs.is_null() && refs.as_object().is_some_and(|m| !m.is_empty()) {
+                out.insert("property_refs".into(), refs.clone());
+            }
         }
     }
 }
@@ -568,16 +772,10 @@ fn add_styles_and_variables(
     }
     if opts.wants(Section::Variables) {
         if let Some(bv) = node.get("boundVariables") {
-            let flat = flatten_bound_variables(bv, collector, node_id);
-            if let Some(map) = flat.as_object() {
-                for v in map.values() {
-                    if let Some(s) = v.as_str() {
-                        collector.variables.insert(s.to_owned());
-                    }
-                }
-                if !map.is_empty() {
-                    out.insert("bound_variables".into(), flat);
-                }
+            let mut flat = flatten_bound_variables(bv, collector, node_id);
+            drop_paint_bindings_already_on_paints(&mut flat, out);
+            if flat.as_object().is_some_and(|m| !m.is_empty()) {
+                out.insert("bound_variables".into(), flat);
             }
         }
         if let Some(emodes) = node.get("explicitVariableModes") {
@@ -624,7 +822,6 @@ fn build_paint(paint: &Value, collector: &mut Collector, node_id: &str) -> Value
     match ty {
         "SOLID" => {
             if let Some(c) = paint.get("color") {
-                out.insert("color".into(), c.clone());
                 out.insert("hex".into(), json!(rgba_to_hex(c)));
             }
             // Inline `boundVariables.color` if present.
@@ -634,8 +831,10 @@ fn build_paint(paint: &Value, collector: &mut Collector, node_id: &str) -> Value
                     .and_then(|v| v.get("id"))
                     .and_then(Value::as_str)
                 {
-                    collector.variables.insert(color_alias.to_owned());
-                    out.insert("bound_variable".into(), json!(color_alias));
+                    out.insert(
+                        "bound_variable".into(),
+                        json!(collector.var_ref(color_alias)),
+                    );
                 }
             }
         }
@@ -695,7 +894,6 @@ fn build_gradient_stop(stop: &Value, collector: &mut Collector) -> Value {
         out.insert("position".into(), p.clone());
     }
     if let Some(c) = stop.get("color") {
-        out.insert("color".into(), c.clone());
         out.insert("hex".into(), json!(rgba_to_hex(c)));
     }
     if let Some(bv) = stop.get("boundVariables").and_then(Value::as_object) {
@@ -704,8 +902,7 @@ fn build_gradient_stop(stop: &Value, collector: &mut Collector) -> Value {
             .and_then(|v| v.get("id"))
             .and_then(Value::as_str)
         {
-            collector.variables.insert(alias.to_owned());
-            out.insert("bound_variable".into(), json!(alias));
+            out.insert("bound_variable".into(), json!(collector.var_ref(alias)));
         }
     }
     Value::Object(out)
@@ -773,7 +970,6 @@ fn build_effect(effect: &Value, collector: &mut Collector, node_id: &str) -> Val
         out.insert("visible".into(), json!(false));
     }
     for (key, out_key) in [
-        ("color", "color"),
         ("offset", "offset"),
         ("radius", "radius"),
         ("spread", "spread"),
@@ -801,8 +997,7 @@ fn build_effect(effect: &Value, collector: &mut Collector, node_id: &str) -> Val
         let mut bound = Map::new();
         for (k, v) in bv {
             if let Some(id) = v.get("id").and_then(Value::as_str) {
-                collector.variables.insert(id.to_owned());
-                bound.insert(k.clone(), json!(id));
+                bound.insert(k.clone(), json!(collector.var_ref(id)));
             }
         }
         if !bound.is_empty() {
@@ -830,11 +1025,13 @@ fn build_layout(node: &Value, collector: &mut Collector, node_id: &str) -> Value
         out.insert("mode".into(), m.clone());
     }
 
+    // Axis blocks elide Figma's defaults: `sizing: AUTO` (hug) and
+    // `align: MIN` (start).
     let mut primary = Map::new();
-    if let Some(v) = node.get("primaryAxisSizingMode") {
+    if let Some(v) = node.get("primaryAxisSizingMode").filter(|v| *v != "AUTO") {
         primary.insert("sizing".into(), v.clone());
     }
-    if let Some(v) = node.get("primaryAxisAlignItems") {
+    if let Some(v) = node.get("primaryAxisAlignItems").filter(|v| *v != "MIN") {
         primary.insert("align".into(), v.clone());
     }
     if let Some(v) = node.get("primaryAxisMinSize") {
@@ -848,10 +1045,10 @@ fn build_layout(node: &Value, collector: &mut Collector, node_id: &str) -> Value
     }
 
     let mut counter = Map::new();
-    if let Some(v) = node.get("counterAxisSizingMode") {
+    if let Some(v) = node.get("counterAxisSizingMode").filter(|v| *v != "AUTO") {
         counter.insert("sizing".into(), v.clone());
     }
-    if let Some(v) = node.get("counterAxisAlignItems") {
+    if let Some(v) = node.get("counterAxisAlignItems").filter(|v| *v != "MIN") {
         counter.insert("align".into(), v.clone());
     }
     if let Some(v) = node.get("counterAxisAlignContent") {
@@ -864,26 +1061,27 @@ fn build_layout(node: &Value, collector: &mut Collector, node_id: &str) -> Value
         out.insert("counter_axis".into(), Value::Object(counter));
     }
 
-    if let Some(w) = node.get("layoutWrap") {
+    if let Some(w) = node.get("layoutWrap").filter(|w| *w != "NO_WRAP") {
         out.insert("wrap".into(), w.clone());
     }
     if let Some(s) = node.get("itemSpacing") {
-        out.insert("item_spacing".into(), s.clone());
-    }
-
-    let mut padding = Map::new();
-    for (key, out_key) in [
-        ("paddingTop", "top"),
-        ("paddingRight", "right"),
-        ("paddingBottom", "bottom"),
-        ("paddingLeft", "left"),
-    ] {
-        if let Some(v) = node.get(key) {
-            padding.insert(out_key.into(), v.clone());
+        if s.as_f64().is_none_or(|f| f != 0.0) {
+            out.insert("item_spacing".into(), s.clone());
         }
     }
-    if !padding.is_empty() {
-        out.insert("padding".into(), Value::Object(padding));
+
+    // Padding: one number when uniform, else `[top, right, bottom, left]`
+    // (CSS order). Absent sides are 0. All-zero padding is omitted.
+    let sides: Vec<f64> = ["paddingTop", "paddingRight", "paddingBottom", "paddingLeft"]
+        .iter()
+        .map(|k| node.get(k).and_then(Value::as_f64).unwrap_or(0.0))
+        .collect();
+    if sides.iter().any(|v| *v != 0.0) {
+        if sides.iter().all(|v| (*v - sides[0]).abs() < 1e-9) {
+            out.insert("padding".into(), json!(sides[0]));
+        } else {
+            out.insert("padding".into(), json!(sides));
+        }
     }
 
     Value::Object(out)
@@ -908,11 +1106,14 @@ fn build_layout_child(node: &Value) -> Map<String, Value> {
             out.insert("positioning".into(), v.clone());
         }
     }
-    if let Some(v) = node.get("layoutSizingHorizontal") {
-        out.insert("sizing_horizontal".into(), v.clone());
-    }
-    if let Some(v) = node.get("layoutSizingVertical") {
-        out.insert("sizing_vertical".into(), v.clone());
+    // `sizing: "H/V"` — horizontal then vertical, each FIXED | HUG | FILL.
+    let sh = node.get("layoutSizingHorizontal").and_then(Value::as_str);
+    let sv = node.get("layoutSizingVertical").and_then(Value::as_str);
+    if sh.is_some() || sv.is_some() {
+        out.insert(
+            "sizing".into(),
+            json!(format!("{}/{}", sh.unwrap_or("-"), sv.unwrap_or("-"))),
+        );
     }
     // GRID parent — child grid placement.
     let mut grid = Map::new();
@@ -990,9 +1191,12 @@ fn build_text(node: &Value, opts: &ViewOptions, collector: &mut Collector) -> Op
 
 fn build_type_style(style: &Value, collector: &mut Collector, node_id: &str) -> Value {
     let mut out = Map::new();
+    // Dropped on purpose: `fontPostScriptName` (family + style say the same),
+    // `lineHeightPercent` / `lineHeightPercentFontSize` (restate
+    // `lineHeightPx` against the font size). `lineHeightUnit` is kept only
+    // when it isn't PIXELS, alignment only when it isn't the LEFT/TOP default.
     for (key, out_key) in [
         ("fontFamily", "font_family"),
-        ("fontPostScriptName", "font_post_script_name"),
         ("fontStyle", "font_style"),
         ("italic", "italic"),
         ("fontWeight", "font_weight"),
@@ -1002,8 +1206,6 @@ fn build_type_style(style: &Value, collector: &mut Collector, node_id: &str) -> 
         ("textAlignVertical", "text_align_vertical"),
         ("letterSpacing", "letter_spacing"),
         ("lineHeightPx", "line_height_px"),
-        ("lineHeightPercent", "line_height_percent"),
-        ("lineHeightPercentFontSize", "line_height_percent_font_size"),
         ("lineHeightUnit", "line_height_unit"),
         ("paragraphSpacing", "paragraph_spacing"),
         ("paragraphIndent", "paragraph_indent"),
@@ -1015,7 +1217,13 @@ fn build_type_style(style: &Value, collector: &mut Collector, node_id: &str) -> 
         ("hyperlink", "hyperlink"),
     ] {
         if let Some(v) = style.get(key) {
-            if !v.is_null() {
+            let is_default = match key {
+                "textAlignHorizontal" => v == "LEFT",
+                "textAlignVertical" => v == "TOP",
+                "lineHeightUnit" => v == "PIXELS",
+                _ => false,
+            };
+            if !v.is_null() && !is_default {
                 out.insert(out_key.into(), v.clone());
             }
         }
@@ -1034,15 +1242,8 @@ fn build_type_style(style: &Value, collector: &mut Collector, node_id: &str) -> 
     // Per-style boundVariables (e.g. text color bound to a token).
     if let Some(bv) = style.get("boundVariables") {
         let flat = flatten_bound_variables(bv, collector, node_id);
-        if let Some(map) = flat.as_object() {
-            for v in map.values() {
-                if let Some(s) = v.as_str() {
-                    collector.variables.insert(s.to_owned());
-                }
-            }
-            if !map.is_empty() {
-                out.insert("bound_variables".into(), flat);
-            }
+        if flat.as_object().is_some_and(|m| !m.is_empty()) {
+            out.insert("bound_variables".into(), flat);
         }
     }
     Value::Object(out)
@@ -1080,7 +1281,7 @@ fn derive_text_override_ranges(node: &Value) -> Vec<(usize, usize, u64)> {
 // Component / instance metadata
 // ───────────────────────────────────────────────────────────────────────────
 
-fn build_component(node: &Value) -> Map<String, Value> {
+fn build_component(node: &Value, collector: &mut Collector, node_id: &str) -> Map<String, Value> {
     let mut out = Map::new();
     let ty = node.get("type").and_then(Value::as_str).unwrap_or("");
     let is_relevant = matches!(ty, "INSTANCE" | "COMPONENT" | "COMPONENT_SET");
@@ -1100,17 +1301,74 @@ fn build_component(node: &Value) -> Map<String, Value> {
             }
         }
     }
-    // Figma puts the variant property assignment on `variantProperties`
-    // (older shape) or inside `componentProperties` with `type: VARIANT`.
-    if let Some(vp) = node.get("variantProperties") {
-        if !vp.is_null() {
-            out.insert("variant_properties".into(), vp.clone());
+    // Variant assignments come as `variantProperties` (older shape) and/or
+    // `componentProperties` entries with `type: VARIANT`; both land in
+    // `variants`. Everything else (BOOLEAN / TEXT / INSTANCE_SWAP) lands in
+    // `properties` as plain scalars — the `{type, value}` wrapper and the
+    // `#n:m` disambiguation suffix Figma appends to names are dropped. An
+    // INSTANCE_SWAP keeps its `preferredValues` (the allowed swap targets)
+    // as `preferred`: nothing else in the view says what the slot accepts.
+    let mut variants = Map::new();
+    let mut properties = Map::new();
+    if let Some(vp) = node.get("variantProperties").and_then(Value::as_object) {
+        for (k, v) in vp {
+            variants.insert(k.clone(), v.clone());
         }
     }
-    if let Some(cp) = node.get("componentProperties") {
-        if !cp.is_null() {
-            out.insert("component_properties".into(), cp.clone());
+    if let Some(cp) = node.get("componentProperties").and_then(Value::as_object) {
+        let names = display_property_names(cp);
+        for (raw_name, prop) in cp {
+            let name = names
+                .get(raw_name)
+                .cloned()
+                .unwrap_or_else(|| raw_name.clone());
+            let ptype = prop.get("type").and_then(Value::as_str).unwrap_or("");
+            let value = prop.get("value").cloned().unwrap_or(Value::Null);
+            let bound = prop
+                .get("boundVariables")
+                .filter(|bv| bv.as_object().is_some_and(|m| !m.is_empty()))
+                .map(|bv| flatten_bound_variables(bv, collector, node_id));
+            let mut rendered = match ptype {
+                "VARIANT" | "BOOLEAN" | "TEXT" => value,
+                "INSTANCE_SWAP" => {
+                    let mut m = Map::new();
+                    m.insert("instance".into(), value);
+                    if let Some(pv) = prop.get("preferredValues").and_then(Value::as_array) {
+                        if !pv.is_empty() {
+                            m.insert("preferred".into(), Value::Array(pv.clone()));
+                        }
+                    }
+                    Value::Object(m)
+                }
+                other => {
+                    collector.record_unknown("component_property.type", node_id, other);
+                    json!({ "type": other, "value": value })
+                }
+            };
+            if let Some(bv) = bound {
+                let mut wrapped = match rendered {
+                    Value::Object(m) => m,
+                    scalar => {
+                        let mut m = Map::new();
+                        m.insert("value".into(), scalar);
+                        m
+                    }
+                };
+                wrapped.insert("bound_variables".into(), bv);
+                rendered = Value::Object(wrapped);
+            }
+            if ptype == "VARIANT" {
+                variants.insert(name, rendered);
+            } else {
+                properties.insert(name, rendered);
+            }
         }
+    }
+    if !variants.is_empty() {
+        out.insert("variants".into(), Value::Object(variants));
+    }
+    if !properties.is_empty() {
+        out.insert("properties".into(), Value::Object(properties));
     }
     if let Some(pd) = node.get("componentPropertyDefinitions") {
         if !pd.is_null() {
@@ -1118,6 +1376,44 @@ fn build_component(node: &Value) -> Map<String, Value> {
         }
     }
     out
+}
+
+/// Map each raw component-property name to its display name: the `#n:m`
+/// suffix is stripped unless two properties would collide, in which case
+/// both keep their raw names.
+fn display_property_names(props: &Map<String, Value>) -> BTreeMap<String, String> {
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    let stripped: Vec<(String, String)> = props
+        .keys()
+        .map(|k| (k.clone(), strip_property_suffix(k).to_owned()))
+        .collect();
+    for (_, s) in &stripped {
+        *counts.entry(s.clone()).or_default() += 1;
+    }
+    stripped
+        .into_iter()
+        .map(|(raw, s)| {
+            let display = if counts[&s] > 1 { raw.clone() } else { s };
+            (raw, display)
+        })
+        .collect()
+}
+
+/// `Close#1610:0` → `Close`. Leaves names without a `#<digits>:<digits>`
+/// tail untouched.
+fn strip_property_suffix(name: &str) -> &str {
+    let Some(hash) = name.rfind('#') else {
+        return name;
+    };
+    let tail = &name[hash + 1..];
+    let is_ref = tail.split_once(':').is_some_and(|(a, b)| {
+        !a.is_empty() && !b.is_empty() && a.chars().chain(b.chars()).all(|c| c.is_ascii_digit())
+    });
+    if is_ref && hash > 0 {
+        &name[..hash]
+    } else {
+        name
+    }
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -1169,48 +1465,152 @@ fn build_prototype(node: &Value, include_interactions: bool) -> Option<Value> {
 // Bound variables flattening
 // ───────────────────────────────────────────────────────────────────────────
 
-/// Flatten Figma's `boundVariables` shape into a simple `{ property_path: id }`
-/// map. Handles three layouts:
-/// - `{ cornerRadius: { id, type: VARIABLE_ALIAS } }` → `cornerRadius -> id`
-/// - `{ fills: [{ id, type }, { id, type }] }` → `fills[0] -> id`, `fills[1] -> id`
+/// Figma reports a colour binding twice: on the paint itself
+/// (`fills[i].boundVariables.color`) and in the node's `boundVariables` as
+/// `fills[i]`. The view already prints the paint's copy as
+/// `fills[i].bound_variable`, so the node-level `fills[i]`/`strokes[i]` entry
+/// is removed when the emitted paint at that index carries the same handle.
+/// Any entry that isn't mirrored (paint list not emitted under `--only`,
+/// gradient paints, a differing handle) is kept.
+fn drop_paint_bindings_already_on_paints(flat: &mut Value, out: &Map<String, Value>) {
+    let Some(map) = flat.as_object_mut() else {
+        return;
+    };
+    map.retain(|key, handle| {
+        let Some((list, idx)) = parse_paint_key(key) else {
+            return true;
+        };
+        let on_paint = out
+            .get(list)
+            .and_then(Value::as_array)
+            .and_then(|paints| paints.get(idx))
+            .and_then(|p| p.get("bound_variable"));
+        on_paint != Some(handle)
+    });
+}
+
+/// `fills[3]` → `("fills", 3)`; anything else → `None`.
+fn parse_paint_key(key: &str) -> Option<(&str, usize)> {
+    let (list, rest) = key.split_once('[')?;
+    if !matches!(list, "fills" | "strokes") {
+        return None;
+    }
+    rest.strip_suffix(']')?.parse().ok().map(|i| (list, i))
+}
+
+/// Flatten Figma's `boundVariables` shape into a simple
+/// `{ property_path: handle }` map, interning each id via
+/// [`Collector::var_ref`]. Handles three layouts:
+/// - `{ cornerRadius: { id, type: VARIABLE_ALIAS } }` → `cornerRadius -> v1`
+/// - `{ fills: [{ id, type }, { id, type }] }` → `fills[0] -> v1`, `fills[1] -> v2`
 /// - `{ characters: { id } }` → string-property bindings on TEXT nodes.
 fn flatten_bound_variables(bv: &Value, collector: &mut Collector, subject: &str) -> Value {
     let mut out = Map::new();
-    let obj = match bv.as_object() {
-        Some(o) => o,
-        None => {
-            collector.record_unknown(
-                "bound_variables.root",
-                subject,
-                format!("expected object, got {}", value_kind(bv)),
-            );
-            return Value::Object(out);
-        }
+    let Some(obj) = bv.as_object() else {
+        collector.record_unknown(
+            "bound_variables.root",
+            subject,
+            format!("expected object, got {}", value_kind(bv)),
+        );
+        return Value::Object(out);
     };
+    flatten_bound_variables_into(obj, "", &mut out, collector, subject);
+    Value::Object(out)
+}
+
+/// Recursive worker for [`flatten_bound_variables`]. `prefix` is the dotted
+/// property path so far; nested maps such as per-corner radii
+/// (`rectangleCornerRadii.RECTANGLE_TOP_LEFT_CORNER_RADIUS`) or `size.x`
+/// flatten to dotted keys instead of being dropped with a warning.
+fn flatten_bound_variables_into(
+    obj: &Map<String, Value>,
+    prefix: &str,
+    out: &mut Map<String, Value>,
+    collector: &mut Collector,
+    subject: &str,
+) {
     for (key, value) in obj {
+        let path = if prefix.is_empty() {
+            key.clone()
+        } else {
+            format!("{prefix}.{key}")
+        };
         if let Some(arr) = value.as_array() {
             for (i, entry) in arr.iter().enumerate() {
                 if let Some(id) = entry.get("id").and_then(Value::as_str) {
-                    out.insert(format!("{key}[{i}]"), json!(id));
+                    out.insert(format!("{path}[{i}]"), json!(collector.var_ref(id)));
                 } else {
                     collector.record_unknown(
                         "bound_variables.entry",
                         subject,
-                        format!("{key}[{i}] has no .id"),
+                        format!("{path}[{i}] has no .id"),
                     );
                 }
             }
         } else if let Some(id) = value.get("id").and_then(Value::as_str) {
-            out.insert(key.clone(), json!(id));
+            out.insert(path, json!(collector.var_ref(id)));
+        } else if let Some(nested) = value
+            .as_object()
+            .filter(|m| m.values().any(|v| v.is_object() || v.is_array()))
+        {
+            if key == "rectangleCornerRadii" {
+                flatten_corner_radii(nested, &path, out, collector, subject);
+            } else {
+                flatten_bound_variables_into(nested, &path, out, collector, subject);
+            }
         } else {
             collector.record_unknown(
                 "bound_variables.entry",
                 subject,
-                format!("{key} has no .id and is not an array"),
+                format!("{path} has no .id and is not an array"),
             );
         }
     }
-    Value::Object(out)
+}
+
+/// Per-corner radius bindings arrive as
+/// `{ RECTANGLE_TOP_LEFT_CORNER_RADIUS: {id}, … }`. When all four corners
+/// bind the same variable — the common case — emit one `path -> handle`;
+/// otherwise `path.top_left` etc. Unknown corner keys fall back to the
+/// generic recursion so nothing is dropped.
+fn flatten_corner_radii(
+    nested: &Map<String, Value>,
+    path: &str,
+    out: &mut Map<String, Value>,
+    collector: &mut Collector,
+    subject: &str,
+) {
+    const CORNERS: [(&str, &str); 4] = [
+        ("RECTANGLE_TOP_LEFT_CORNER_RADIUS", "top_left"),
+        ("RECTANGLE_TOP_RIGHT_CORNER_RADIUS", "top_right"),
+        ("RECTANGLE_BOTTOM_RIGHT_CORNER_RADIUS", "bottom_right"),
+        ("RECTANGLE_BOTTOM_LEFT_CORNER_RADIUS", "bottom_left"),
+    ];
+    let all_known = nested
+        .keys()
+        .all(|k| CORNERS.iter().any(|(raw, _)| raw == k));
+    let ids: Vec<Option<&str>> = CORNERS
+        .iter()
+        .map(|(raw, _)| {
+            nested
+                .get(*raw)
+                .and_then(|v| v.get("id"))
+                .and_then(Value::as_str)
+        })
+        .collect();
+    if !all_known || ids.iter().any(Option::is_none) {
+        flatten_bound_variables_into(nested, path, out, collector, subject);
+        return;
+    }
+    if ids.iter().all(|id| *id == ids[0]) {
+        let handle = collector.var_ref(ids[0].unwrap_or_default());
+        out.insert(path.to_owned(), json!(handle));
+        return;
+    }
+    for ((_, short), id) in CORNERS.iter().zip(ids) {
+        let handle = collector.var_ref(id.unwrap_or_default());
+        out.insert(format!("{path}.{short}"), json!(handle));
+    }
 }
 
 fn value_kind(v: &Value) -> &'static str {
@@ -1228,53 +1628,38 @@ fn value_kind(v: &Value) -> &'static str {
 // Top-level blocks (variables index, styles index)
 // ───────────────────────────────────────────────────────────────────────────
 
-/// Build the top-level `variables` block from the variables sidecar, but
-/// only for ids that the emitted nodes referenced. `vars_root` is the raw
-/// `/v1/files/{key}/variables/local` response or `None` if no sidecar.
-pub fn build_variables_block(
-    vars_root: Option<&Value>,
-    refs: &BTreeSet<String>,
-    collector: &mut Collector,
-) -> Value {
-    if refs.is_empty() {
-        return Value::Object(Map::new());
-    }
-    let Some(root) = vars_root else {
-        return Value::Object(Map::new());
-    };
-    let meta = root.get("meta").unwrap_or(root);
-    let variables = meta.get("variables").and_then(Value::as_object);
-    let collections = meta.get("variableCollections").and_then(Value::as_object);
+/// Build the top-level `variables` block: one entry per interned handle
+/// (`v1`, `v2`, … in the order the walk encountered them), each carrying the
+/// raw `id` plus — when the variables sidecar has it — name, collection,
+/// type and values. `vars_root` is the raw `/v1/files/{key}/variables/local`
+/// response or `None` if no sidecar; without it every entry is `{id}` only,
+/// which still lets a reader see which properties share a token.
+pub fn build_variables_block(vars_root: Option<&Value>, collector: &mut Collector) -> Value {
+    let meta = vars_root.map(|root| root.get("meta").unwrap_or(root));
+    let variables = meta
+        .and_then(|m| m.get("variables"))
+        .and_then(Value::as_object);
+    let collections = meta
+        .and_then(|m| m.get("variableCollections"))
+        .and_then(Value::as_object);
 
-    // Worklist over the closure of `refs` under alias edges: building a
-    // variable entry can record alias-target ids into `collector.variables`
-    // (see `resolve_variable_value`), and those targets need their own entries
-    // too. We can't just iterate `refs` because it's an immutable snapshot
-    // taken before any entry was built. Accumulate into a BTreeMap so the
-    // output stays sorted regardless of discovery order.
-    let mut entries: BTreeMap<String, Value> = BTreeMap::new();
-    let mut seen: BTreeSet<String> = refs.iter().cloned().collect();
-    let mut queue: Vec<String> = refs.iter().cloned().collect();
-    while let Some(id) = queue.pop() {
-        let Some(v) = variables.and_then(|m| m.get(&id)) else {
-            continue;
-        };
-        let entry = build_variable_entry(v, collections, collector, &id);
-        entries.insert(id, entry);
-        let new_ids: Vec<String> = collector
-            .variables
-            .iter()
-            .filter(|v| !seen.contains(*v))
-            .cloned()
-            .collect();
-        for nid in new_ids {
-            seen.insert(nid.clone());
-            queue.push(nid);
-        }
-    }
+    // Index loop rather than iterator: building an entry can intern alias
+    // targets (see `resolve_variable_value`), which appends to
+    // `var_handles` — those need entries too, so we walk until the list
+    // stops growing.
     let mut out = Map::new();
-    for (id, entry) in entries {
-        out.insert(id, entry);
+    let mut i = 0;
+    while i < collector.var_handles.len() {
+        let id = collector.var_handles[i].clone();
+        let mut entry = Map::new();
+        entry.insert("id".into(), json!(id));
+        if let Some(v) = variables.and_then(|m| m.get(&id)) {
+            if let Value::Object(resolved) = build_variable_entry(v, collections, collector, &id) {
+                entry.extend(resolved);
+            }
+        }
+        out.insert(var_handle(i), Value::Object(entry));
+        i += 1;
     }
     Value::Object(out)
 }
@@ -1382,10 +1767,11 @@ fn resolve_variable_value(
     if let Some(obj) = raw.as_object() {
         if obj.get("type").and_then(Value::as_str) == Some("VARIABLE_ALIAS") {
             if let Some(id) = obj.get("id") {
-                if let Some(id_str) = id.as_str() {
-                    collector.variables.insert(id_str.to_owned());
-                }
-                return json!({ "alias": id.clone() });
+                let shown = match id.as_str() {
+                    Some(id_str) => json!(collector.var_ref(id_str)),
+                    None => id.clone(),
+                };
+                return json!({ "alias": shown });
             }
         }
     }
@@ -1439,6 +1825,51 @@ pub fn build_styles_index_block(file_root: &Value, refs: &BTreeSet<String>) -> V
 // ───────────────────────────────────────────────────────────────────────────
 // Helpers
 // ───────────────────────────────────────────────────────────────────────────
+
+/// Figma's default constraints; carry no information, so they're elided.
+fn is_default_constraints(c: &Value) -> bool {
+    c.get("vertical").and_then(Value::as_str) == Some("TOP")
+        && c.get("horizontal").and_then(Value::as_str) == Some("LEFT")
+}
+
+fn approx_eq(a: Option<&Value>, b: Option<&Value>) -> bool {
+    match (a.and_then(Value::as_f64), b.and_then(Value::as_f64)) {
+        (Some(x), Some(y)) => (x - y).abs() < 0.01,
+        _ => false,
+    }
+}
+
+/// A descendant's `bounds` relative to its parent's absolute box. Flow
+/// children (parent has auto-layout, child isn't absolutely positioned) get
+/// `width`/`height` only — auto-layout computes their position. A parent
+/// without a box (a CANVAS: pages have no `absoluteBoundingBox`) counts as
+/// sitting at the origin, so its children come out in canvas coordinates —
+/// which *is* their position relative to the page. A child box the
+/// arithmetic can't read falls back to the raw value so nothing is lost.
+/// Float noise from the subtraction is cleaned by `round_floats`.
+fn relative_bounds(abs: &Value, node: &Value, parent: &Value) -> Value {
+    let num = |v: &Value, k: &str| v.get(k).and_then(Value::as_f64);
+    let (Some(x), Some(y), Some(w), Some(h)) = (
+        num(abs, "x"),
+        num(abs, "y"),
+        num(abs, "width"),
+        num(abs, "height"),
+    ) else {
+        return abs.clone();
+    };
+    if is_flow_child(node, Some(parent)) {
+        return json!({ "width": w, "height": h });
+    }
+    let pbox = parent.get("absoluteBoundingBox");
+    let px = pbox.and_then(|b| num(b, "x")).unwrap_or(0.0);
+    let py = pbox.and_then(|b| num(b, "y")).unwrap_or(0.0);
+    json!({
+        "x": x - px,
+        "y": y - py,
+        "width": w,
+        "height": h,
+    })
+}
 
 fn merge_size_constraint(out: &mut Map<String, Value>, key: &str, v: &Value) {
     if v.is_null() {
@@ -1541,7 +1972,7 @@ mod tests {
         let mut c = Collector::default();
         build_node_view(&node, &only(&[Section::Fills]), &mut c);
         assert!(
-            c.variables.contains("VariableID:42:1"),
+            c.var_handles.contains(&"VariableID:42:1".to_owned()),
             "kept sections must keep feeding the hoisted variables block"
         );
     }
@@ -1552,7 +1983,7 @@ mod tests {
         let mut c = Collector::default();
         let view = build_node_view(&node, &only(&[Section::Geometry]), &mut c);
         assert!(
-            c.variables.is_empty(),
+            c.var_handles.is_empty(),
             "excluded sections must not pollute the collector"
         );
         assert!(view.get("bounds").is_some());
@@ -1568,7 +1999,7 @@ mod tests {
         for key in ["fills", "strokes", "layout", "bounds", "children"] {
             assert!(obj.contains_key(key), "missing `{key}` in unfiltered view");
         }
-        assert!(c_all.variables.contains("VariableID:42:1"));
+        assert!(c_all.var_handles.contains(&"VariableID:42:1".to_owned()));
     }
 
     #[test]
@@ -1582,8 +2013,9 @@ mod tests {
         let v = build_paint(&paint, &mut c, "1:2");
         assert_eq!(v["type"], "SOLID");
         assert_eq!(v["hex"], "#ff0000");
-        assert_eq!(v["bound_variable"], "VariableID:42:1");
-        assert!(c.variables.contains("VariableID:42:1"));
+        assert_eq!(v["bound_variable"], "v1");
+        assert!(c.var_handles.contains(&"VariableID:42:1".to_owned()));
+        assert_eq!(c.var_handles, vec!["VariableID:42:1"]);
         assert!(c.warnings.is_empty());
     }
 
@@ -1618,29 +2050,92 @@ mod tests {
         let mut c = Collector::default();
         let v = build_layout(&node, &mut c, "1:2");
         assert_eq!(v["mode"], "VERTICAL");
-        assert_eq!(v["primary_axis"]["sizing"], "AUTO");
-        assert_eq!(v["primary_axis"]["align"], "MIN");
-        assert_eq!(v["counter_axis"]["align"], "CENTER");
+        // AUTO sizing / MIN alignment are Figma's defaults and are elided.
+        assert!(v.get("primary_axis").is_none(), "{v}");
+        assert_eq!(
+            v["counter_axis"],
+            json!({"sizing": "FIXED", "align": "CENTER"})
+        );
         assert_eq!(v["item_spacing"], 12);
-        assert_eq!(v["padding"]["top"], 20);
-        assert_eq!(v["padding"]["left"], 16);
+        // Non-uniform padding is `[top, right, bottom, left]`.
+        assert_eq!(v["padding"], json!([20.0, 16.0, 20.0, 16.0]));
+        assert!(v.get("wrap").is_none());
+
+        let uniform = json!({"layoutMode": "HORIZONTAL", "paddingTop": 8, "paddingRight": 8,
+                             "paddingBottom": 8, "paddingLeft": 8, "layoutWrap": "WRAP",
+                             "itemSpacing": 0});
+        let v = build_layout(&uniform, &mut c, "1:3");
+        assert_eq!(v["padding"], 8.0);
+        assert_eq!(v["wrap"], "WRAP");
+        assert!(v.get("item_spacing").is_none(), "zero gap is the default");
+    }
+
+    #[test]
+    fn flatten_bound_variables_recurses_into_nested_maps() {
+        // Per-corner radii and `size` bind through one more level of nesting.
+        let bv = json!({
+            "rectangleCornerRadii": {
+                "RECTANGLE_TOP_LEFT_CORNER_RADIUS": {"type": "VARIABLE_ALIAS", "id": "VariableID:r"},
+                "RECTANGLE_TOP_RIGHT_CORNER_RADIUS": {"type": "VARIABLE_ALIAS", "id": "VariableID:r"}
+            },
+            "size": {"y": {"type": "VARIABLE_ALIAS", "id": "VariableID:h"}}
+        });
+        let mut c = Collector::default();
+        let v = flatten_bound_variables(&bv, &mut c, "1:2");
+        // Two of four corners known → generic recursion keeps every binding.
+        assert_eq!(
+            v,
+            json!({
+                "rectangleCornerRadii.RECTANGLE_TOP_LEFT_CORNER_RADIUS": "v1",
+                "rectangleCornerRadii.RECTANGLE_TOP_RIGHT_CORNER_RADIUS": "v1",
+                "size.y": "v2"
+            })
+        );
+        assert!(c.warnings.is_empty(), "{:?}", c.warnings);
+
+        let corner = |id: &str| json!({"type": "VARIABLE_ALIAS", "id": id});
+        let uniform = json!({"rectangleCornerRadii": {
+            "RECTANGLE_TOP_LEFT_CORNER_RADIUS": corner("VariableID:r"),
+            "RECTANGLE_TOP_RIGHT_CORNER_RADIUS": corner("VariableID:r"),
+            "RECTANGLE_BOTTOM_RIGHT_CORNER_RADIUS": corner("VariableID:r"),
+            "RECTANGLE_BOTTOM_LEFT_CORNER_RADIUS": corner("VariableID:r"),
+        }});
+        let mut c = Collector::default();
+        assert_eq!(
+            flatten_bound_variables(&uniform, &mut c, "u"),
+            json!({"rectangleCornerRadii": "v1"})
+        );
+        let mixed = json!({"rectangleCornerRadii": {
+            "RECTANGLE_TOP_LEFT_CORNER_RADIUS": corner("VariableID:r"),
+            "RECTANGLE_TOP_RIGHT_CORNER_RADIUS": corner("VariableID:r"),
+            "RECTANGLE_BOTTOM_RIGHT_CORNER_RADIUS": corner("VariableID:s"),
+            "RECTANGLE_BOTTOM_LEFT_CORNER_RADIUS": corner("VariableID:s"),
+        }});
+        let mut c = Collector::default();
+        assert_eq!(
+            flatten_bound_variables(&mixed, &mut c, "m"),
+            json!({"rectangleCornerRadii.top_left": "v1", "rectangleCornerRadii.top_right": "v1",
+                   "rectangleCornerRadii.bottom_right": "v2", "rectangleCornerRadii.bottom_left": "v2"})
+        );
     }
 
     #[test]
     fn flatten_bound_variables_handles_arrays_and_objects() {
         let bv = json!({
-            "cornerRadius": {"type": "VARIABLE_ALIAS", "id": "v1"},
+            "cornerRadius": {"type": "VARIABLE_ALIAS", "id": "VariableID:a"},
             "fills": [
-                {"type": "VARIABLE_ALIAS", "id": "v2"},
-                {"type": "VARIABLE_ALIAS", "id": "v3"}
+                {"type": "VARIABLE_ALIAS", "id": "VariableID:b"},
+                {"type": "VARIABLE_ALIAS", "id": "VariableID:a"}
             ]
         });
         let mut c = Collector::default();
         let v = flatten_bound_variables(&bv, &mut c, "1:2");
         let m = v.as_object().unwrap();
+        // Handles are assigned in encounter order and reused for repeats.
         assert_eq!(m["cornerRadius"], "v1");
         assert_eq!(m["fills[0]"], "v2");
-        assert_eq!(m["fills[1]"], "v3");
+        assert_eq!(m["fills[1]"], "v1");
+        assert_eq!(c.var_handles, vec!["VariableID:a", "VariableID:b"]);
         assert!(c.warnings.is_empty());
     }
 
@@ -1729,8 +2224,6 @@ mod tests {
 
     #[test]
     fn variables_block_renders_color_as_hex() {
-        let mut refs = BTreeSet::new();
-        refs.insert("VariableID:42:1".to_owned());
         let vars_root = json!({
             "meta": {
                 "variables": {
@@ -1754,8 +2247,10 @@ mod tests {
             }
         });
         let mut c = Collector::default();
-        let block = build_variables_block(Some(&vars_root), &refs, &mut c);
-        let entry = &block["VariableID:42:1"];
+        assert_eq!(c.var_ref("VariableID:42:1"), "v1");
+        let block = build_variables_block(Some(&vars_root), &mut c);
+        let entry = &block["v1"];
+        assert_eq!(entry["id"], "VariableID:42:1");
         assert_eq!(entry["name"], "color/brand/primary");
         assert_eq!(entry["resolved_type"], "COLOR");
         assert_eq!(entry["values_by_mode"]["Light"], "#0a85ff");
@@ -1765,10 +2260,8 @@ mod tests {
     #[test]
     fn variables_block_pulls_in_aliased_variable() {
         // A semantic COLOR variable whose value aliases a primitive variable.
-        // `refs` references only the semantic id; the block must still emit the
-        // aliased primitive so the `{alias: id}` value resolves to a definition.
-        let mut refs = BTreeSet::new();
-        refs.insert("VariableID:sem:1".to_owned());
+        // Only the semantic id was referenced by a node; the block must still
+        // emit the aliased primitive so `{alias: v2}` resolves to a definition.
         let vars_root = json!({
             "meta": {
                 "variables": {
@@ -1799,15 +2292,14 @@ mod tests {
             }
         });
         let mut c = Collector::default();
-        let block = build_variables_block(Some(&vars_root), &refs, &mut c);
-        // The alias value surfaces the target id…
-        assert_eq!(
-            block["VariableID:sem:1"]["values_by_mode"]["Light"]["alias"],
-            "VariableID:prim:1"
-        );
+        c.var_ref("VariableID:sem:1");
+        let block = build_variables_block(Some(&vars_root), &mut c);
+        // The alias value surfaces the target's handle…
+        assert_eq!(block["v1"]["values_by_mode"]["Light"]["alias"], "v2");
         // …and the aliased primitive is pulled into the block with its own def.
+        assert_eq!(block["v2"]["id"], "VariableID:prim:1");
         assert_eq!(
-            block["VariableID:prim:1"]["values_by_mode"]["Light"], "#0a85ff",
+            block["v2"]["values_by_mode"]["Light"], "#0a85ff",
             "aliased primitive must be pulled into the block"
         );
     }
@@ -1888,21 +2380,461 @@ mod tests {
             meta: true,
             rich_text: false,
             only: None,
+            include_hidden: false,
         };
         let mut c = Collector::default();
         let view = build_node_view(&node, &opts, &mut c);
         let got = serde_json::to_string(&view).unwrap();
-        let expected = r##"{"id":"10:20","type":"FRAME","name":"Card","visible":false,"locked":true,"rotation":0.5,"opacity":0.8,"blend_mode":"MULTIPLY","preserve_ratio":true,"is_mask":true,"mask_type":"ALPHA","bounds":{"x":0.0,"y":0.0,"width":100.0,"height":50.0},"size":{"x":100.0,"y":50.0},"relative_transform":[[1.0,0.0,5.0],[0.0,1.0,7.0]],"constraints":{"vertical":"TOP","horizontal":"LEFT"},"size_constraints":{"min_width":10.0,"max_width":200.0},"corner":{"rectangle_corner_radii":[4.0,4.0,0.0,0.0]},"clips_content":true,"fills":[{"type":"SOLID","color":{"r":1.0,"g":0.0,"b":0.0,"a":1.0},"hex":"#ff0000"}],"strokes":[{"type":"SOLID","color":{"r":0.0,"g":0.0,"b":0.0,"a":1.0},"hex":"#000000"}],"stroke":{"weight":2.0},"effects":[{"type":"DROP_SHADOW","color":{"r":0.0,"g":0.0,"b":0.0,"a":0.5},"offset":{"x":0.0,"y":2.0},"radius":4.0,"hex":"#00000080"}],"layout":{"mode":"VERTICAL"},"layout_grids":[{"pattern":"GRID","sectionSize":8.0}],"property_refs":{"characters":"prop1"},"prototype":{"is_flow_start":true},"styles":{"fill":"S:1","text":"S:2"},"bound_variables":{"fills[0]":"VariableID:9"},"explicit_variable_modes":{"VariableCollectionId:1":"mode1"},"children":[{"id":"10:21","type":"TEXT","name":"Label","text":{"characters":"Hello"}}]}"##;
+        let expected = r##"{"id":"10:20","type":"FRAME","name":"Card","visible":false,"locked":true,"rotation":0.5,"opacity":0.8,"blend_mode":"MULTIPLY","preserve_ratio":true,"is_mask":true,"mask_type":"ALPHA","bounds":{"x":0.0,"y":0.0,"width":100.0,"height":50.0},"relative_transform":[[1.0,0.0,5.0],[0.0,1.0,7.0]],"size_constraints":{"min_width":10.0,"max_width":200.0},"corner":{"rectangle_corner_radii":[4.0,4.0,0.0,0.0]},"clips_content":true,"fills":[{"type":"SOLID","hex":"#ff0000"}],"strokes":[{"type":"SOLID","hex":"#000000"}],"stroke":{"weight":2.0},"effects":[{"type":"DROP_SHADOW","offset":{"x":0.0,"y":2.0},"radius":4.0,"hex":"#00000080"}],"layout":{"mode":"VERTICAL"},"layout_grids":[{"pattern":"GRID","sectionSize":8.0}],"property_refs":{"characters":"prop1"},"prototype":{"is_flow_start":true},"styles":{"fill":"S:1","text":"S:2"},"bound_variables":{"fills[0]":"v1"},"explicit_variable_modes":{"VariableCollectionId:1":"mode1"},"children":[{"id":"10:21","type":"TEXT","name":"Label","text":{"characters":"Hello"}}]}"##;
         assert_eq!(got, expected);
         assert_eq!(
             c.styles.iter().cloned().collect::<Vec<_>>(),
             vec!["S:1", "S:2"]
         );
+        assert_eq!(c.var_handles, vec!["VariableID:9"]);
         assert_eq!(
-            c.variables.iter().cloned().collect::<Vec<_>>(),
-            vec!["VariableID:9"]
+            c.emitted_ids.iter().cloned().collect::<Vec<_>>(),
+            vec!["10:20", "10:21"]
         );
         assert_eq!(c.emitted_descendants, 1);
         assert!(c.omitted_ids.is_empty());
+    }
+    // ── Projection rules (the node-info diet) ─────────────────────────────
+
+    /// An auto-layout parent at (100,200) with: a visible flow child, an
+    /// absolutely positioned child, a hidden child that has its own visible
+    /// descendant, and a vector leaf.
+    fn diet_fixture() -> Value {
+        json!({
+            "id": "1:0", "type": "FRAME", "name": "Panel",
+            "absoluteBoundingBox": {"x": 100.0, "y": 200.0, "width": 400.0, "height": 300.0},
+            "size": {"x": 400.0, "y": 300.0},
+            "constraints": {"vertical": "TOP", "horizontal": "LEFT"},
+            "layoutMode": "VERTICAL",
+            "children": [
+                {"id": "1:1", "type": "TEXT", "name": "Flow",
+                 "absoluteBoundingBox": {"x": 120.0, "y": 210.0, "width": 80.0, "height": 20.0},
+                 "constraints": {"vertical": "TOP", "horizontal": "LEFT"},
+                 "layoutSizingHorizontal": "HUG", "layoutSizingVertical": "FIXED",
+                 "characters": "hi",
+                 "style": {"fontFamily": "Inter", "fontPostScriptName": "Inter-Medium",
+                           "fontStyle": "Medium", "fontWeight": 500, "fontSize": 16.0,
+                           "textAlignHorizontal": "LEFT", "textAlignVertical": "TOP",
+                           "lineHeightPx": 24.0, "lineHeightPercent": 150.0,
+                           "lineHeightPercentFontSize": 150.0, "lineHeightUnit": "PIXELS",
+                           "textAutoResize": "HEIGHT"}},
+                {"id": "1:2", "type": "FRAME", "name": "Pinned",
+                 "absoluteBoundingBox": {"x": 450.3, "y": 250.0, "width": 40.0, "height": 40.0},
+                 "constraints": {"vertical": "TOP", "horizontal": "RIGHT"},
+                 "layoutPositioning": "ABSOLUTE"},
+                {"id": "1:3", "type": "INSTANCE", "name": "Alt state", "visible": false,
+                 "absoluteBoundingBox": {"x": 100.0, "y": 200.0, "width": 10.0, "height": 10.0},
+                 "children": [{"id": "1:4", "type": "TEXT", "name": "Inside hidden", "characters": "x"}]},
+                {"id": "1:5", "type": "VECTOR", "name": "Icon path",
+                 "absoluteBoundingBox": {"x": 100.0, "y": 200.0, "width": 16.0, "height": 16.0},
+                 "constraints": {"vertical": "SCALE", "horizontal": "SCALE"},
+                 "layoutSizingHorizontal": "FIXED", "layoutSizingVertical": "FIXED",
+                 "fills": [{"type": "SOLID", "color": {"r": 0.0, "g": 0.5, "b": 0.0, "a": 0.5},
+                            "boundVariables": {"color": {"type": "VARIABLE_ALIAS", "id": "VariableID:icon"}}}]}
+            ]
+        })
+    }
+
+    fn child<'a>(view: &'a Value, id: &str) -> &'a Value {
+        view["children"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == id)
+            .unwrap_or_else(|| panic!("no child {id} in {view}"))
+    }
+
+    #[test]
+    fn hidden_children_are_pruned_and_listed_on_parent() {
+        let mut c = Collector::default();
+        let view = build_node_view(&diet_fixture(), &ViewOptions::default(), &mut c);
+        let ids: Vec<&str> = view["children"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["1:1", "1:2", "1:5"], "hidden subtree must not render");
+        assert_eq!(
+            view["hidden_children"],
+            json!([{"id": "1:3", "name": "Alt state", "type": "INSTANCE"}])
+        );
+        // Pruned nodes don't consume the node budget.
+        assert_eq!(c.emitted_descendants, 3);
+    }
+
+    #[test]
+    fn include_hidden_restores_hidden_subtrees() {
+        let opts = ViewOptions {
+            include_hidden: true,
+            ..ViewOptions::default()
+        };
+        let mut c = Collector::default();
+        let view = build_node_view(&diet_fixture(), &opts, &mut c);
+        let alt = child(&view, "1:3");
+        assert_eq!(alt["visible"], false, "the flag itself is still surfaced");
+        assert_eq!(alt["children"][0]["id"], "1:4");
+        assert!(view.get("hidden_children").is_none());
+    }
+
+    #[test]
+    fn property_driven_hidden_layer_renders_inside_component_definition() {
+        let icon = json!({
+            "id": "12:41", "type": "INSTANCE", "name": "Leading Icon", "visible": false,
+            "componentPropertyReferences": {"visible": "Show Icon#12:3"},
+            "absoluteBoundingBox": {"x": 0.0, "y": 0.0, "width": 16.0, "height": 16.0},
+            "layoutSizingHorizontal": "FIXED", "layoutSizingVertical": "FIXED"
+        });
+        let definition = json!({
+            "id": "12:40", "type": "COMPONENT", "name": "Button", "layoutMode": "HORIZONTAL",
+            "componentPropertyDefinitions": {"Show Icon#12:3": {"type": "BOOLEAN", "defaultValue": false}},
+            "children": [icon, {"id": "12:42", "type": "TEXT", "name": "Label", "characters": "Go"}]
+        });
+        let mut c = Collector::default();
+        let view = build_node_view(&definition, &ViewOptions::default(), &mut c);
+        let icon_view = child(&view, "12:41");
+        assert_eq!(icon_view["visible"], false, "the flag is still surfaced");
+        assert_eq!(
+            icon_view["property_refs"],
+            json!({"visible": "Show Icon#12:3"})
+        );
+        assert_eq!(icon_view["layout_child"], json!({"sizing": "FIXED/FIXED"}));
+        assert!(view.get("hidden_children").is_none());
+
+        // Inside an instance the property is simply off: prune as usual.
+        let mut instance = definition.clone();
+        instance["type"] = json!("INSTANCE");
+        let view = build_node_view(
+            &instance,
+            &ViewOptions::default(),
+            &mut Collector::default(),
+        );
+        assert!(view["children"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|n| n["id"] != "12:41"));
+        assert_eq!(view["hidden_children"][0]["id"], "12:41");
+    }
+
+    #[test]
+    fn hidden_target_is_still_rendered() {
+        let node = json!({"id": "9:9", "type": "FRAME", "name": "Off", "visible": false,
+                          "children": [{"id": "9:10", "type": "TEXT", "name": "T", "characters": "t"}]});
+        let mut c = Collector::default();
+        let view = build_node_view(&node, &ViewOptions::default(), &mut c);
+        assert_eq!(view["visible"], false);
+        assert_eq!(view["children"][0]["id"], "9:10");
+    }
+
+    #[test]
+    fn default_constraints_elided_non_default_kept() {
+        let mut c = Collector::default();
+        let view = build_node_view(&diet_fixture(), &ViewOptions::default(), &mut c);
+        assert!(
+            view.get("constraints").is_none(),
+            "LEFT/TOP is Figma's default"
+        );
+        assert!(child(&view, "1:1").get("constraints").is_none());
+        assert_eq!(
+            child(&view, "1:2")["constraints"],
+            json!({"vertical": "TOP", "horizontal": "RIGHT"})
+        );
+    }
+
+    #[test]
+    fn descendant_bounds_are_parent_relative_and_flow_children_drop_xy() {
+        let mut c = Collector::default();
+        let view = build_node_view(&diet_fixture(), &ViewOptions::default(), &mut c);
+        // Target keeps absolute canvas coordinates; `size` equal to bounds is dropped.
+        assert_eq!(
+            view["bounds"],
+            json!({"x": 100.0, "y": 200.0, "width": 400.0, "height": 300.0})
+        );
+        assert!(view.get("size").is_none());
+        // Flow child of an auto-layout parent: position is the layout's job.
+        assert_eq!(
+            child(&view, "1:1")["bounds"],
+            json!({"width": 80.0, "height": 20.0})
+        );
+        // Absolutely positioned child: offset from the parent's top-left.
+        assert_eq!(
+            child(&view, "1:2")["bounds"],
+            json!({"x": 350.3, "y": 50.0, "width": 40.0, "height": 40.0})
+        );
+    }
+
+    #[test]
+    fn relative_bounds_treat_a_boxless_parent_as_the_origin() {
+        // A CANVAS has no absoluteBoundingBox; its children's canvas
+        // coordinates are their position relative to the page.
+        let parent = json!({"id": "0:1", "type": "CANVAS", "name": "Page 1"});
+        let node = json!({"id": "n"});
+        let abs = json!({"x": -5.0, "y": 6.0, "width": 7.0, "height": 8.0});
+        assert_eq!(
+            relative_bounds(&abs, &node, &parent),
+            json!({"x": -5.0, "y": 6.0, "width": 7.0, "height": 8.0})
+        );
+    }
+
+    #[test]
+    fn geometry_leaf_below_target_drops_only_the_layout_block_that_cannot_apply() {
+        let mut c = Collector::default();
+        let view = build_node_view(&diet_fixture(), &ViewOptions::default(), &mut c);
+        // Flow child of an auto-layout parent: constraints are ignored by
+        // Figma, but the layout-child settings are exactly what sizes it.
+        let vec = child(&view, "1:5");
+        assert!(vec.get("constraints").is_none());
+        assert_eq!(vec["layout_child"], json!({"sizing": "FIXED/FIXED"}));
+        assert_eq!(
+            vec["fills"],
+            json!([{"type": "SOLID", "hex": "#00800080", "bound_variable": "v1"}])
+        );
+        // A full-width divider must not degrade to a fixed-width line.
+        let card = json!({
+            "id": "2:0", "type": "FRAME", "name": "Card", "layoutMode": "VERTICAL",
+            "absoluteBoundingBox": {"x": 0.0, "y": 0.0, "width": 328.0, "height": 100.0},
+            "children": [{
+                "id": "2:1", "type": "LINE", "name": "Divider",
+                "absoluteBoundingBox": {"x": 0.0, "y": 50.0, "width": 328.0, "height": 0.0},
+                "layoutAlign": "STRETCH", "layoutSizingHorizontal": "FILL",
+                "layoutSizingVertical": "FIXED"
+            }]
+        });
+        let view = build_node_view(&card, &ViewOptions::default(), &mut Collector::default());
+        assert_eq!(
+            child(&view, "2:1")["layout_child"],
+            json!({"align": "STRETCH", "sizing": "FILL/FIXED"})
+        );
+        // In a plain frame the roles flip: constraints decide resizing and
+        // there is no auto-layout to read the layout-child settings.
+        let plain = json!({
+            "id": "3:0", "type": "FRAME", "name": "Plain",
+            "absoluteBoundingBox": {"x": 0.0, "y": 0.0, "width": 328.0, "height": 100.0},
+            "children": [{
+                "id": "3:1", "type": "LINE", "name": "Rule",
+                "absoluteBoundingBox": {"x": 0.0, "y": 50.0, "width": 328.0, "height": 0.0},
+                "constraints": {"vertical": "TOP", "horizontal": "LEFT_RIGHT"},
+                "layoutSizingHorizontal": "FIXED", "layoutSizingVertical": "FIXED"
+            }]
+        });
+        let view = build_node_view(&plain, &ViewOptions::default(), &mut Collector::default());
+        let rule = child(&view, "3:1");
+        assert_eq!(
+            rule["constraints"],
+            json!({"vertical": "TOP", "horizontal": "LEFT_RIGHT"})
+        );
+        assert!(rule.get("layout_child").is_none());
+        // The same node as a *target* keeps its constraints.
+        let raw_vec = diet_fixture()["children"][3].clone();
+        let mut c2 = Collector::default();
+        let solo = build_node_view(&raw_vec, &ViewOptions::default(), &mut c2);
+        assert_eq!(
+            solo["constraints"],
+            json!({"vertical": "SCALE", "horizontal": "SCALE"})
+        );
+    }
+
+    #[test]
+    fn text_style_drops_redundant_fields_and_defaults() {
+        let mut c = Collector::default();
+        let view = build_node_view(&diet_fixture(), &ViewOptions::default(), &mut c);
+        let style = &child(&view, "1:1")["text"]["style"];
+        assert_eq!(
+            style,
+            &json!({"font_family": "Inter", "font_style": "Medium", "font_weight": 500,
+                    "font_size": 16.0, "line_height_px": 24.0, "text_auto_resize": "HEIGHT"})
+        );
+        // Non-default alignment / unit survive.
+        let mut c2 = Collector::default();
+        let s = build_type_style(
+            &json!({"textAlignHorizontal": "CENTER", "textAlignVertical": "BOTTOM",
+                    "lineHeightUnit": "FONT_SIZE_%"}),
+            &mut c2,
+            "t",
+        );
+        assert_eq!(s["text_align_horizontal"], "CENTER");
+        assert_eq!(s["text_align_vertical"], "BOTTOM");
+        assert_eq!(s["line_height_unit"], "FONT_SIZE_%");
+    }
+
+    #[test]
+    fn layout_child_sizing_is_one_string() {
+        let mut c = Collector::default();
+        let view = build_node_view(&diet_fixture(), &ViewOptions::default(), &mut c);
+        assert_eq!(
+            child(&view, "1:1")["layout_child"],
+            json!({"sizing": "HUG/FIXED"})
+        );
+    }
+
+    #[test]
+    fn component_properties_split_into_variants_and_scalars() {
+        let node = json!({
+            "id": "c:1", "type": "INSTANCE", "name": "Banner", "componentId": "7:7",
+            "componentProperties": {
+                "Intent": {"type": "VARIANT", "value": "Success", "boundVariables": {}},
+                "Close#1610:0": {"type": "BOOLEAN", "value": false},
+                "✏️ Title#3063:150": {"type": "TEXT", "value": "Approved",
+                    "boundVariables": {"value": {"type": "VARIABLE_ALIAS", "id": "VariableID:t"}}},
+                "Icon#1:1": {"type": "INSTANCE_SWAP", "value": "687:73548",
+                    "preferredValues": [{"type": "COMPONENT", "key": "abc"}]},
+                "Slot#1:2": {"type": "INSTANCE_SWAP", "value": "687:1", "preferredValues": []},
+                "Label#2:1": {"type": "TEXT", "value": "a"},
+                "Label#2:2": {"type": "TEXT", "value": "b"}
+            }
+        });
+        let mut c = Collector::default();
+        let view = build_node_view(&node, &ViewOptions::default(), &mut c);
+        let comp = &view["component"];
+        assert_eq!(comp["component_id"], "7:7");
+        assert_eq!(comp["variants"], json!({"Intent": "Success"}));
+        assert_eq!(
+            comp["properties"],
+            json!({
+                "Close": false,
+                "Icon": {"instance": "687:73548", "preferred": [{"type": "COMPONENT", "key": "abc"}]},
+                "Slot": {"instance": "687:1"},
+                // Colliding stripped names keep the raw `#n:m` suffix.
+                "Label#2:1": "a",
+                "Label#2:2": "b",
+                "✏️ Title": {"value": "Approved", "bound_variables": {"value": "v1"}},
+            })
+        );
+        assert!(comp.get("component_properties").is_none());
+    }
+
+    #[test]
+    fn strip_property_suffix_only_removes_figma_refs() {
+        assert_eq!(strip_property_suffix("Close#1610:0"), "Close");
+        assert_eq!(strip_property_suffix("C#1"), "C#1");
+        assert_eq!(strip_property_suffix("Item #2"), "Item #2");
+        assert_eq!(strip_property_suffix("#1:2"), "#1:2");
+        assert_eq!(strip_property_suffix("Plain"), "Plain");
+    }
+
+    #[test]
+    fn property_refs_only_on_target_or_inside_component_definitions() {
+        let refs = json!({"visible": "Close#1:0"});
+        let inst = json!({"id": "i", "type": "INSTANCE", "name": "I",
+            "componentPropertyReferences": refs,
+            "children": [{"id": "i:1", "type": "TEXT", "name": "T", "characters": "t",
+                          "componentPropertyReferences": refs}]});
+        let mut c = Collector::default();
+        let view = build_node_view(&inst, &ViewOptions::default(), &mut c);
+        assert_eq!(view["property_refs"], refs, "kept on the target");
+        assert!(
+            view["children"][0].get("property_refs").is_none(),
+            "noise inside an instance"
+        );
+
+        let comp = json!({"id": "c", "type": "COMPONENT", "name": "C",
+            "children": [{"id": "c:1", "type": "TEXT", "name": "T", "characters": "t",
+                          "componentPropertyReferences": refs}]});
+        let mut c2 = Collector::default();
+        let view = build_node_view(&comp, &ViewOptions::default(), &mut c2);
+        assert_eq!(
+            view["children"][0]["property_refs"], refs,
+            "kept inside a definition"
+        );
+    }
+
+    #[test]
+    fn variables_block_without_sidecar_lists_ids_per_handle() {
+        let mut c = Collector::default();
+        let view = build_node_view(&diet_fixture(), &ViewOptions::default(), &mut c);
+        assert_eq!(child(&view, "1:5")["fills"][0]["bound_variable"], "v1");
+        let block = build_variables_block(None, &mut c);
+        assert_eq!(block, json!({"v1": {"id": "VariableID:icon"}}));
+    }
+
+    #[test]
+    fn effect_color_is_hex_only_and_bindings_use_handles() {
+        let mut c = Collector::default();
+        let e = build_effect(
+            &json!({"type": "DROP_SHADOW", "color": {"r": 0.0, "g": 0.0, "b": 0.0, "a": 0.25},
+                    "offset": {"x": 0.0, "y": 1.0}, "radius": 2.0,
+                    "boundVariables": {"color": {"type": "VARIABLE_ALIAS", "id": "VariableID:sh"}}}),
+            &mut c,
+            "n",
+        );
+        assert!(e.get("color").is_none());
+        assert_eq!(e["hex"], "#00000040");
+        assert_eq!(e["bound_variables"], json!({"color": "v1"}));
+    }
+
+    #[test]
+    fn paint_bindings_mirrored_on_paints_are_dropped_from_node_map() {
+        let node = json!({
+            "id": "1:2", "type": "RECTANGLE", "name": "R",
+            "fills": [
+                {"type": "SOLID", "color": {"r":1.0,"g":0.0,"b":0.0,"a":1.0},
+                 "boundVariables": {"color": {"type": "VARIABLE_ALIAS", "id": "VariableID:a"}}},
+                {"type": "GRADIENT_LINEAR", "gradientStops": []}
+            ],
+            "strokes": [{"type": "SOLID", "color": {"r":0.0,"g":0.0,"b":0.0,"a":1.0}}],
+            "boundVariables": {
+                "fills": [
+                    {"type": "VARIABLE_ALIAS", "id": "VariableID:a"},
+                    {"type": "VARIABLE_ALIAS", "id": "VariableID:g"}
+                ],
+                "strokes": [{"type": "VARIABLE_ALIAS", "id": "VariableID:s"}],
+                "itemSpacing": {"type": "VARIABLE_ALIAS", "id": "VariableID:i"}
+            }
+        });
+        let mut c = Collector::default();
+        let v = build_node_view(&node, &ViewOptions::default(), &mut c);
+        assert_eq!(v["fills"][0]["bound_variable"], "v1");
+        let bv = v["bound_variables"].as_object().unwrap();
+        assert!(
+            !bv.contains_key("fills[0]"),
+            "mirrored on fills[0].bound_variable: {bv:?}"
+        );
+        assert_eq!(
+            bv["fills[1]"], "v2",
+            "gradient paint carries no bound_variable → kept"
+        );
+        assert_eq!(
+            bv["strokes[0]"], "v3",
+            "stroke paint has no binding of its own → kept"
+        );
+        assert_eq!(bv["itemSpacing"], "v4");
+
+        // Without the paints section the node map is the only carrier → kept.
+        let only_vars = ViewOptions {
+            only: Some([Section::Variables].into_iter().collect()),
+            ..Default::default()
+        };
+        let v = build_node_view(&node, &only_vars, &mut Collector::default());
+        assert_eq!(v["bound_variables"]["fills[0]"], "v1");
+    }
+
+    #[test]
+    fn floats_are_rounded_to_three_decimals_everywhere() {
+        let node = json!({
+            "id": "1:2", "type": "FRAME", "name": "F",
+            "absoluteBoundingBox": {"x": 0.0, "y": 0.0, "width": 14.40007495880127, "height": 4.800076007843018},
+            "opacity": 0.30000001192092896,
+            "strokes": [{"type": "SOLID", "color": {"r":0.0,"g":0.0,"b":0.0,"a":1.0}}],
+            "strokeWeight": 1.3333333730697632,
+            "layoutMode": "HORIZONTAL", "itemSpacing": 6.666666507720947,
+            "children": [{
+                "id": "1:3", "type": "TEXT", "name": "T",
+                "absoluteBoundingBox": {"x": 0.3333, "y": 0.0, "width": 10.0, "height": 10.0},
+                "characters": "x", "style": {"letterSpacing": 0.20000000298023224}
+            }]
+        });
+        let v = build_node_view(&node, &ViewOptions::default(), &mut Collector::default());
+        assert_eq!(v["bounds"]["width"], 14.4);
+        assert_eq!(v["bounds"]["height"], 4.8);
+        assert_eq!(v["opacity"], 0.3);
+        assert_eq!(v["stroke"]["weight"], 1.333);
+        assert_eq!(v["layout"]["item_spacing"], 6.667);
+        assert_eq!(v["children"][0]["text"]["style"]["letter_spacing"], 0.2);
     }
 }

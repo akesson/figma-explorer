@@ -80,13 +80,24 @@ pub struct Args {
     #[arg(long)]
     pub rich_text: bool,
 
-    /// Skip the resolved top-level `variables` block.
+    /// Skip the top-level `variables` block entirely. The `vN` handles in the
+    /// node view are then left unresolved (no handle → id map is printed).
     #[arg(long)]
     pub no_variables: bool,
 
     /// Skip anchored comments on the node.
     #[arg(long)]
     pub no_comments: bool,
+
+    /// Render hidden (`visible: false`) children instead of pruning them.
+    /// By default a hidden child is listed on its parent under
+    /// `hidden_children: [{id, name, type}]` and its subtree is skipped —
+    /// in a screen these are slot alternates and off states that don't
+    /// render. The one exception is kept without this flag: inside a
+    /// COMPONENT definition, a layer whose visibility is wired to a BOOLEAN
+    /// property is rendered (with `visible: false` and `property_refs`).
+    #[arg(long)]
+    pub include_hidden: bool,
 
     /// Emit the raw Figma JSON for the target node (camelCase, untouched).
     /// Useful when the curated view drops a field you need.
@@ -230,6 +241,7 @@ fn view_options(args: &Args) -> ViewOptions {
         meta: args.meta || selected(Section::Meta),
         rich_text: args.rich_text,
         only,
+        include_hidden: args.include_hidden,
     }
 }
 
@@ -293,12 +305,10 @@ async fn emit_node(
     } else {
         full_cache::read_variables(cache, &meta.file_key)?
     };
-    // Snapshot the variable refs before we hand `&mut collector` to the
-    // variables block — `build_variables_block` may record warnings via the
-    // collector, which would alias the immutable borrow if we passed the set
-    // directly.
-    let var_refs = collector.variables.clone();
-    let variables = build_variables_block(vars_root.as_ref(), &var_refs, &mut collector);
+    let mut variables = build_variables_block(vars_root.as_ref(), &mut collector);
+    // The node view is rounded inside `build_node_view`; the sidecar's
+    // FLOAT `valuesByMode` carry the same f32 noise and are copied verbatim.
+    crate::node_view::round_floats(&mut variables);
     let styles_index = build_styles_index_block(&file_root, &collector.styles);
 
     let mut out = Map::new();
@@ -313,11 +323,33 @@ async fn emit_node(
     );
     out.insert("file".into(), file_block(file_synth, meta));
     out.insert("node".into(), view);
-    if variables.as_object().is_some_and(|m| !m.is_empty()) {
+    let has_refs = variables.as_object().is_some_and(|m| !m.is_empty());
+    // Entries the sidecar could not resolve are bare `{id}`: either there
+    // is no sidecar at all, or the variable lives in a library file.
+    let unresolved = variables
+        .as_object()
+        .map(|m| {
+            m.values()
+                .filter(|e| e.as_object().is_some_and(|o| o.len() == 1))
+                .count()
+        })
+        .unwrap_or(0);
+    if has_refs && !args.no_variables {
         out.insert("variables".into(), variables);
-    } else if !args.no_variables && args.only.is_empty() {
-        // The sidecar-unavailable note is a diagnostics nicety — noise under
-        // a deliberately narrowed `--only` view.
+    }
+    if has_refs && vars_root.is_some() && unresolved > 0 && args.only.is_empty() {
+        out.insert(
+            "variables_note".into(),
+            json!(format!(
+                "{unresolved} referenced variable(s) are not local to this file \
+                 (library tokens) — their handles map to bare ids; resolve them \
+                 via the library's source file"
+            )),
+        );
+    }
+    if has_refs && vars_root.is_none() && !args.no_variables && args.only.is_empty() {
+        // The handles above map to bare ids only. Say why, once — but not
+        // under a deliberately narrowed `--only` view.
         if let Some(err) = meta.variables_error.as_deref() {
             // Don't pollute on success; surface only when the user asked and
             // we have a hint as to why we don't have variables data.
@@ -668,23 +700,18 @@ fn ancestor_path(cache: &CacheDir, file_key: &str, node_id: &str) -> Result<Valu
     Ok(Value::Array(path))
 }
 
-/// Render comments whose anchored node lies within the subtree being emitted.
-/// "Within the subtree" = the node id equals `node.id` *or* the comment's
-/// anchored node id was emitted as a descendant (tracked in `collector`'s
-/// node-id observations... but we don't currently track those, so we use a
-/// cheaper proxy: any comment whose anchor is `node.id`).
-///
-/// The trade-off here is conscious: we keep comments scoped to the target
-/// node itself rather than walking the whole emitted subtree. Subtree-wide
-/// inclusion is achievable later by tracking emitted ids on the Collector,
-/// but it makes the output substantially noisier on big frames. Worth
-/// revisiting if user feedback wants it.
+/// Render comments anchored anywhere in the target's subtree (the cached
+/// structural tree, so hidden and depth-/cap-pruned descendants count too).
+/// A comment whose anchor the view did *not* render — because the node is
+/// hidden, beyond `--depth`, or past `--max-nodes` — is tagged
+/// `anchor_rendered: false` so the reader knows to retry with
+/// `--include-hidden` / a deeper walk rather than hunt for a missing id.
 fn build_anchored_comments(
     cache: &CacheDir,
     file_key: &str,
     file_synth: u32,
     node: &CacheNode,
-    _collector: &Collector,
+    collector: &Collector,
 ) -> Result<Option<Vec<Value>>> {
     let Some(comments) = cache.read_comments(file_key)? else {
         return Ok(None);
@@ -703,7 +730,19 @@ fn build_anchored_comments(
     let out: Vec<Value> = comments
         .iter()
         .filter(|c| c.node.as_ref().is_some_and(|n| ids.contains(&n.node_id)))
-        .map(|c| comment_value(file_synth, &synth_state, c))
+        .map(|c| {
+            let mut v = comment_value(file_synth, &synth_state, c);
+            let rendered = c
+                .node
+                .as_ref()
+                .is_some_and(|n| collector.emitted_ids.contains(&n.node_id));
+            if !rendered {
+                if let Value::Object(m) = &mut v {
+                    m.insert("anchor_rendered".into(), json!(false));
+                }
+            }
+            v
+        })
         .collect();
     Ok(Some(out))
 }
