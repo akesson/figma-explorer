@@ -99,7 +99,7 @@ figma-explorer cache prefetch
 
 ## Output
 
-YAML by default (terse, agent-friendly). Pass `--json` for full pretty JSON suitable for `jq` pipelines.
+YAML by default (terse, agent-friendly: block style for the tree, flow style `{k: v}` for leaf maps and short lists). Pass `--json` for compact JSON suitable for `jq` pipelines.
 
 ## Cache
 

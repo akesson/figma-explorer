@@ -40,6 +40,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     always carries the raw `id`, plus name/values when the Variables sidecar
     is available. The 60-character `VariableID:` strings no longer repeat
     per use.
+  - Node-level `bound_variables` no longer repeats `fills[i]`/`strokes[i]`
+    entries that the paint itself already carries as `bound_variable` (half
+    of the map on a real screen). Entries the paints don't mirror are kept.
+  - Floats are rounded to 3 decimals (`14.40007495880127` → `14.4`): Figma
+    stores f32 and the REST API prints it as f64.
+- **YAML output uses flow style for leaf containers** (`bounds: {width: 24,
+  height: 24}`, `padding: [0, 12, 0, 12]`, one record per row in lists)
+  instead of `serde_yaml`'s all-block rendering, via the new `yaml_out`
+  printer. Still standard YAML; a `node-info` view goes from 4,564 to 2,464
+  lines and 31.3k to 27.8k tokens. Non-ASCII keys are no longer escaped
+  (`💠 Before Icon`, not `\u{1f4a0} Before Icon`) and integral floats print
+  as `12`, not `12.0`. Applies to every command's YAML output.
+- **`--json` is compact**, not pretty-printed. Pretty JSON was the most
+  token-expensive rendering of all (37% more than the YAML default on the
+  same view); `jq` does not care.
 - `scripts/node_info_lossless.py` — checks a curated view against `--raw` for
   the same target (node set, hidden listing, bounds reconstruction, paints,
   layout, text, component props, variable handles).

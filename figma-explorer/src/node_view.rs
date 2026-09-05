@@ -312,9 +312,35 @@ pub fn build_node_view(node: &Value, opts: &ViewOptions, collector: &mut Collect
         .and_then(Value::as_str)
         .is_some_and(|t| matches!(t, "COMPONENT" | "COMPONENT_SET"));
     let ctx = WalkCtx { root_is_component };
-    build_view_recursive(
+    let mut view = build_view_recursive(
         node, None, opts, collector, /* depth_from_target */ 0, &ctx,
-    )
+    );
+    round_floats(&mut view);
+    view
+}
+
+/// Figma stores geometry as f32 and the REST API prints it as f64, so a
+/// 14.4-wide icon arrives as `14.40007495880127`. Three decimals keep
+/// sub-pixel precision (and every colour channel exact) while dropping the
+/// noise. Applied once over the finished view so every section gets it.
+fn round_floats(v: &mut Value) {
+    match v {
+        Value::Number(n) => {
+            if n.is_f64() {
+                if let Some(f) = n.as_f64() {
+                    let r = (f * 1000.0).round() / 1000.0;
+                    if r != f {
+                        if let Some(num) = serde_json::Number::from_f64(r) {
+                            *v = Value::Number(num);
+                        }
+                    }
+                }
+            }
+        }
+        Value::Object(m) => m.values_mut().for_each(round_floats),
+        Value::Array(a) => a.iter_mut().for_each(round_floats),
+        _ => {}
+    }
 }
 
 /// Facts about the target that every level of the walk needs.
@@ -694,7 +720,8 @@ fn add_styles_and_variables(
     }
     if opts.wants(Section::Variables) {
         if let Some(bv) = node.get("boundVariables") {
-            let flat = flatten_bound_variables(bv, collector, node_id);
+            let mut flat = flatten_bound_variables(bv, collector, node_id);
+            drop_paint_bindings_already_on_paints(&mut flat, out);
             if flat.as_object().is_some_and(|m| !m.is_empty()) {
                 out.insert("bound_variables".into(), flat);
             }
@@ -1388,6 +1415,39 @@ fn build_prototype(node: &Value, include_interactions: bool) -> Option<Value> {
 // ───────────────────────────────────────────────────────────────────────────
 // Bound variables flattening
 // ───────────────────────────────────────────────────────────────────────────
+
+/// Figma reports a colour binding twice: on the paint itself
+/// (`fills[i].boundVariables.color`) and in the node's `boundVariables` as
+/// `fills[i]`. The view already prints the paint's copy as
+/// `fills[i].bound_variable`, so the node-level `fills[i]`/`strokes[i]` entry
+/// is removed when the emitted paint at that index carries the same handle.
+/// Any entry that isn't mirrored (paint list not emitted under `--only`,
+/// gradient paints, a differing handle) is kept.
+fn drop_paint_bindings_already_on_paints(flat: &mut Value, out: &Map<String, Value>) {
+    let Some(map) = flat.as_object_mut() else {
+        return;
+    };
+    map.retain(|key, handle| {
+        let Some((list, idx)) = parse_paint_key(key) else {
+            return true;
+        };
+        let on_paint = out
+            .get(list)
+            .and_then(Value::as_array)
+            .and_then(|paints| paints.get(idx))
+            .and_then(|p| p.get("bound_variable"));
+        on_paint != Some(handle)
+    });
+}
+
+/// `fills[3]` → `("fills", 3)`; anything else → `None`.
+fn parse_paint_key(key: &str) -> Option<(&str, usize)> {
+    let (list, rest) = key.split_once('[')?;
+    if !matches!(list, "fills" | "strokes") {
+        return None;
+    }
+    rest.strip_suffix(']')?.parse().ok().map(|i| (list, i))
+}
 
 /// Flatten Figma's `boundVariables` shape into a simple
 /// `{ property_path: handle }` map, interning each id via
@@ -2582,5 +2642,75 @@ mod tests {
         assert!(e.get("color").is_none());
         assert_eq!(e["hex"], "#00000040");
         assert_eq!(e["bound_variables"], json!({"color": "v1"}));
+    }
+
+    #[test]
+    fn paint_bindings_mirrored_on_paints_are_dropped_from_node_map() {
+        let node = json!({
+            "id": "1:2", "type": "RECTANGLE", "name": "R",
+            "fills": [
+                {"type": "SOLID", "color": {"r":1.0,"g":0.0,"b":0.0,"a":1.0},
+                 "boundVariables": {"color": {"type": "VARIABLE_ALIAS", "id": "VariableID:a"}}},
+                {"type": "GRADIENT_LINEAR", "gradientStops": []}
+            ],
+            "strokes": [{"type": "SOLID", "color": {"r":0.0,"g":0.0,"b":0.0,"a":1.0}}],
+            "boundVariables": {
+                "fills": [
+                    {"type": "VARIABLE_ALIAS", "id": "VariableID:a"},
+                    {"type": "VARIABLE_ALIAS", "id": "VariableID:g"}
+                ],
+                "strokes": [{"type": "VARIABLE_ALIAS", "id": "VariableID:s"}],
+                "itemSpacing": {"type": "VARIABLE_ALIAS", "id": "VariableID:i"}
+            }
+        });
+        let mut c = Collector::default();
+        let v = build_node_view(&node, &ViewOptions::default(), &mut c);
+        assert_eq!(v["fills"][0]["bound_variable"], "v1");
+        let bv = v["bound_variables"].as_object().unwrap();
+        assert!(
+            !bv.contains_key("fills[0]"),
+            "mirrored on fills[0].bound_variable: {bv:?}"
+        );
+        assert_eq!(
+            bv["fills[1]"], "v2",
+            "gradient paint carries no bound_variable → kept"
+        );
+        assert_eq!(
+            bv["strokes[0]"], "v3",
+            "stroke paint has no binding of its own → kept"
+        );
+        assert_eq!(bv["itemSpacing"], "v4");
+
+        // Without the paints section the node map is the only carrier → kept.
+        let only_vars = ViewOptions {
+            only: Some([Section::Variables].into_iter().collect()),
+            ..Default::default()
+        };
+        let v = build_node_view(&node, &only_vars, &mut Collector::default());
+        assert_eq!(v["bound_variables"]["fills[0]"], "v1");
+    }
+
+    #[test]
+    fn floats_are_rounded_to_three_decimals_everywhere() {
+        let node = json!({
+            "id": "1:2", "type": "FRAME", "name": "F",
+            "absoluteBoundingBox": {"x": 0.0, "y": 0.0, "width": 14.40007495880127, "height": 4.800076007843018},
+            "opacity": 0.30000001192092896,
+            "strokes": [{"type": "SOLID", "color": {"r":0.0,"g":0.0,"b":0.0,"a":1.0}}],
+            "strokeWeight": 1.3333333730697632,
+            "layoutMode": "HORIZONTAL", "itemSpacing": 6.666666507720947,
+            "children": [{
+                "id": "1:3", "type": "TEXT", "name": "T",
+                "absoluteBoundingBox": {"x": 0.3333, "y": 0.0, "width": 10.0, "height": 10.0},
+                "characters": "x", "style": {"letterSpacing": 0.20000000298023224}
+            }]
+        });
+        let v = build_node_view(&node, &ViewOptions::default(), &mut Collector::default());
+        assert_eq!(v["bounds"]["width"], 14.4);
+        assert_eq!(v["bounds"]["height"], 4.8);
+        assert_eq!(v["opacity"], 0.3);
+        assert_eq!(v["stroke"]["weight"], 1.333);
+        assert_eq!(v["layout"]["item_spacing"], 6.667);
+        assert_eq!(v["children"][0]["text"]["style"]["letter_spacing"], 0.2);
     }
 }

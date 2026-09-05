@@ -29,6 +29,7 @@ pub mod team_catalog;
 pub mod tree;
 pub mod url;
 pub mod util;
+pub mod yaml_out;
 
 /// Hard recursion backstop for walks over a Figma node tree. The tree's depth
 /// is driven by untrusted remote data, and unbounded recursion can overflow
@@ -108,14 +109,12 @@ pub fn into_anyhow<E: Debug>(e: ApiError<E>) -> anyhow::Error {
 pub fn print(value: &serde_json::Value, output: Output) -> anyhow::Result<()> {
     match output {
         Output::Yaml => {
-            let s = serde_yaml_ng::to_string(value).context("serializing to YAML")?;
-            print!("{s}");
-            if !s.ends_with('\n') {
-                println!();
-            }
+            print!("{}", yaml_out::to_yaml(value));
         }
         Output::Json => {
-            let s = serde_json::to_string_pretty(value).context("serializing to JSON")?;
+            // Compact on purpose: pretty JSON is the most token-expensive
+            // rendering of all (37% more than YAML on a large node-info view).
+            let s = serde_json::to_string(value).context("serializing to JSON")?;
             println!("{s}");
         }
     }

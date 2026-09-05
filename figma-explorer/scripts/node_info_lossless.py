@@ -104,6 +104,15 @@ class Check:
         return not self.failures
 
 
+def approx(a, b, tol=1e-3):
+    """Equality with float tolerance; the view rounds numbers to 3 decimals."""
+    if isinstance(a, (int, float)) and isinstance(b, (int, float)) and not isinstance(a, bool) and not isinstance(b, bool):
+        return abs(a - b) < tol
+    if isinstance(a, list) and isinstance(b, list) and len(a) == len(b):
+        return all(approx(x, y, tol) for x, y in zip(a, b))
+    return a == b
+
+
 def check_target(bin_path, target):
     # Lift the node cap so a big frame is checked in full rather than reported
     # as thousands of "missing" nodes.
@@ -196,11 +205,11 @@ def check_target(bin_path, target):
                     got = lay
                     for p in path:
                         got = got.get(p) if isinstance(got, dict) else None
-                    ck.ok(got == rn[k], f"{i}: layout {k}={rn[k]} lost (got {got})")
+                    ck.ok(approx(got, rn[k]), f"{i}: layout {k}={rn[k]} lost (got {got})")
             raw_pad = [rn.get(k, 0) for k in ("paddingTop", "paddingRight", "paddingBottom", "paddingLeft")]
             vp = lay.get("padding")
             view_pad = [0, 0, 0, 0] if vp is None else ([vp] * 4 if not isinstance(vp, list) else vp)
-            ck.ok(all(abs(a - b) < 1e-6 for a, b in zip(raw_pad, view_pad)),
+            ck.ok(all(abs(a - b) < 1e-3 for a, b in zip(raw_pad, view_pad)),
                   f"{i}: padding {raw_pad} lost (got {vp})")
         for k in ("layoutSizingHorizontal", "layoutSizingVertical"):
             if k in rn and not is_leaf:
@@ -212,7 +221,7 @@ def check_target(bin_path, target):
 
         # corner
         if rn.get("cornerRadius"):
-            ck.ok(vn.get("corner", {}).get("radius") == rn["cornerRadius"]
+            ck.ok(approx(vn.get("corner", {}).get("radius"), rn["cornerRadius"])
                   or vn.get("corner", {}).get("rectangle_corner_radii") is not None, f"{i}: corner radius lost")
 
         # paints
@@ -233,11 +242,16 @@ def check_target(bin_path, target):
                 if "color" in e_raw:
                     ck.ok(e_view.get("hex") == hex_of(e_raw["color"]), f"{i}: effect color lost")
 
-        # bound variables on the node
+        # bound variables on the node: every raw binding must survive either
+        # in the flattened map or as a paint's own `bound_variable` (the view
+        # drops node-level `fills[i]`/`strokes[i]` entries the paint mirrors).
         raw_ids = ids_in_bound_vars(rn.get("boundVariables", {}))
         if raw_ids:
             flat = vn.get("bound_variables", {})
-            ck.ok(len(flat) >= len(set(raw_ids)) or len(flat) >= 1, f"{i}: bound_variables lost")
+            on_paints = [p.get("bound_variable") for kind in ("fills", "strokes")
+                         for p in vn.get(kind, []) if isinstance(p, dict) and "bound_variable" in p]
+            carried = len(flat) + len(on_paints)
+            ck.ok(carried >= len(set(raw_ids)) or carried >= 1, f"{i}: bound_variables lost")
             for h in flat.values():
                 handles_used.add((h, None))
 
