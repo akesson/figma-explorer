@@ -3,3 +3,5 @@ README.md
 .travis.yml
 git_push.sh
 .gitignore
+# Hand-maintained: carries crate-level clippy allows for generator output (CI runs clippy with -D warnings).
+src/lib.rs
