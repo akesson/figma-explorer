@@ -4,9 +4,7 @@
 
 Name | Type | Description | Notes
 ------------ | ------------- | ------------- | -------------
-**status** | **f64** | The response status code. | 
-**error** | **bool** | For successful requests, this value is always `false`. | 
-**meta** | [**models::InlineObject28Meta**](inline_object_28_meta.md) |  | 
+**requests** | [**Vec<models::WebhookV2Request>**](WebhookV2Request.md) | An array of webhook requests. | 
 
 [[Back to Model list]](../README.md#documentation-for-models) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to README]](../README.md)
 

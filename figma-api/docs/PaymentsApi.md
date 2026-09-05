@@ -10,7 +10,7 @@ Method | HTTP request | Description
 
 ## get_payments
 
-> models::InlineObject26 get_payments(plugin_payment_token, user_id, community_file_id, plugin_id, widget_id)
+> models::InlineObject32 get_payments(plugin_payment_token, user_id, community_file_id, plugin_id, widget_id)
 Get payments
 
 There are two methods to query for a user's payment information on a plugin, widget, or Community file. The first method, using plugin payment tokens, is typically used when making queries from a plugin's or widget's code. The second method, providing a user ID and resource ID, is typically used when making queries from anywhere else.  Note that you can only query for resources that you own. In most cases, this means that you can only query resources that you originally created.
@@ -28,7 +28,7 @@ Name | Type | Description  | Required | Notes
 
 ### Return type
 
-[**models::InlineObject26**](inline_object_26.md)
+[**models::InlineObject32**](inline_object_32.md)
 
 ### Authorization
 

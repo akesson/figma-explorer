@@ -46,7 +46,7 @@ Name | Type | Description  | Required | Notes
 
 ## get_team_webhooks
 
-> models::InlineObject22 get_team_webhooks(team_id)
+> models::InlineObject27 get_team_webhooks(team_id)
 [Deprecated] Get team webhooks
 
 Returns all webhooks registered under the specified team.
@@ -60,7 +60,7 @@ Name | Type | Description  | Required | Notes
 
 ### Return type
 
-[**models::InlineObject22**](inline_object_22.md)
+[**models::InlineObject27**](inline_object_27.md)
 
 ### Authorization
 
@@ -106,7 +106,7 @@ Name | Type | Description  | Required | Notes
 
 ## get_webhook_requests
 
-> models::InlineObject23 get_webhook_requests(webhook_id)
+> models::InlineObject28 get_webhook_requests(webhook_id)
 Get webhook requests
 
 Returns all webhook requests sent within the last week. Useful for debugging.
@@ -120,7 +120,7 @@ Name | Type | Description  | Required | Notes
 
 ### Return type
 
-[**models::InlineObject23**](inline_object_23.md)
+[**models::InlineObject28**](inline_object_28.md)
 
 ### Authorization
 
@@ -136,7 +136,7 @@ Name | Type | Description  | Required | Notes
 
 ## get_webhooks
 
-> models::InlineObject21 get_webhooks(context, context_id, plan_api_id, cursor)
+> models::InlineObject26 get_webhooks(context, context_id, plan_api_id, cursor)
 Get webhooks by context or plan
 
 Returns a list of webhooks corresponding to the context or plan provided, if they exist. For plan, the webhooks for all contexts that you have access to will be returned, and theresponse is paginated
@@ -153,7 +153,7 @@ Name | Type | Description  | Required | Notes
 
 ### Return type
 
-[**models::InlineObject21**](inline_object_21.md)
+[**models::InlineObject26**](inline_object_26.md)
 
 ### Authorization
 

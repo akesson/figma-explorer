@@ -12,7 +12,7 @@ Method | HTTP request | Description
 
 ## get_file_styles
 
-> models::InlineObject19 get_file_styles(file_key)
+> models::InlineObject24 get_file_styles(file_key)
 Get file styles
 
 Get a list of published styles within a file library.
@@ -26,7 +26,7 @@ Name | Type | Description  | Required | Notes
 
 ### Return type
 
-[**models::InlineObject19**](inline_object_19.md)
+[**models::InlineObject24**](inline_object_24.md)
 
 ### Authorization
 
@@ -42,7 +42,7 @@ Name | Type | Description  | Required | Notes
 
 ## get_style
 
-> models::InlineObject20 get_style(key)
+> models::InlineObject25 get_style(key)
 Get style
 
 Get metadata on a style by key.
@@ -56,7 +56,7 @@ Name | Type | Description  | Required | Notes
 
 ### Return type
 
-[**models::InlineObject20**](inline_object_20.md)
+[**models::InlineObject25**](inline_object_25.md)
 
 ### Authorization
 
@@ -72,7 +72,7 @@ Name | Type | Description  | Required | Notes
 
 ## get_team_styles
 
-> models::InlineObject18 get_team_styles(team_id, page_size, after, before)
+> models::InlineObject23 get_team_styles(team_id, page_size, after, before)
 Get team styles
 
 Get a paginated list of published styles within a team library.
@@ -89,7 +89,7 @@ Name | Type | Description  | Required | Notes
 
 ### Return type
 
-[**models::InlineObject18**](inline_object_18.md)
+[**models::InlineObject23**](inline_object_23.md)
 
 ### Authorization
 

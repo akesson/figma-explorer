@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`cache prefetch`, root `ls` refresh and `ls proj:N` refresh no longer 403
+  with a Figma token created after 2026-08-03.** Figma renamed projects to
+  folders; new personal access tokens carry `folders:read` instead of
+  `projects:read`, and the deprecated `GET /v1/projects/{id}/files` rejects
+  them (`Invalid scope … requires the file_read or files:read or projects:read
+  scope`). Listings now use `GET /v2/folders/{id}/files`. Folder ids are the
+  old project ids, so `FIGMA_PROJECTS_IDS`, `proj:N` and existing cache metas
+  are unchanged; `--project-ids` gained a `--folder-ids` alias. A 403 from v2
+  falls back to v1 once (pre-rename tokens are documented to keep working
+  there) and prints a hint to regenerate the token. `figma-api` was
+  regenerated from the 2026-08-11 upstream spec, which adds `folders_api`;
+  `figma-get` gained `folder-files`, `folder-folders`, `folder-meta` and
+  `team-folders`, and marks `project-files` / `team-projects` deprecated.
+
 ### Changed
 
 - **`node-info` output is ~4–5× smaller with nothing implementation-relevant
