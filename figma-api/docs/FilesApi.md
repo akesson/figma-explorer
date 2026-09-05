@@ -116,7 +116,7 @@ Name | Type | Description  | Required | Notes
 
 ## get_file_versions
 
-> models::InlineObject7 get_file_versions(file_key, page_size, before, after)
+> models::InlineObject12 get_file_versions(file_key, page_size, before, after)
 Get versions of a file
 
 This endpoint fetches the version history of a file, allowing you to see the progression of a file over time. You can then use this information to render a specific version of the file, via another endpoint.
@@ -133,7 +133,7 @@ Name | Type | Description  | Required | Notes
 
 ### Return type
 
-[**models::InlineObject7**](inline_object_7.md)
+[**models::InlineObject12**](inline_object_12.md)
 
 ### Authorization
 

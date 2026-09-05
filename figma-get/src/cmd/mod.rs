@@ -8,6 +8,7 @@ pub mod component_sets;
 pub mod components;
 pub mod dev_resources;
 pub mod files;
+pub mod folders;
 pub mod library_analytics;
 pub mod o_embed;
 pub mod payments;
@@ -50,6 +51,12 @@ pub enum Command {
     FileNodes(files::FileNodesArgs),
     /// GET /v1/files/{key}/versions — file version history.
     FileVersions(files::FileVersionsArgs),
+    /// GET /v2/folders/{folder_id}/files — files in a folder (formerly "project").
+    FolderFiles(folders::FolderFilesArgs),
+    /// GET /v2/folders/{folder_id}/folders — direct subfolders of a folder.
+    FolderFolders(folders::FolderFoldersArgs),
+    /// GET /v2/folders/{folder_id}/meta — folder metadata (needs folder_metadata:read).
+    FolderMeta(folders::FolderMetaArgs),
     /// GET /v1/files/{key}/images — image-fill download URLs.
     ImageFills(files::ImageFillsArgs),
     /// GET /v1/images/{key} — render nodes as images.
@@ -70,9 +77,9 @@ pub enum Command {
     OEmbed(o_embed::OEmbedArgs),
     /// GET /v1/payments — user payment info for a plugin, widget, or community file.
     Payments(payments::PaymentsArgs),
-    /// GET /v1/projects/{project_id}/files — files in a project.
+    /// [Deprecated] GET /v1/projects/{project_id}/files — use `folder-files`; 403 for tokens created after 2026-08-03.
     ProjectFiles(projects::ProjectFilesArgs),
-    /// GET /v1/teams/{team_id}/projects — projects in a team.
+    /// [Deprecated] GET /v1/teams/{team_id}/projects — use `team-folders`; 403 for tokens created after 2026-08-03.
     TeamProjects(projects::TeamProjectsArgs),
     /// GET /v1/files/{key}/styles — file styles.
     FileStyles(styles::FileStylesArgs),
@@ -84,6 +91,8 @@ pub enum Command {
     LocalVariables(variables::LocalVariablesArgs),
     /// GET /v1/files/{key}/variables/published — published variables in a file.
     PublishedVariables(variables::PublishedVariablesArgs),
+    /// GET /v2/teams/{team_id}/folders — top-level folders (formerly "projects") in a team.
+    TeamFolders(folders::TeamFoldersArgs),
     /// GET /v2/teams/{team_id}/webhooks — team webhooks.
     TeamWebhooks(webhooks::TeamWebhooksArgs),
     /// GET /v2/webhooks/{id} — single webhook.
@@ -114,6 +123,9 @@ impl Command {
             Self::FileMeta(a) => a.run(cfg).await,
             Self::FileNodes(a) => a.run(cfg).await,
             Self::FileVersions(a) => a.run(cfg).await,
+            Self::FolderFiles(a) => a.run(cfg).await,
+            Self::FolderFolders(a) => a.run(cfg).await,
+            Self::FolderMeta(a) => a.run(cfg).await,
             Self::ImageFills(a) => a.run(cfg).await,
             Self::Images(a) => a.run(cfg).await,
             Self::LibraryAnalyticsComponentActions(a) => a.run(cfg).await,
@@ -131,6 +143,7 @@ impl Command {
             Self::TeamStyles(a) => a.run(cfg).await,
             Self::LocalVariables(a) => a.run(cfg).await,
             Self::PublishedVariables(a) => a.run(cfg).await,
+            Self::TeamFolders(a) => a.run(cfg).await,
             Self::TeamWebhooks(a) => a.run(cfg).await,
             Self::Webhook(a) => a.run(cfg).await,
             Self::WebhookRequests(a) => a.run(cfg).await,

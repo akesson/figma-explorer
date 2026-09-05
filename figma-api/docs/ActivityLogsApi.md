@@ -10,7 +10,7 @@ Method | HTTP request | Description
 
 ## get_activity_logs
 
-> models::InlineObject24 get_activity_logs(events, start_time, end_time, limit, order)
+> models::InlineObject29 get_activity_logs(events, start_time, end_time, limit, order)
 Get activity logs
 
 Returns a list of activity log events
@@ -28,7 +28,7 @@ Name | Type | Description  | Required | Notes
 
 ### Return type
 
-[**models::InlineObject24**](inline_object_24.md)
+[**models::InlineObject29**](inline_object_29.md)
 
 ### Authorization
 

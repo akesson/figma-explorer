@@ -59,7 +59,7 @@ export FIGMA_TOKEN=figd_...
 
 Optional environment variables:
 
-- `FIGMA_PROJECTS_IDS` — comma-separated project ids; needed by `cache prefetch`.
+- `FIGMA_PROJECTS_IDS` — comma-separated Figma folder ids (Figma renamed "projects" to "folders" in August 2026; the numeric ids are unchanged, so existing values keep working); needed by `cache prefetch`.
 - `FIGMA_TEAM_ID` — needed by `library search` and for the catalog warm in `cache prefetch`.
 - `FIGMA_EXPLORER_CACHE_DIR` — override the cache location (default: OS cache dir).
 

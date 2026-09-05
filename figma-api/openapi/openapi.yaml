@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Figma API
-  version: 0.38.0
+  version: 0.42.0
   description: |-
     This is the OpenAPI specification for the [Figma REST API](https://developers.figma.com/docs/rest-api/).
 
@@ -35,6 +35,11 @@ tags:
     externalDocs:
       description: Project endpoints documentation
       url: https://developers.figma.com/docs/rest-api/projects-endpoints/
+  - name: Folders
+    description: Get information about folders, subfolders, and files in teams.
+    externalDocs:
+      description: Folder endpoints documentation
+      url: https://developers.figma.com/docs/rest-api/folders-endpoints/
   - name: Users
     description: Get information about the currently authenticated user.
     externalDocs:
@@ -70,6 +75,11 @@ tags:
     externalDocs:
       description: Developer log endpoints documentation
       url: https://developers.figma.com/docs/rest-api/developer-logs-endpoints/
+  - name: AI Usage
+    description: Get per-user, per-day AI credit usage for a plan.
+    externalDocs:
+      description: AI usage endpoints documentation
+      url: https://developers.figma.com/docs/rest-api/ai-usage-endpoints/
   - name: Payments
     description: Get purchase information for your Community resources.
     externalDocs:
@@ -468,20 +478,23 @@ paths:
     get:
       tags:
         - Projects
-      summary: Get projects in a team
+      summary: "[Deprecated] Get projects in a team"
+      deprecated: true
       security:
         - PersonalAccessToken: []
         - PlanAccessToken: []
         - OAuth2:
             - projects:read
             - files:read
-      description: "You can use this endpoint to get a list of all the Projects within
-        the specified team. This will only return projects visible to the
-        authenticated user or owner of the developer token. Note: it is not
-        currently possible to programmatically obtain the team id of a user just
-        from a token. To obtain a team id, navigate to a team page of a team you
-        are a part of. The team id will be present in the URL after the word
-        team and before your team name."
+      description: 'Deprecated in favor of [Get top-level folders in a
+        team](https://developers.figma.com/docs/rest-api/folders-endpoints/).
+        You can use this endpoint to get a list of the top-level Projects (now
+        called "folders") within the specified team. This will only return
+        projects visible to the authenticated user or owner of the developer
+        token. Note: it is not currently possible to programmatically obtain the
+        team id of a user just from a token. To obtain a team id, navigate to a
+        team page of a team you are a part of. The team id will be present in
+        the URL after the word team and before your team name.'
       operationId: getTeamProjects
       parameters:
         - name: team_id
@@ -501,18 +514,55 @@ paths:
           $ref: "#/components/responses/TooManyRequestsErrorResponseWithErrMessage"
         "500":
           $ref: "#/components/responses/InternalServerErrorResponseWithErrMessage"
+  /v1/projects/{project_id}/meta:
+    get:
+      tags:
+        - Projects
+      summary: "[Deprecated] Get project metadata"
+      deprecated: true
+      security:
+        - PersonalAccessToken: []
+        - PlanAccessToken: []
+        - OAuth2:
+            - project_metadata:read
+      description: Deprecated in favor of [Get folder
+        metadata](https://developers.figma.com/docs/rest-api/folders-endpoints/).
+        Get metadata for a project (now called a "folder").
+      operationId: getProjectMeta
+      parameters:
+        - name: project_id
+          in: path
+          description: ID of the project to get metadata for.
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          $ref: "#/components/responses/GetProjectMetaResponse"
+        "403":
+          $ref: "#/components/responses/ForbiddenErrorResponseWithErrMessage"
+        "404":
+          $ref: "#/components/responses/NotFoundErrorResponseWithErrMessage"
+        "429":
+          $ref: "#/components/responses/TooManyRequestsErrorResponseWithErrMessage"
+        "500":
+          $ref: "#/components/responses/InternalServerErrorResponseWithErrMessage"
   /v1/projects/{project_id}/files:
     get:
       tags:
         - Projects
-      summary: Get files in a project
+      summary: "[Deprecated] Get files in a project"
+      deprecated: true
       security:
         - PersonalAccessToken: []
         - PlanAccessToken: []
         - OAuth2:
             - projects:read
             - files:read
-      description: Get a list of all the Files within the specified project.
+      description: Deprecated in favor of [Get files in a
+        folder](https://developers.figma.com/docs/rest-api/folders-endpoints/).
+        Get a list of all the Files within the specified project (now called a
+        "folder").
       operationId: getProjectFiles
       parameters:
         - name: project_id
@@ -535,6 +585,146 @@ paths:
           $ref: "#/components/responses/BadRequestErrorResponseWithErrorBoolean"
         "403":
           $ref: "#/components/responses/ForbiddenErrorResponseWithErrMessage"
+        "429":
+          $ref: "#/components/responses/TooManyRequestsErrorResponseWithErrMessage"
+        "500":
+          $ref: "#/components/responses/InternalServerErrorResponseWithErrMessage"
+  /v2/teams/{team_id}/folders:
+    get:
+      tags:
+        - Folders
+      summary: Get top-level folders in a team
+      security:
+        - PersonalAccessToken: []
+        - PlanAccessToken: []
+        - OAuth2:
+            - folders:read
+      description: Get a list of the top-level folders (previously called "projects")
+        within the specified team. Subfolders can be traversed with the GET
+        /v2/folders/{folder_id}/folders endpoint. It is not possible to
+        programmatically obtain team IDs. To obtain a team ID, navigate to the
+        team page in the Figma file browser. The team ID is present in the URL
+        after the word team. For example, in
+        `https://www.figma.com/files/181033233908053158/team/1535685101263221741`,
+        the team ID is `1535685101263221741`.
+      operationId: getTeamFolders
+      parameters:
+        - name: team_id
+          in: path
+          description: ID of the team to list folders from
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          $ref: "#/components/responses/GetTeamFoldersResponse"
+        "400":
+          $ref: "#/components/responses/BadRequestErrorResponseWithErrorBoolean"
+        "403":
+          $ref: "#/components/responses/ForbiddenErrorResponseWithErrMessage"
+        "404":
+          $ref: "#/components/responses/NotFoundErrorResponseWithErrMessage"
+        "429":
+          $ref: "#/components/responses/TooManyRequestsErrorResponseWithErrMessage"
+        "500":
+          $ref: "#/components/responses/InternalServerErrorResponseWithErrMessage"
+  /v2/folders/{folder_id}/folders:
+    get:
+      tags:
+        - Folders
+      summary: Get subfolders in a folder
+      security:
+        - PersonalAccessToken: []
+        - PlanAccessToken: []
+        - OAuth2:
+            - folders:read
+      description: Get a list of the direct subfolders within the specified folder.
+      operationId: getFolderFolders
+      parameters:
+        - name: folder_id
+          in: path
+          description: ID of the parent folder to list subfolders from
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          $ref: "#/components/responses/GetFolderFoldersResponse"
+        "400":
+          $ref: "#/components/responses/BadRequestErrorResponseWithErrorBoolean"
+        "403":
+          $ref: "#/components/responses/ForbiddenErrorResponseWithErrMessage"
+        "404":
+          $ref: "#/components/responses/NotFoundErrorResponseWithErrMessage"
+        "429":
+          $ref: "#/components/responses/TooManyRequestsErrorResponseWithErrMessage"
+        "500":
+          $ref: "#/components/responses/InternalServerErrorResponseWithErrMessage"
+  /v2/folders/{folder_id}/files:
+    get:
+      tags:
+        - Folders
+      summary: Get files in a folder
+      security:
+        - PersonalAccessToken: []
+        - PlanAccessToken: []
+        - OAuth2:
+            - folders:read
+      description: Get a list of the files directly within the specified folder.
+      operationId: getFolderFiles
+      parameters:
+        - name: folder_id
+          in: path
+          description: ID of the folder to list files from
+          required: true
+          schema:
+            type: string
+        - name: branch_data
+          in: query
+          description: Returns branch metadata in the response for each main file with a
+            branch inside the folder.
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "200":
+          $ref: "#/components/responses/GetFolderFilesResponse"
+        "400":
+          $ref: "#/components/responses/BadRequestErrorResponseWithErrorBoolean"
+        "403":
+          $ref: "#/components/responses/ForbiddenErrorResponseWithErrMessage"
+        "404":
+          $ref: "#/components/responses/NotFoundErrorResponseWithErrMessage"
+        "429":
+          $ref: "#/components/responses/TooManyRequestsErrorResponseWithErrMessage"
+        "500":
+          $ref: "#/components/responses/InternalServerErrorResponseWithErrMessage"
+  /v2/folders/{folder_id}/meta:
+    get:
+      tags:
+        - Folders
+      summary: Get folder metadata
+      security:
+        - PlanAccessToken: []
+        - OAuth2:
+            - folder_metadata:read
+      description: Get metadata for a folder (name, thumbnail, file count, timestamps)
+        without enumerating its files.
+      operationId: getFolderMeta
+      parameters:
+        - name: folder_id
+          in: path
+          description: ID of the folder to get metadata for
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          $ref: "#/components/responses/GetFolderMetaResponse"
+        "403":
+          $ref: "#/components/responses/ForbiddenErrorResponseWithErrMessage"
+        "404":
+          $ref: "#/components/responses/NotFoundErrorResponseWithErrMessage"
         "429":
           $ref: "#/components/responses/TooManyRequestsErrorResponseWithErrMessage"
         "500":
@@ -1903,6 +2093,70 @@ paths:
           $ref: "#/components/responses/TooManyRequestsErrorResponseWithErrorBoolean"
         "500":
           $ref: "#/components/responses/InternalServerErrorResponseWithErrorBoolean"
+  /v1/ai_usage/daily:
+    get:
+      tags:
+        - AI Usage
+      summary: Get daily AI credit usage
+      security:
+        - PlanAccessToken: []
+      description: Returns per-user, per-day AI credit usage for the plan associated
+        with the calling token. This endpoint requires a plan access token with
+        the `org:ai_metering_usage_read` scope.
+      operationId: getAiUsageDaily
+      parameters:
+        - name: start_date
+          description: The first day to include, inclusive, as a `YYYY-MM-DD` calendar
+            date (UTC). Required. Must be on or after `2025-12-01` and no more
+            than 366 days before the current UTC day.
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: end_date
+          description: The last day to include, inclusive, as a `YYYY-MM-DD` calendar date
+            (UTC). Required. Must be on or after `start_date` and the current
+            UTC day or earlier.
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: user_email
+          description: Restrict the results to a single Figma user, identified by email.
+            When omitted, rows for every user in the plan with usage in the
+            range are returned. An email that matches no Figma user returns a
+            400.
+          in: query
+          schema:
+            type: string
+        - name: limit
+          description: Maximum number of rows to return. This param defaults to 1000 if
+            unspecified, and may not exceed 1000.
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 1000
+        - name: cursor
+          description: An opaque cursor returned from a previous request, used for
+            pagination.
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          $ref: "#/components/responses/GetAiUsageDailyResponse"
+        "400":
+          $ref: "#/components/responses/BadRequestErrorResponseWithErrorBoolean"
+        "401":
+          $ref: "#/components/responses/UnauthorizedErrorResponseWithErrorBoolean"
+        "403":
+          $ref: "#/components/responses/ForbiddenErrorResponseWithErrorBoolean"
+        "429":
+          $ref: "#/components/responses/TooManyRequestsErrorResponseWithErrorBoolean"
+        "500":
+          $ref: "#/components/responses/InternalServerErrorResponseWithErrorBoolean"
   /v1/payments:
     get:
       tags:
@@ -2770,7 +3024,10 @@ components:
             library_analytics:read: Read library analytics data.
             library_assets:read: Read data of individual published components and styles.
             library_content:read: Read published components and styles of files.
+            project_metadata:read: Read metadata of projects.
             projects:read: List projects and files in projects.
+            folders:read: List folders and files in folders.
+            folder_metadata:read: Read metadata of folders.
             team_library_content:read: Read published components and styles of teams.
             webhooks:read: Read metadata of webhooks.
             webhooks:write: Create and manage webhooks.
@@ -6920,6 +7177,28 @@ components:
         - label
         - description
         - user
+    Folder:
+      type: object
+      description: A Folder (previously called a "Project") is a collection of files
+        and subfolders. Folders can be nested; a folder's parent is identified
+        by `parent_folder_id`.
+      properties:
+        id:
+          type: string
+          description: The ID of the folder.
+        name:
+          type: string
+          description: The name of the folder.
+        parent_folder_id:
+          type:
+            - string
+            - "null"
+          description: The ID of the folder's parent folder, or null if the folder is a
+            top-level folder in the team.
+      required:
+        - id
+        - name
+        - parent_folder_id
     WebhookV2:
       type: object
       description: A description of an HTTP webhook (from Figma back to your application)
@@ -7826,6 +8105,99 @@ components:
         - actor
         - resource
         - context
+    AiUsageDailyRow:
+      type: object
+      description: A single per-user, per-day AI credit usage aggregate for the plan.
+      properties:
+        plan_id:
+          type: string
+          description: The id of the plan the usage belongs to.
+        user_id:
+          type: string
+          description: The id of the Figma user that consumed the credits.
+        user_email:
+          type:
+            - string
+            - "null"
+          description: The email of the Figma user that consumed the credits, or `null`
+            when the user's email could not be resolved (e.g. a deleted user).
+        day:
+          type: string
+          description: The calendar date (UTC) of the aggregated usage, in `YYYY-MM-DD`
+            format.
+        editor_type:
+          type: string
+          description: The editor the AI action was associated with. `not_applicable` when
+            the underlying AI action had no associated file.
+          enum:
+            - design
+            - figjam
+            - slides
+            - sites
+            - buzz
+            - make
+            - not_applicable
+        seat_credits_sum:
+          type: integer
+          description: The sum of seat-level (per-user-allocated) credits consumed for
+            this day, user, and editor type.
+        plan_credits_sum:
+          type: integer
+          description: The sum of plan-level (shared pool) credits consumed for this day,
+            user, and editor type.
+        workspace_id:
+          type:
+            - string
+            - "null"
+          description: The id of the workspace the usage was attributed to, or `null` when
+            the usage had no associated workspace.
+        workspace_name:
+          type:
+            - string
+            - "null"
+          description: The name of the workspace the usage was attributed to, or `null`
+            when the usage had no associated workspace.
+        team_id:
+          type:
+            - string
+            - "null"
+          description: The id of the team the usage was attributed to, or `null` when the
+            usage had no associated team.
+        team_name:
+          type:
+            - string
+            - "null"
+          description: The name of the team the usage was attributed to, or `null` when
+            the usage had no associated team.
+        license_group_id:
+          type:
+            - string
+            - "null"
+          description: The id of the license group the usage was attributed to, or `null`
+            when the usage had no associated license group.
+        license_group_name:
+          type:
+            - string
+            - "null"
+          description: The name of the license group the usage was attributed to, or
+            `null` when the usage had no associated license group.
+        metering_period_start:
+          type: string
+          description: The start of the plan-scoped metering period this usage belongs to,
+            as an RFC 3339 UTC timestamp (e.g. `2026-05-01T00:00:00Z`).
+        metering_period_end:
+          type: string
+          description: The end of the plan-scoped metering period this usage belongs to,
+            as an RFC 3339 UTC timestamp (e.g. `2026-06-01T00:00:00Z`).
+      required:
+        - plan_id
+        - user_id
+        - day
+        - editor_type
+        - seat_credits_sum
+        - plan_credits_sum
+        - metering_period_start
+        - metering_period_end
     PaymentStatus:
       type: object
       description: An object describing the user's payment status.
@@ -9126,55 +9498,61 @@ components:
           schema:
             type: object
             properties:
-              name:
-                type: string
-                description: The name of the file.
-              folder_name:
-                type: string
-                description: The name of the project containing the file.
-              last_touched_at:
-                type: string
-                format: date-time
-                description: The UTC ISO 8601 time at which the file content was last modified.
-              creator:
-                description: The user who created the file.
-                $ref: "#/components/schemas/User"
-              last_touched_by:
-                description: The user who last modified the file contents.
-                $ref: "#/components/schemas/User"
-              thumbnail_url:
-                type: string
-                description: A URL to a thumbnail image of the file.
-              editorType:
-                type: string
-                enum:
-                  - figma
-                  - figjam
-                  - slides
-                  - buzz
-                  - sites
-                  - make
-                description: The type of editor associated with this file.
-              role:
-                $ref: "#/components/schemas/Role"
-                description: The role of the user making the API request in relation to the
-                  file.
-              link_access:
-                $ref: "#/components/schemas/LinkAccess"
-                description: Access policy for users who have the link to the file.
-              url:
-                type: string
-                description: The URL of the file.
-              version:
-                type: string
-                description: The version number of the file. This number is incremented when a
-                  file is modified and can be used to check if the file has
-                  changed between requests.
+              file:
+                type: object
+                description: The file metadata.
+                properties:
+                  name:
+                    type: string
+                    description: The name of the file.
+                  folder_name:
+                    type: string
+                    description: The name of the project containing the file.
+                  last_touched_at:
+                    type: string
+                    format: date-time
+                    description: The UTC ISO 8601 time at which the file content was last modified.
+                  creator:
+                    description: The user who created the file.
+                    $ref: "#/components/schemas/User"
+                  last_touched_by:
+                    description: The user who last modified the file contents.
+                    $ref: "#/components/schemas/User"
+                  thumbnail_url:
+                    type: string
+                    description: A URL to a thumbnail image of the file.
+                  editorType:
+                    type: string
+                    enum:
+                      - figma
+                      - figjam
+                      - slides
+                      - buzz
+                      - sites
+                      - make
+                    description: The type of editor associated with this file.
+                  role:
+                    $ref: "#/components/schemas/Role"
+                    description: The role of the user making the API request in relation to the
+                      file.
+                  link_access:
+                    $ref: "#/components/schemas/LinkAccess"
+                    description: Access policy for users who have the link to the file.
+                  url:
+                    type: string
+                    description: The URL of the file.
+                  version:
+                    type: string
+                    description: The version number of the file. This number is incremented when a
+                      file is modified and can be used to check if the file has
+                      changed between requests.
+                required:
+                  - name
+                  - last_touched_at
+                  - creator
+                  - editorType
             required:
-              - name
-              - last_touched_at
-              - creator
-              - editorType
+              - file
     GetTeamProjectsResponse:
       description: Response from the GET /v1/teams/{team_id}/projects endpoint.
       content:
@@ -9193,6 +9571,43 @@ components:
             required:
               - name
               - projects
+    GetProjectMetaResponse:
+      description: Response from the GET /v1/projects/{project_id}/meta endpoint.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              id:
+                type: string
+                description: The unique identifier of the project.
+              name:
+                type: string
+                description: The name of the project.
+              thumbnail_url:
+                type:
+                  - string
+                  - "null"
+                description: A URL to a thumbnail image of the project. May be null if the
+                  project has no files.
+              file_count:
+                type: integer
+                description: The number of files in the project.
+              updated_at:
+                type: string
+                format: date-time
+                description: The UTC ISO 8601 time at which the project was last updated.
+              created_at:
+                type: string
+                format: date-time
+                description: The UTC ISO 8601 time at which the project was created.
+            required:
+              - id
+              - name
+              - thumbnail_url
+              - file_count
+              - updated_at
+              - created_at
     GetProjectFilesResponse:
       description: Response from the GET /v1/projects/{project_id}/files endpoint.
       content:
@@ -9222,6 +9637,141 @@ components:
                       type: string
                       format: date-time
                       description: The UTC ISO 8601 time at which the file was last modified.
+                  required:
+                    - key
+                    - name
+                    - last_modified
+            required:
+              - name
+              - files
+    GetTeamFoldersResponse:
+      description: Response from the GET /v2/teams/{team_id}/folders endpoint.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              name:
+                type: string
+                description: The team's name.
+              folders:
+                type: array
+                description: An array of the team's top-level folders. Each folder's
+                  `parent_folder_id` is null.
+                items:
+                  $ref: "#/components/schemas/Folder"
+            required:
+              - name
+              - folders
+    GetFolderFoldersResponse:
+      description: Response from the GET /v2/folders/{folder_id}/folders endpoint.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              name:
+                type: string
+                description: The parent folder's name.
+              folders:
+                type: array
+                description: An array of the folder's direct subfolders. Each subfolder's
+                  `parent_folder_id` equals the requested folder's ID.
+                items:
+                  $ref: "#/components/schemas/Folder"
+            required:
+              - name
+              - folders
+    GetFolderMetaResponse:
+      description: Response from the GET /v2/folders/{folder_id}/meta endpoint.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              id:
+                type: string
+                description: The ID of the folder.
+              name:
+                type: string
+                description: The name of the folder.
+              thumbnail_url:
+                type:
+                  - string
+                  - "null"
+                description: A URL to a thumbnail image of the folder. Null if the folder has no
+                  files.
+              file_count:
+                type: integer
+                description: The number of files in the folder.
+              updated_at:
+                type: string
+                format: date-time
+                description: The UTC ISO 8601 time at which the folder was last updated.
+              created_at:
+                type: string
+                format: date-time
+                description: The UTC ISO 8601 time at which the folder was created.
+            required:
+              - id
+              - name
+              - thumbnail_url
+              - file_count
+              - updated_at
+              - created_at
+    GetFolderFilesResponse:
+      description: Response from the GET /v2/folders/{folder_id}/files endpoint.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              name:
+                type: string
+                description: The folder's name.
+              files:
+                type: array
+                description: An array of the files directly in the folder.
+                items:
+                  type: object
+                  properties:
+                    key:
+                      type: string
+                      description: The file's key.
+                    name:
+                      type: string
+                      description: The file's name.
+                    thumbnail_url:
+                      type: string
+                      description: The file's thumbnail URL.
+                    last_modified:
+                      type: string
+                      format: date-time
+                      description: The UTC ISO 8601 time at which the file was last modified.
+                    branches:
+                      type: array
+                      description: Present only when `branch_data` is true and the file has branches.
+                        An array of the file's branches.
+                      items:
+                        type: object
+                        properties:
+                          key:
+                            type: string
+                            description: The branch's file key.
+                          name:
+                            type: string
+                            description: The branch's name.
+                          thumbnail_url:
+                            type: string
+                            description: The branch's thumbnail URL.
+                          last_modified:
+                            type: string
+                            format: date-time
+                            description: The UTC ISO 8601 time at which the branch was last modified.
+                        required:
+                          - key
+                          - name
+                          - last_modified
                   required:
                     - key
                     - name
@@ -9760,6 +10310,30 @@ components:
               - status
               - error
               - meta
+    GetAiUsageDailyResponse:
+      description: Response from the GET /v1/ai_usage/daily endpoint.
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              rows:
+                type: array
+                description: Per-user, per-day AI credit usage aggregates, ordered by `day`,
+                  then user, then `editor_type`.
+                items:
+                  $ref: "#/components/schemas/AiUsageDailyRow"
+              next_cursor:
+                type: string
+                description: An opaque cursor to pass as the `cursor` query parameter to fetch
+                  the next page. Empty when there are no more pages.
+              has_next_page:
+                type: boolean
+                description: Whether there is a next page of results to fetch.
+            required:
+              - rows
+              - next_cursor
+              - has_next_page
     GetPaymentsResponse:
       description: Response from the GET /v1/payments endpoint.
       content:

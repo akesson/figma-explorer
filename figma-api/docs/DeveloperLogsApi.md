@@ -10,7 +10,7 @@ Method | HTTP request | Description
 
 ## get_developer_logs
 
-> models::InlineObject25 get_developer_logs(get_developer_logs_request)
+> models::InlineObject30 get_developer_logs(get_developer_logs_request)
 Get developer logs
 
 Returns a list of developer log entries for REST API and MCP server requests made within the organization. This endpoint requires a plan access token with the `org:developer_log_read` scope.
@@ -24,7 +24,7 @@ Name | Type | Description  | Required | Notes
 
 ### Return type
 
-[**models::InlineObject25**](inline_object_25.md)
+[**models::InlineObject30**](inline_object_30.md)
 
 ### Authorization
 

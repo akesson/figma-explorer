@@ -12,7 +12,7 @@ Method | HTTP request | Description
 
 ## get_component
 
-> models::InlineObject14 get_component(key)
+> models::InlineObject19 get_component(key)
 Get component
 
 Get metadata on a component by key.
@@ -26,7 +26,7 @@ Name | Type | Description  | Required | Notes
 
 ### Return type
 
-[**models::InlineObject14**](inline_object_14.md)
+[**models::InlineObject19**](inline_object_19.md)
 
 ### Authorization
 
@@ -42,7 +42,7 @@ Name | Type | Description  | Required | Notes
 
 ## get_file_components
 
-> models::InlineObject13 get_file_components(file_key)
+> models::InlineObject18 get_file_components(file_key)
 Get file components
 
 Get a list of published components within a file library.
@@ -56,7 +56,7 @@ Name | Type | Description  | Required | Notes
 
 ### Return type
 
-[**models::InlineObject13**](inline_object_13.md)
+[**models::InlineObject18**](inline_object_18.md)
 
 ### Authorization
 
@@ -72,7 +72,7 @@ Name | Type | Description  | Required | Notes
 
 ## get_team_components
 
-> models::InlineObject12 get_team_components(team_id, page_size, after, before)
+> models::InlineObject17 get_team_components(team_id, page_size, after, before)
 Get team components
 
 Get a paginated list of published components within a team library.
@@ -89,7 +89,7 @@ Name | Type | Description  | Required | Notes
 
 ### Return type
 
-[**models::InlineObject12**](inline_object_12.md)
+[**models::InlineObject17**](inline_object_17.md)
 
 ### Authorization
 

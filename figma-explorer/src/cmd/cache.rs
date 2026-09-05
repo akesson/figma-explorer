@@ -54,9 +54,12 @@ pub enum CacheCommand {
 
 #[derive(ClapArgs, Debug)]
 pub struct PrefetchArgs {
-    /// Comma-separated list of Figma project IDs. Falls back to FIGMA_PROJECTS_IDS.
+    /// Comma-separated list of Figma folder IDs (Figma renamed "projects" to
+    /// "folders" in Aug 2026 — the numeric ids are unchanged). Falls back to
+    /// FIGMA_PROJECTS_IDS.
     #[arg(
         long,
+        visible_alias = "folder-ids",
         env = "FIGMA_PROJECTS_IDS",
         value_delimiter = ',',
         required = true

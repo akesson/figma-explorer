@@ -15,7 +15,7 @@ Method | HTTP request | Description
 
 ## get_library_analytics_component_actions
 
-> models::InlineObject33 get_library_analytics_component_actions(file_key, group_by, cursor, start_date, end_date)
+> models::InlineObject39 get_library_analytics_component_actions(file_key, group_by, cursor, start_date, end_date)
 Get library analytics component action data.
 
 Returns a list of library analytics component actions data broken down by the requested dimension.
@@ -33,7 +33,7 @@ Name | Type | Description  | Required | Notes
 
 ### Return type
 
-[**models::InlineObject33**](inline_object_33.md)
+[**models::InlineObject39**](inline_object_39.md)
 
 ### Authorization
 
@@ -49,7 +49,7 @@ Name | Type | Description  | Required | Notes
 
 ## get_library_analytics_component_usages
 
-> models::InlineObject34 get_library_analytics_component_usages(file_key, group_by, cursor)
+> models::InlineObject40 get_library_analytics_component_usages(file_key, group_by, cursor)
 Get library analytics component usage data.
 
 Returns a list of library analytics component usage data broken down by the requested dimension.
@@ -65,7 +65,7 @@ Name | Type | Description  | Required | Notes
 
 ### Return type
 
-[**models::InlineObject34**](inline_object_34.md)
+[**models::InlineObject40**](inline_object_40.md)
 
 ### Authorization
 
@@ -81,7 +81,7 @@ Name | Type | Description  | Required | Notes
 
 ## get_library_analytics_style_actions
 
-> models::InlineObject35 get_library_analytics_style_actions(file_key, group_by, cursor, start_date, end_date)
+> models::InlineObject41 get_library_analytics_style_actions(file_key, group_by, cursor, start_date, end_date)
 Get library analytics style action data.
 
 Returns a list of library analytics style actions data broken down by the requested dimension.
@@ -99,7 +99,7 @@ Name | Type | Description  | Required | Notes
 
 ### Return type
 
-[**models::InlineObject35**](inline_object_35.md)
+[**models::InlineObject41**](inline_object_41.md)
 
 ### Authorization
 
@@ -115,7 +115,7 @@ Name | Type | Description  | Required | Notes
 
 ## get_library_analytics_style_usages
 
-> models::InlineObject36 get_library_analytics_style_usages(file_key, group_by, cursor)
+> models::InlineObject42 get_library_analytics_style_usages(file_key, group_by, cursor)
 Get library analytics style usage data.
 
 Returns a list of library analytics style usage data broken down by the requested dimension.
@@ -131,7 +131,7 @@ Name | Type | Description  | Required | Notes
 
 ### Return type
 
-[**models::InlineObject36**](inline_object_36.md)
+[**models::InlineObject42**](inline_object_42.md)
 
 ### Authorization
 
@@ -147,7 +147,7 @@ Name | Type | Description  | Required | Notes
 
 ## get_library_analytics_variable_actions
 
-> models::InlineObject37 get_library_analytics_variable_actions(file_key, group_by, cursor, start_date, end_date)
+> models::InlineObject43 get_library_analytics_variable_actions(file_key, group_by, cursor, start_date, end_date)
 Get library analytics variable action data.
 
 Returns a list of library analytics variable actions data broken down by the requested dimension.
@@ -165,7 +165,7 @@ Name | Type | Description  | Required | Notes
 
 ### Return type
 
-[**models::InlineObject37**](inline_object_37.md)
+[**models::InlineObject43**](inline_object_43.md)
 
 ### Authorization
 
@@ -181,7 +181,7 @@ Name | Type | Description  | Required | Notes
 
 ## get_library_analytics_variable_usages
 
-> models::InlineObject38 get_library_analytics_variable_usages(file_key, group_by, cursor)
+> models::InlineObject44 get_library_analytics_variable_usages(file_key, group_by, cursor)
 Get library analytics variable usage data.
 
 Returns a list of library analytics variable usage data broken down by the requested dimension.
@@ -197,7 +197,7 @@ Name | Type | Description  | Required | Notes
 
 ### Return type
 
-[**models::InlineObject38**](inline_object_38.md)
+[**models::InlineObject44**](inline_object_44.md)
 
 ### Authorization
 

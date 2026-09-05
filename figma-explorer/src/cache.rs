@@ -36,7 +36,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use figma_api::apis::configuration::Configuration;
-use figma_api::apis::projects_api as api;
+use figma_api::apis::folders_api;
+use figma_api::apis::projects_api;
 use figma_api::models::Comment;
 use figma_common::StableHasher;
 use memmap2::Mmap;
@@ -783,8 +784,12 @@ pub fn default_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("cache"))
 }
 
-/// One row from the Figma project listing — what `get_project_files` returns,
+/// One row from the Figma folder listing — what `get_folder_files` returns,
 /// in the flat shape our cache uses.
+///
+/// Figma renamed "projects" to "folders" in August 2026; the numeric ids are
+/// unchanged, so `project_id` here is the same value as the folder id and the
+/// on-disk meta field keeps its historical name.
 #[derive(Debug, Clone)]
 pub struct FileRef {
     pub file_key: String,
@@ -794,37 +799,96 @@ pub struct FileRef {
     pub project_name: String,
 }
 
-/// Fetch every file across the given projects. One API call per project; all
-/// projects are queried sequentially (small response, cheap relative to file
-/// fetches).
+/// Fetch every file across the given projects (Figma folders). One API call
+/// per project; all projects are queried sequentially (small response, cheap
+/// relative to file fetches).
+///
+/// Uses `GET /v2/folders/{id}/files`. Personal access tokens created after
+/// 2026-08-03 carry `folders:read` instead of `projects:read`, and the
+/// deprecated `GET /v1/projects/{id}/files` rejects them with 403. Tokens
+/// that predate the rename are documented to keep working, but Figma does not
+/// say whether they are accepted by the v2 endpoints — so a 403 from v2 falls
+/// back to v1 once, and only a failure on both surfaces to the caller.
 pub async fn list_project_files(
     cfg: &Configuration,
     project_ids: &[String],
 ) -> Result<Vec<FileRef>> {
     let mut out = Vec::new();
     for pid in project_ids {
-        let resp = api::get_project_files(
-            cfg,
-            api::GetProjectFilesParams {
-                project_id: pid.clone(),
-                branch_data: None,
-            },
-        )
-        .await
-        .map_err(into_anyhow)
-        .with_context(|| format!("listing files for project {pid}"))?;
-        let project_name = resp.name.clone();
-        for f in resp.files {
+        let (project_name, files) = list_folder_files(cfg, pid)
+            .await
+            .with_context(|| format!("listing files for project (folder) {pid}"))?;
+        for (file_key, name, last_modified) in files {
             out.push(FileRef {
-                file_key: f.key,
-                name: f.name,
-                last_modified: f.last_modified,
+                file_key,
+                name,
+                last_modified,
                 project_id: pid.clone(),
                 project_name: project_name.clone(),
             });
         }
     }
     Ok(out)
+}
+
+/// `(folder_name, [(key, name, last_modified)])` for one folder — v2 first,
+/// v1 on a 403 (see `list_project_files`).
+async fn list_folder_files(
+    cfg: &Configuration,
+    folder_id: &str,
+) -> Result<(String, Vec<(String, String, String)>)> {
+    let v2 = folders_api::get_folder_files(
+        cfg,
+        folders_api::GetFolderFilesParams {
+            folder_id: folder_id.to_owned(),
+            branch_data: None,
+        },
+    )
+    .await;
+    let v2_err = match v2 {
+        Ok(resp) => {
+            let files = resp
+                .files
+                .into_iter()
+                .map(|f| (f.key, f.name, f.last_modified))
+                .collect();
+            return Ok((resp.name, files));
+        }
+        Err(figma_api::apis::Error::ResponseError(r)) if r.status.as_u16() == 403 => {
+            figma_api::apis::Error::ResponseError(r)
+        }
+        Err(e) => return Err(into_anyhow(e)),
+    };
+
+    // 403 on v2: possibly a pre-rename token that only holds `projects:read`.
+    match projects_api::get_project_files(
+        cfg,
+        projects_api::GetProjectFilesParams {
+            project_id: folder_id.to_owned(),
+            branch_data: None,
+        },
+    )
+    .await
+    {
+        Ok(resp) => {
+            eprintln!(
+                "cache: folder {folder_id}: v2 folders endpoint returned 403, deprecated v1 \
+                 projects endpoint succeeded — this token predates Figma's projects→folders \
+                 rename; regenerate it before v1 is removed"
+            );
+            let files = resp
+                .files
+                .into_iter()
+                .map(|f| (f.key, f.name, f.last_modified))
+                .collect();
+            Ok((resp.name, files))
+        }
+        Err(v1_err) => Err(anyhow::anyhow!(
+            "v2 folders endpoint: {:#}; deprecated v1 projects fallback: {:#}",
+            into_anyhow(v2_err),
+            into_anyhow(v1_err)
+        )),
+    }
 }
 
 fn parse_project_ids_env() -> Vec<String> {
@@ -1887,5 +1951,185 @@ mod tests {
             !entries.iter().any(|n| n.contains(".tmp")),
             "found stray tempfile: {entries:?}"
         );
+    }
+
+    /// Minimal one-shot HTTP/1.1 server on a std thread: serves the queued
+    /// `(status, body)` responses in order and records each request path.
+    /// Avoids a mock-server dev-dependency and any tokio `net` feature.
+    mod mock_http {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::{Arc, Mutex};
+
+        pub struct Server {
+            pub base_url: String,
+            pub paths: Arc<Mutex<Vec<String>>>,
+            handle: Option<std::thread::JoinHandle<()>>,
+        }
+
+        pub fn serve(responses: Vec<(u16, String)>) -> Server {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let base_url = format!("http://{}", listener.local_addr().unwrap());
+            let paths = Arc::new(Mutex::new(Vec::new()));
+            let paths_t = Arc::clone(&paths);
+            let handle = std::thread::spawn(move || {
+                for (status, body) in responses {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 1024];
+                    loop {
+                        let n = stream.read(&mut chunk).unwrap();
+                        buf.extend_from_slice(&chunk[..n]);
+                        if n == 0 || buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    let head = String::from_utf8_lossy(&buf);
+                    let path = head
+                        .lines()
+                        .next()
+                        .and_then(|l| l.split_whitespace().nth(1))
+                        .unwrap_or("")
+                        .to_owned();
+                    paths_t.lock().unwrap().push(path);
+                    let reason = match status {
+                        200 => "OK",
+                        403 => "Forbidden",
+                        _ => "Other",
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    stream.write_all(resp.as_bytes()).unwrap();
+                    stream.flush().unwrap();
+                }
+            });
+            Server {
+                base_url,
+                paths,
+                handle: Some(handle),
+            }
+        }
+
+        impl Server {
+            pub fn paths(mut self) -> Vec<String> {
+                self.handle.take().unwrap().join().unwrap();
+                self.paths.lock().unwrap().clone()
+            }
+        }
+    }
+
+    /// Recorded 2026-09-05 from `GET /v2/folders/{id}/files` (values
+    /// anonymised, shape verbatim). Identical to the v1 project-files shape
+    /// apart from the optional `branches` array.
+    const V2_FOLDER_FILES: &str = r#"{"name":"Desktop","files":[
+        {"key":"aaaaaaaaaaaaaaaaaaaaaa","name":"404 / No Access",
+         "thumbnail_url":"https://s3-alpha.figma.com/thumbnails/a","last_modified":"2026-03-25T17:07:04Z"},
+        {"key":"bbbbbbbbbbbbbbbbbbbbbb","name":"Wall Chart",
+         "thumbnail_url":"https://s3-alpha.figma.com/thumbnails/b","last_modified":"2026-07-15T09:57:35Z",
+         "branches":[{"key":"cccccccccccccccccccccc","name":"experiment","last_modified":"2026-07-16T08:00:00Z"}]}
+    ]}"#;
+
+    /// Verbatim 403 body a post-2026-08-03 token gets from the v1 endpoint.
+    const V1_SCOPE_403: &str = r#"{"error":true,"status":403,"message":"Invalid scope: [\"folders:read\"]. This endpoint requires the file_read or files:read or projects:read scope."}"#;
+
+    fn cfg_for(server: &mock_http::Server) -> Configuration {
+        let mut cfg = Configuration::new();
+        cfg.base_path = server.base_url.clone();
+        cfg
+    }
+
+    /// The listing must go to `/v2/folders/{id}/files` (the only endpoint a
+    /// post-rename token can call) and map the response onto `FileRef`
+    /// unchanged — including `project_id` = the folder id, so existing metas
+    /// and `FIGMA_PROJECTS_IDS` values keep matching.
+    #[tokio::test]
+    async fn list_project_files_uses_v2_folders_endpoint() {
+        let server = mock_http::serve(vec![(200, V2_FOLDER_FILES.into())]);
+        let cfg = cfg_for(&server);
+
+        let refs = list_project_files(&cfg, &["77195660".to_owned()])
+            .await
+            .unwrap();
+
+        assert_eq!(server.paths(), vec!["/v2/folders/77195660/files"]);
+        assert_eq!(refs.len(), 2, "branches must not be flattened into files");
+        assert_eq!(refs[0].file_key, "aaaaaaaaaaaaaaaaaaaaaa");
+        assert_eq!(refs[0].name, "404 / No Access");
+        assert_eq!(refs[0].last_modified, "2026-03-25T17:07:04Z");
+        assert_eq!(refs[0].project_id, "77195660");
+        assert_eq!(refs[0].project_name, "Desktop");
+        assert_eq!(refs[1].file_key, "bbbbbbbbbbbbbbbbbbbbbb");
+    }
+
+    /// A 403 from v2 retries the deprecated v1 endpoint once (pre-rename
+    /// tokens are documented to keep working there); success on v1 is a
+    /// success for the caller.
+    #[tokio::test]
+    async fn list_project_files_falls_back_to_v1_on_403() {
+        let v1_body = r#"{"name":"Desktop","files":[{"key":"aaaaaaaaaaaaaaaaaaaaaa","name":"A","last_modified":"2026-03-25T17:07:04Z"}]}"#;
+        let server = mock_http::serve(vec![
+            (
+                403,
+                r#"{"error":true,"status":403,"message":"Invalid scope"}"#.into(),
+            ),
+            (200, v1_body.into()),
+        ]);
+        let cfg = cfg_for(&server);
+
+        let refs = list_project_files(&cfg, &["77195660".to_owned()])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            server.paths(),
+            vec!["/v2/folders/77195660/files", "/v1/projects/77195660/files"]
+        );
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].project_name, "Desktop");
+    }
+
+    /// Both endpoints refusing is a hard error that names the folder and
+    /// carries both bodies, so the scope message Figma returns is visible.
+    #[tokio::test]
+    async fn list_project_files_reports_both_failures() {
+        let server = mock_http::serve(vec![
+            (
+                403,
+                r#"{"error":true,"status":403,"message":"no v2 for you"}"#.into(),
+            ),
+            (403, V1_SCOPE_403.into()),
+        ]);
+        let cfg = cfg_for(&server);
+
+        let err = list_project_files(&cfg, &["77195660".to_owned()])
+            .await
+            .unwrap_err();
+        let msg = format!("{err:#}");
+
+        assert_eq!(server.paths().len(), 2);
+        assert!(msg.contains("77195660"), "{msg}");
+        assert!(msg.contains("no v2 for you"), "{msg}");
+        assert!(
+            msg.contains("requires the file_read or files:read or projects:read"),
+            "{msg}"
+        );
+    }
+
+    /// A non-403 failure on v2 (here: 500) must NOT fall back — v1 would
+    /// only mask a real outage and double the request volume.
+    #[tokio::test]
+    async fn list_project_files_does_not_fall_back_on_non_403() {
+        let server = mock_http::serve(vec![(500, "{}".into())]);
+        let cfg = cfg_for(&server);
+
+        let err = list_project_files(&cfg, &["77195660".to_owned()])
+            .await
+            .unwrap_err();
+
+        assert_eq!(server.paths(), vec!["/v2/folders/77195660/files"]);
+        assert!(format!("{err:#}").contains("500"), "{err:#}");
     }
 }
