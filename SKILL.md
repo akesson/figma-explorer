@@ -94,13 +94,13 @@ truncated:    { reason, omitted_count, omitted_node_ids, hint }  (only when capp
 
 Defaults are tuned for "useful but not overwhelming":
 - Empty arrays / default values (`visible: true`, `rotation: 0`, `opacity: 1`, `constraints: LEFT/TOP`, `wrap: NO_WRAP`) are omitted.
-- **Hidden children are pruned.** A `visible: false` child is listed on its parent as `hidden_children: [{id, name, type}]` and its subtree is skipped — hidden subtrees are component-slot alternates that never render, and in a real screen they were 65% of the output. `--include-hidden` renders them; a hidden *target* is always rendered.
+- **Hidden children are pruned.** A `visible: false` child is listed on its parent as `hidden_children: [{id, name, type}]` and its subtree is skipped — in a screen these are slot alternates and off states, and they were 65% of the output. `--include-hidden` renders them; a hidden *target* is always rendered, and so is a hidden layer inside a COMPONENT definition whose visibility is wired to a BOOLEAN property (it carries `visible: false` + `property_refs: {visible: "Show Icon#…"}` so you can see what the property toggles). A comment anchored to a pruned node is still listed under `node.comments`, tagged `anchor_rendered: false`.
 - `bounds` is absolute on the target and **parent-relative on descendants**; a flow child of an auto-layout parent carries only `width`/`height` (its position is the layout's output, not your input). Absolutely positioned children keep an `x`/`y` offset from the parent.
 - Colors are `hex` only (`#rrggbb` / `#rrggbbaa`). Padding is one number when uniform, else `[top, right, bottom, left]`. `layout_child.sizing` is `"H/V"` (`FIXED|HUG|FILL`).
-- `component.variants` holds variant assignments (`Intent: Success`), `component.properties` the boolean/text/instance-swap props as plain scalars, with Figma's `#n:m` name suffixes stripped.
+- `component.variants` holds variant assignments (`Intent: Success`), `component.properties` the boolean/text/instance-swap props as plain scalars, with Figma's `#n:m` name suffixes stripped. An instance-swap prop is `{instance: <id>, preferred: [{type, key}…]}` — `preferred` lists the allowed swap targets.
 - A paint's token binding lives on the paint (`fills: [{type: SOLID, hex: "#fff", bound_variable: v8}]`); the node-level `bound_variables` map only lists bindings the paints don't already carry (padding, spacing, corner radius, size…). Floats are rounded to 3 decimals.
-- YAML output is block style for the node tree and flow style for leaf maps/short lists (`bounds: {width: 24, height: 24}`, `padding: [0, 12, 0, 12]`), so a node reads as a handful of lines. It is standard YAML; `--json` gives the same data as compact JSON.
-- Children: full subtree by default, capped at `--max-nodes 500`; per-node detail tiers down past depth 0 (effects/prototype/meta drop from descendants; geometry leaves such as VECTOR drop constraints/layout_child but keep fills so icon color tokens stay visible).
+- YAML output is block style for the node tree and flow style for leaf maps/short lists (`bounds: {width: 24, height: 24}`, `padding: [0, 12, 0, 12]`), so a node reads as a handful of lines. It is standard YAML — quoting is conservative enough for YAML 1.1 parsers too (`id: "687:45"` is quoted because base-60 would read it as an integer; `1:17418` is not); multi-line text renders as a `|-` literal block. `--json` gives the same data as compact JSON.
+- Children: full subtree by default, capped at `--max-nodes 500`; per-node detail tiers down past depth 0 (effects/prototype/meta drop from descendants; geometry leaves such as VECTOR/LINE drop only the layout block that cannot apply to them — `constraints` when they are flow children of an auto-layout, `layout_child` when the parent has no auto-layout — and keep fills so icon color tokens stay visible).
 - Variables are referenced by **short handles** (`v1`, `v2`, … in first-seen order) and named styles by id; both are **hoisted to top-level blocks** (`variables`, `styles_index`) — no duplication of token data across 40 children. Without the Variables sidecar each `vN` entry is just `{id}`, which still shows which properties share a token.
 - Comments anchored to the target or its subtree are inlined under `node.comments`. Pass `--no-comments` to skip.
 
@@ -112,7 +112,7 @@ Useful flags:
 - `--meta` — include `dev_status`, `annotations`, `export_settings` (off by default).
 - `--rich-text` — emit per-character-range `text.overrides` for inline links/colored spans.
 - `--include-hidden` — render `visible: false` subtrees instead of listing them under `hidden_children`.
-- `--no-variables` — skip the hoisted `variables` block.
+- `--no-variables` — skip the hoisted `variables` block entirely (the `vN` handles in the node view stay unresolved).
 - `--raw` — escape hatch: dump the raw Figma JSON (camelCase) for the target. Use when the curated view drops something you need.
 
 Variables: requires the paid-tier Variables REST API. `cache prefetch` adaptively disables variables fetching after 3 consecutive 403s; non-Enterprise accounts will see `variables_disabled: true` in the prefetch summary and no top-level `variables` block in `node-info` output. Set `FIGMA_EXPLORER_FETCH_VARIABLES=0` to opt out entirely.
@@ -120,7 +120,7 @@ Variables: requires the paid-tier Variables REST API. `cache prefetch` adaptivel
 ## Output style
 
 - Default is compact YAML on stdout — one indented line per node with `<id>  <bounds>@<x,y>  | <TYPE>  "<name>"`. Ideal for grepping or feeding back into another command.
-- `--json` emits pretty JSON when you want structured data.
+- `--json` emits compact JSON when you want structured data (`jq` does not care).
 - `screenshot` without `--out` prints the rendered S3 URL (cheap; no download).
 - `find` prints `# showing N of M matches — use --limit N to see more` when truncated.
 

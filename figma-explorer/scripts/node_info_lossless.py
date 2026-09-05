@@ -160,6 +160,13 @@ def check_target(bin_path, target):
         vn, vparent = view_by_id[i]
         is_target = i == raw["id"]
         is_leaf = rn.get("type") in GEOMETRY_LEAVES and not is_target
+        parent_auto = rparent is not None and rparent.get("layoutMode", "NONE") != "NONE"
+        flow = parent_auto and rn.get("layoutPositioning") != "ABSOLUTE"
+        # A geometry leaf drops only the layout block that cannot apply to it:
+        # constraints when it is a flow child, layout_child when its parent has
+        # no auto-layout. Everything else must survive.
+        leaf_drops_constraints = is_leaf and flow
+        leaf_drops_layout_child = is_leaf and not parent_auto
         ck.ok(vn.get("type") == rn.get("type") and vn.get("name") == rn.get("name"), f"{i}: identity")
 
         # geometry
@@ -171,22 +178,23 @@ def check_target(bin_path, target):
                 ck.ok(abs(vb["width"] - abb["width"]) < 0.01 and abs(vb["height"] - abb["height"]) < 0.01,
                       f"{i}: size mismatch {vb} vs {abb}")
                 if is_target:
-                    ck.ok(vb.get("x") == abb["x"] and vb.get("y") == abb["y"], f"{i}: target bounds not absolute")
+                    ck.ok(approx(vb.get("x"), abb["x"], 0.01) and approx(vb.get("y"), abb["y"], 0.01),
+                          f"{i}: target bounds not absolute")
                 else:
                     pbox = rparent.get("absoluteBoundingBox") or {}
-                    flow = rparent.get("layoutMode", "NONE") != "NONE" and rn.get("layoutPositioning") != "ABSOLUTE"
                     if flow:
                         ck.ok("x" not in vb, f"{i}: flow child carries x/y")
                     elif pbox.get("x") is None:
-                        # No parent box to be relative to: the view falls back to absolute.
-                        ck.ok(vb.get("x") == abb["x"] and vb.get("y") == abb["y"],
-                              f"{i}: expected absolute fallback bounds, got {vb}")
+                        # No parent box (a CANVAS): the parent counts as the origin,
+                        # so parent-relative equals absolute.
+                        ck.ok(approx(vb.get("x"), abb["x"], 0.01) and approx(vb.get("y"), abb["y"], 0.01),
+                              f"{i}: expected origin-relative bounds, got {vb}")
                     else:
                         ck.ok("x" in vb and abs(pbox["x"] + vb["x"] - abb["x"]) < 0.02
                               and abs(pbox["y"] + vb["y"] - abb["y"]) < 0.02,
                               f"{i}: absolute position not reconstructible: parent {pbox} + {vb} != {abb}")
         cons = rn.get("constraints")
-        if cons and cons != {"vertical": "TOP", "horizontal": "LEFT"} and not is_leaf:
+        if cons and cons != {"vertical": "TOP", "horizontal": "LEFT"} and not leaf_drops_constraints:
             ck.ok(vn.get("constraints") == cons, f"{i}: constraints {cons} lost")
 
         # layout container
@@ -212,7 +220,7 @@ def check_target(bin_path, target):
             ck.ok(all(abs(a - b) < 1e-3 for a, b in zip(raw_pad, view_pad)),
                   f"{i}: padding {raw_pad} lost (got {vp})")
         for k in ("layoutSizingHorizontal", "layoutSizingVertical"):
-            if k in rn and not is_leaf:
+            if k in rn and not leaf_drops_layout_child:
                 sizing = vn.get("layout_child", {}).get("sizing", "")
                 idx = 0 if k.endswith("Horizontal") else 1
                 ck.ok(sizing.split("/")[idx:idx + 1] == [rn[k]], f"{i}: {k}={rn[k]} lost (sizing={sizing!r})")
@@ -280,6 +288,8 @@ def check_target(bin_path, target):
                 bucket = comp.get("variants", {}) if prop.get("type") == "VARIANT" else comp.get("properties", {})
                 got = bucket.get(short, bucket.get(name))
                 if isinstance(got, dict):
+                    if prop.get("preferredValues"):
+                        ck.ok(got.get("preferred") == prop["preferredValues"], f"{i}: {name} preferredValues lost")
                     got = got.get("value", got.get("instance"))
                 ck.ok(got == prop.get("value"), f"{i}: component property {name}={prop.get('value')!r} lost (got {got!r})")
 

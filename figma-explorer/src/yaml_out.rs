@@ -10,26 +10,37 @@
 //! This printer keeps block style for the tree skeleton and switches to flow
 //! style (`{k: v, ...}` / `[a, b]`) for *leaf containers*: anything nesting
 //! at most two container levels whose flow rendering fits in
-//! [`FLOW_MAX_WIDTH`] characters (list items are exempt from the width cap:
-//! one record per row). Items directly under a `children` key stay block so
-//! nodes always look alike. Output is standard YAML 1.2 that
-//! round-trips through any YAML parser (the tests prove it with
-//! `serde_yaml_ng`); it is not a new grammar.
+//! [`FLOW_MAX_WIDTH`] characters ([`LIST_ITEM_FLOW_MAX_WIDTH`] for list
+//! items, so a list of records reads as one row per line). A list renders
+//! uniformly: if any item needs block style, every item does, so sibling
+//! nodes always look alike. Multi-line strings render as `|-` literal
+//! blocks (one source line per line) in block context; a container holding
+//! one is never rendered flow. Output is standard YAML that round-trips
+//! through YAML 1.2 *and* YAML 1.1 parsers (the tests prove the former with
+//! `serde_yaml_ng`; the quoting rules below are written for the latter —
+//! PyYAML, Psych — whose implicit typing is far more eager); it is not a
+//! new grammar.
 //!
 //! Scalars are quoted only when a plain scalar would be misread: empty,
-//! leading/trailing whitespace, indicator characters, `: ` / ` #`, YAML 1.1
-//! booleans/null, anything numeric-looking (including `1_000`, `0x1f`,
-//! sexagesimal `1:30`, and ISO dates), and flow indicators inside a flow
-//! context. Quoted strings use JSON escaping, which YAML double-quoted
-//! scalars accept verbatim.
+//! leading/trailing whitespace, control / line-separator characters,
+//! indicator characters, `: ` / ` #`, YAML 1.1 booleans/null, anything
+//! numeric-looking (including `1_000`, `1,000`, `0x1f`, sexagesimal `1:30`
+//! and `687:45`, and ISO dates), and flow indicators or a leading `:`/`?`
+//! inside a flow context. Quoted strings use double-quote escaping with
+//! every character a libyaml-based parser rejects (C0/C1 controls,
+//! U+2028/U+2029, BOM, non-characters) written as `\uXXXX`.
 
 use serde_json::{Map, Value};
 use std::fmt::Write;
 
 /// Widest flow rendering of a map value (excluding the key) before falling
-/// back to block. List items are exempt: a list of records reads best as one
-/// row per line, however wide.
+/// back to block.
 const FLOW_MAX_WIDTH: usize = 100;
+/// Widest flow rendering of a list item. Wider than [`FLOW_MAX_WIDTH`]
+/// because a list of records reads best as one row per line, but capped so
+/// a comment thread doesn't collapse into a single 400-character row next
+/// to block-rendered siblings.
+const LIST_ITEM_FLOW_MAX_WIDTH: usize = 200;
 const INDENT: usize = 2;
 
 /// Render `value` as YAML. Always ends with a newline.
@@ -37,7 +48,7 @@ pub fn to_yaml(value: &Value) -> String {
     let mut out = String::new();
     match value {
         Value::Object(_) | Value::Array(_) if !is_empty_container(value) => {
-            write_block(value, 0, &mut out, false);
+            write_block(value, 0, &mut out);
         }
         _ => {
             out.push_str(&flow(value, false));
@@ -64,22 +75,29 @@ fn container_depth(v: &Value) -> usize {
     }
 }
 
-/// Flow rendering of `v` if it qualifies as a leaf container (or scalar).
-/// `max_width` is the flow-length cap; `None` means only the depth rule
-/// applies.
-fn try_flow(v: &Value, force_block: bool, max_width: Option<usize>) -> Option<String> {
-    if force_block && !is_empty_container(v) {
-        return None;
+/// Does `v` (or anything inside it) want a `|-` literal block? Such values
+/// only exist in block context, so their containers can't be flow.
+fn contains_literal(v: &Value) -> bool {
+    match v {
+        Value::String(s) => literal_ok(s),
+        Value::Object(m) => m.values().any(contains_literal),
+        Value::Array(a) => a.iter().any(contains_literal),
+        _ => false,
     }
-    if container_depth(v) > 2 {
+}
+
+/// Flow rendering of `v` if it qualifies as a leaf container (or scalar).
+/// `max_width` is the flow-length cap for containers.
+fn try_flow(v: &Value, max_width: usize) -> Option<String> {
+    if container_depth(v) > 2 || contains_literal(v) {
         return None;
     }
     let s = flow(v, false);
     let is_container = v.is_object() || v.is_array();
-    match max_width {
-        Some(w) if is_container && s.chars().count() > w => None,
-        _ => Some(s),
+    if is_container && s.chars().count() > max_width {
+        return None;
     }
+    Some(s)
 }
 
 /// Unconditional flow rendering. `in_flow` widens the quoting rules for
@@ -101,26 +119,43 @@ fn flow(v: &Value, in_flow: bool) -> String {
     }
 }
 
-fn write_block(v: &Value, indent: usize, out: &mut String, force_block_items: bool) {
+fn write_block(v: &Value, indent: usize, out: &mut String) {
     let pad = " ".repeat(indent);
     match v {
         Value::Object(m) => write_map(m, &pad, indent, out),
         Value::Array(a) => {
-            for item in a {
-                // List items are records: one row per line reads like a
-                // table, so the width cap does not apply to them.
-                if let Some(f) = try_flow(item, force_block_items, None) {
+            // Uniform per list: one deep item makes every item block, so a
+            // list of node records never mixes `- {…}` rows with `- id:` blocks.
+            let flows: Vec<Option<String>> = a
+                .iter()
+                .map(|item| try_flow(item, LIST_ITEM_FLOW_MAX_WIDTH))
+                .collect();
+            if flows.iter().all(Option::is_some) {
+                for f in flows.into_iter().flatten() {
                     let _ = writeln!(out, "{pad}- {f}");
-                } else {
-                    // Render the item as its own block one level deeper, then
-                    // splice the `- ` marker over the first line's padding.
-                    let mut sub = String::new();
-                    write_block(item, indent + INDENT, &mut sub, false);
-                    let first_end = sub.find('\n').unwrap_or(sub.len());
-                    let _ = writeln!(out, "{pad}- {}", sub[..first_end].trim_start());
-                    out.push_str(&sub[(first_end + 1).min(sub.len())..]);
                 }
+                return;
             }
+            for item in a {
+                if let Value::String(s) = item {
+                    if literal_ok(s) {
+                        let _ = writeln!(out, "{pad}- |-");
+                        write_literal_lines(s, indent + INDENT, out);
+                        continue;
+                    }
+                }
+                // Render the item as its own block one level deeper, then
+                // splice the `- ` marker over the first line's padding.
+                let mut sub = String::new();
+                write_block(item, indent + INDENT, &mut sub);
+                let first_end = sub.find('\n').unwrap_or(sub.len());
+                let _ = writeln!(out, "{pad}- {}", sub[..first_end].trim_start());
+                out.push_str(&sub[(first_end + 1).min(sub.len())..]);
+            }
+        }
+        Value::String(s) if literal_ok(s) => {
+            let _ = writeln!(out, "{pad}|-");
+            write_literal_lines(s, indent + INDENT, out);
         }
         _ => {
             let _ = writeln!(out, "{pad}{}", scalar(v, false));
@@ -131,17 +166,57 @@ fn write_block(v: &Value, indent: usize, out: &mut String, force_block_items: bo
 fn write_map(m: &Map<String, Value>, pad: &str, indent: usize, out: &mut String) {
     for (k, x) in m {
         let key = scalar_str(k, false);
-        let block_items = k == "children";
-        match try_flow(x, false, Some(FLOW_MAX_WIDTH)) {
-            Some(f) if !block_items || is_empty_container(x) => {
-                let _ = writeln!(out, "{pad}{key}: {f}");
+        match x {
+            Value::String(s) if literal_ok(s) => {
+                let _ = writeln!(out, "{pad}{key}: |-");
+                write_literal_lines(s, indent + INDENT, out);
             }
-            _ => {
-                let _ = writeln!(out, "{pad}{key}:");
-                write_block(x, indent + INDENT, out, block_items);
-            }
+            _ => match try_flow(x, FLOW_MAX_WIDTH) {
+                Some(f) => {
+                    let _ = writeln!(out, "{pad}{key}: {f}");
+                }
+                None => {
+                    let _ = writeln!(out, "{pad}{key}:");
+                    write_block(x, indent + INDENT, out);
+                }
+            },
         }
     }
+}
+
+/// Body of a `|-` literal block: each source line on its own line at
+/// `indent`; empty lines stay empty (no trailing padding).
+fn write_literal_lines(s: &str, indent: usize, out: &mut String) {
+    let pad = " ".repeat(indent);
+    for line in s.split('\n') {
+        if line.is_empty() {
+            out.push('\n');
+        } else {
+            let _ = writeln!(out, "{pad}{line}");
+        }
+    }
+}
+
+/// Can `s` be written as a `|-` literal block and read back verbatim?
+/// Conservative: needs an interior newline, no leading/trailing newline
+/// (chomping would have to vary), no other character that needs escaping,
+/// and no leading whitespace on the first line (it would be taken as the
+/// block's indentation) or trailing whitespace on any line.
+fn literal_ok(s: &str) -> bool {
+    if !s.contains('\n') || s.starts_with('\n') || s.ends_with('\n') {
+        return false;
+    }
+    if s.chars().any(|c| c != '\n' && needs_escape(c)) {
+        return false;
+    }
+    let mut lines = s.split('\n');
+    let first = lines.next().unwrap_or("");
+    if first.starts_with(char::is_whitespace) {
+        return false;
+    }
+    std::iter::once(first)
+        .chain(lines)
+        .all(|l| !l.ends_with(char::is_whitespace))
 }
 
 fn scalar(v: &Value, in_flow: bool) -> String {
@@ -164,7 +239,7 @@ fn number(n: &serde_json::Number) -> String {
                 return if f > 0.0 { ".inf" } else { "-.inf" }.into();
             }
             if f.abs() >= 1e15 {
-                return format!("{f:e}");
+                return exponent_form(f);
             }
             if f.fract() == 0.0 {
                 return format!("{}", f as i64);
@@ -175,13 +250,65 @@ fn number(n: &serde_json::Number) -> String {
     n.to_string()
 }
 
+/// `1.5e+20`, not Rust's `1.5e20`: YAML 1.1's float regex needs a dot in the
+/// mantissa and a signed exponent, otherwise the value reads back as a
+/// string. YAML 1.2 accepts both forms.
+fn exponent_form(f: f64) -> String {
+    let s = format!("{f:e}");
+    let (mantissa, exp) = s.split_once('e').unwrap_or((&s, "0"));
+    let mantissa = if mantissa.contains('.') {
+        mantissa.to_owned()
+    } else {
+        format!("{mantissa}.0")
+    };
+    let exp = if exp.starts_with('-') {
+        exp.to_owned()
+    } else {
+        format!("+{exp}")
+    };
+    format!("{mantissa}e{exp}")
+}
+
 fn scalar_str(s: &str, in_flow: bool) -> String {
     if plain_ok(s, in_flow) {
         s.to_owned()
     } else {
-        // JSON string escaping is a subset of YAML double-quoted escaping.
-        serde_json::to_string(s).unwrap_or_else(|_| format!("{s:?}"))
+        quote(s)
     }
+}
+
+/// Characters that can't appear raw in a plain *or* double-quoted scalar:
+/// C0/C1 controls (incl. DEL and NEL), the Unicode line/paragraph
+/// separators, the BOM, and the two non-characters. libyaml rejects the
+/// document outright on any of them; JSON's escaper leaves most through.
+fn needs_escape(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{2028}' | '\u{2029}' | '\u{FEFF}' | '\u{FFFE}' | '\u{FFFF}'
+        )
+}
+
+/// Double-quoted YAML scalar. Escapes are the JSON subset plus `\uXXXX` for
+/// everything in [`needs_escape`], which YAML double-quoted scalars accept.
+fn quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            c if needs_escape(c) => {
+                let _ = write!(out, "\\u{:04X}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// Whether `s` can be written as a plain (unquoted) scalar without a YAML
@@ -194,14 +321,18 @@ fn plain_ok(s: &str, in_flow: bool) -> bool {
     if s.trim() != s {
         return false;
     }
-    if s.chars().any(|c| c.is_control()) {
+    if s.chars().any(needs_escape) {
         return false;
     }
     if ",[]{}#&*!|>'\"%@`".contains(first) {
         return false;
     }
     if "-?:".contains(first) {
-        // `-foo` is a plain scalar, `- foo` / `-` are not.
+        // `-foo` is a plain scalar, `- foo` / `-` are not. Inside `{}`/`[]`
+        // libyaml reads a leading `?`/`:` as the key/value indicator.
+        if in_flow && first != '-' {
+            return false;
+        }
         match chars.next() {
             None => return false,
             Some(c) if c.is_whitespace() => return false,
@@ -241,30 +372,50 @@ fn looks_numeric(s: &str) -> bool {
     if lower.starts_with("0x") || lower.starts_with("0o") || lower.starts_with("0b") {
         return body.len() > 2;
     }
-    // Digits, `_` separators, one `.`, optional exponent — YAML 1.1 ints/floats.
-    let cleaned: String = body.chars().filter(|c| *c != '_').collect();
+    // Digits with `_` (YAML 1.1) or `,` (Psych) separators, one `.`,
+    // optional exponent.
+    let cleaned: String = body.chars().filter(|c| !matches!(c, '_' | ',')).collect();
     if cleaned.parse::<f64>().is_ok() && cleaned.chars().any(|c| c.is_ascii_digit()) {
         return true;
     }
-    // Sexagesimal (`1:30`, `1:30:00`): YAML 1.1 reads it as 90. This also
-    // catches short Figma ids like `1:17`; long ones (`1:17418`) stay plain.
-    let parts: Vec<&str> = body.split(':').collect();
-    parts.len() >= 2
-        && parts
-            .iter()
-            .all(|p| !p.is_empty() && p.len() <= 2 && p.chars().all(|c| c.is_ascii_digit()))
-        && parts[0].chars().all(|c| c.is_ascii_digit())
+    // Sexagesimal (`1:30`, `1:30:00`, `1:30.5`): YAML 1.1 reads it as base
+    // 60 — `[1-9][0-9_]*(:[0-5]?[0-9])+`. The first part has no length cap
+    // (`687:45` is 41,265), later parts are at most two digits, so Figma
+    // ids like `1:17418` stay plain and `10:5` gets quoted.
+    let (whole, frac) = match body.split_once('.') {
+        Some((w, f)) => (w, Some(f)),
+        None => (body, None),
+    };
+    if frac.is_some_and(|f| !f.chars().all(|c| c.is_ascii_digit())) {
+        return false;
+    }
+    let parts: Vec<&str> = whole.split(':').collect();
+    let digits = |p: &str| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit());
+    parts.len() >= 2 && digits(parts[0]) && parts[1..].iter().all(|p| digits(p) && p.len() <= 2)
 }
 
-/// `YYYY-MM-DD` prefix: YAML 1.1 timestamps.
+/// `YYYY-M-D` / `YYYY-MM-DD` prefix (one- or two-digit month and day, as
+/// YAML 1.1's timestamp regex allows).
 fn looks_like_date(s: &str) -> bool {
     let b = s.as_bytes();
-    b.len() >= 10
-        && b[..4].iter().all(u8::is_ascii_digit)
-        && b[4] == b'-'
-        && b[5..7].iter().all(u8::is_ascii_digit)
-        && b[7] == b'-'
-        && b[8..10].iter().all(u8::is_ascii_digit)
+    let take_digits = |i: usize, max: usize| -> Option<usize> {
+        let n = b[i..]
+            .iter()
+            .take(max)
+            .take_while(|c| c.is_ascii_digit())
+            .count();
+        (n > 0).then_some(i + n)
+    };
+    if b.len() < 8 || !b[..4].iter().all(u8::is_ascii_digit) || b[4] != b'-' {
+        return false;
+    }
+    let Some(i) = take_digits(5, 2) else {
+        return false;
+    };
+    if b.get(i) != Some(&b'-') {
+        return false;
+    }
+    take_digits(i + 1, 2).is_some()
 }
 
 #[cfg(test)]
@@ -305,7 +456,9 @@ mod tests {
             "bounds": {"x": 10.0, "y": 20.5, "width": 100.0, "height": 40.0},
             "layout": {"mode": "HORIZONTAL", "padding": [0.0, 12.0, 0.0, 12.0], "counter_axis": {"align": "CENTER"}},
             "children": [
-                {"id": "10:300", "type": "TEXT", "name": "Label"}
+                {"id": "10:300", "type": "TEXT", "name": "Label",
+                 "text": {"characters": "Hi", "style": {"font_size": 12}}},
+                {"id": "10:301", "type": "RECTANGLE", "name": "Bg"}
             ]
         });
         let expected = "\
@@ -318,8 +471,33 @@ children:
   - id: 10:300
     type: TEXT
     name: Label
+    text: {characters: Hi, style: {font_size: 12}}
+  - id: 10:301
+    type: RECTANGLE
+    name: Bg
 ";
         assert_eq!(to_yaml(&v), expected);
+        roundtrip(&v);
+    }
+
+    #[test]
+    fn lists_render_uniformly_flow_rows_or_all_block() {
+        let v = json!({
+            "hidden_children": [
+                {"id": "1:200", "name": "A rather long layer name that pushes the row past", "type": "TEXT"},
+                {"id": "1:300", "name": "B", "type": "FRAME"}
+            ],
+            "mixed": [{"a": 1}, {"deep": {"b": {"c": 2}}}]
+        });
+        let text = to_yaml(&v);
+        assert!(
+            text.contains("hidden_children:\n  - {id: 1:200, name: A rather long"),
+            "a 100+ char row still fits the list-item cap: {text}"
+        );
+        assert!(
+            text.contains("mixed:\n  - a: 1\n  - deep: {b: {c: 2}}\n"),
+            "one deep item makes the whole list block: {text}"
+        );
         roundtrip(&v);
     }
 
@@ -329,13 +507,18 @@ children:
         let v = json!({
             "deep": {"a": {"b": {"c": 1}}},
             "wide_rows": [{"name": long_name, "other": long_name}, {"name": long_name}],
+            "wider_rows": [{"name": long_name, "other": long_name, "third": long_name, "fourth": long_name}],
             "wide_map": {"name": long_name, "other": long_name}
         });
         let text = to_yaml(&v);
         assert!(text.starts_with("deep:\n  a: {b: {c: 1}}\n"), "{text}");
         assert!(
             text.contains("wide_rows:\n  - {name: xxx"),
-            "list rows are never width-capped: {text}"
+            "list rows get a wider cap than map values: {text}"
+        );
+        assert!(
+            text.contains("wider_rows:\n  - name: xxx"),
+            "but a 250-char row still goes block: {text}"
         );
         assert!(
             text.contains("wide_map:\n  name: xxx"),
@@ -371,7 +554,11 @@ children:
             "1e3",
             "0x1f",
             "1_000",
+            "1,000",
             "1:30",
+            "687:45",
+            "10:5",
+            "1:30.5",
             "-",
             "- x",
             "-1",
@@ -380,6 +567,7 @@ children:
             "5.",
             ".inf",
             "2026-09-05",
+            "2026-9-5",
             "a: b",
             "a:",
             "a #b",
@@ -399,8 +587,17 @@ children:
             ">",
             "?",
             "? q",
+            "?Help",
+            ":)",
+            ":hover",
             "line\nbreak",
             "tab\there",
+            "soft\u{2028}break",
+            "para\u{2029}sep",
+            "nel\u{85}here",
+            "del\u{7f}",
+            "c1\u{92}quote",
+            "\u{feff}bom",
             "-foo",
             "1:17418",
             "I1:17;2:3",
@@ -415,11 +612,17 @@ children:
             m.insert(format!("k{i}"), json!(s));
             m.insert((*s).to_owned(), json!(i));
         }
+        // A multi-line string forces block rendering, so keep those out of
+        // the map that must stay flow.
         let mut flow_map = Map::new();
-        for (i, s) in tricky.iter().enumerate() {
+        for (i, s) in tricky.iter().enumerate().filter(|(_, s)| !s.contains('\n')) {
             flow_map.insert(format!("f{i}"), json!(s));
         }
         m.insert("flow".into(), json!({"inner": Value::Object(flow_map)}));
+        m.insert(
+            "flow_small".into(),
+            json!({"a": ":hover", "b": "?Help", "c": ":)", "d": "-foo"}),
+        );
         m.insert(
             "list".into(),
             Value::Array(tricky.iter().map(|s| json!(s)).collect()),
@@ -431,13 +634,31 @@ children:
         assert!(text.contains(": 1:17418\n"), "{text}");
         assert!(text.contains(": HUG/FIXED\n"), "{text}");
         assert!(text.contains(": \"1:30\"\n"), "{text}");
+        assert!(text.contains(": \"687:45\"\n"), "{text}");
         assert!(text.contains("\n1:17418: "), "{text}");
+        // Block context keeps a leading `:` plain; flow context quotes it.
+        assert!(text.contains(": :hover\n"), "{text}");
+        assert!(
+            text.contains("flow_small: {a: \":hover\", b: \"?Help\", c: \":)\", d: -foo}\n"),
+            "{text}"
+        );
+        // Every character libyaml rejects is escaped, never raw.
+        assert!(text.contains("\"soft\\u2028break\""), "{text}");
+        assert!(text.contains("\"nel\\u0085here\""), "{text}");
+        assert!(text.contains("\"del\\u007F\""), "{text}");
+        assert!(text.contains("\"c1\\u0092quote\""), "{text}");
+        for c in [
+            '\u{2028}', '\u{2029}', '\u{85}', '\u{7f}', '\u{92}', '\u{feff}',
+        ] {
+            assert!(!text.contains(c), "raw {:?} in output", c);
+        }
     }
 
     #[test]
     fn numbers_and_specials() {
         let v = json!({
-            "int": 42, "neg": -3, "float": 0.25, "integral": 12.0, "big": 1.5e20,
+            "int": 42, "neg": -3, "float": 0.25, "integral": 12.0, "big": 1.5e20, "exact": 1e15,
+            "neg_big": -2.5e16, "tiny": 1e-7,
             "nan": Value::Null, "empty_map": {}, "empty_list": [], "nested_empty": {"a": {}},
             "bools": [true, false], "nulls": [null]
         });
@@ -445,6 +666,44 @@ children:
         assert!(text.contains("integral: 12\n"), "{text}");
         assert!(text.contains("empty_map: {}\n"), "{text}");
         assert!(text.contains("nested_empty: {a: {}}\n"), "{text}");
+        // YAML 1.1 needs a dotted mantissa and a signed exponent.
+        assert!(text.contains("big: 1.5e+20\n"), "{text}");
+        assert!(text.contains("exact: 1.0e+15\n"), "{text}");
+        assert!(text.contains("neg_big: -2.5e+16\n"), "{text}");
+        roundtrip(&v);
+    }
+
+    #[test]
+    fn multi_line_strings_render_as_literal_blocks() {
+        let v = json!({
+            "text": {"characters": "First line\nSecond line\n\nFourth", "style": {"font_size": 12}},
+            "items": ["one\ntwo", "plain"],
+            "quoted_anyway": " leading space\nx",
+            "trailing_newline": "a\nb\n",
+            "with_tab": "a\tb\nc"
+        });
+        let text = to_yaml(&v);
+        let expected_text = "\
+text:
+  characters: |-
+    First line
+    Second line
+
+    Fourth
+  style: {font_size: 12}
+items:
+  - |-
+    one
+    two
+  - plain
+";
+        assert!(text.starts_with(expected_text), "{text}");
+        assert!(
+            text.contains("quoted_anyway: \" leading space\\nx\"\n"),
+            "{text}"
+        );
+        assert!(text.contains("trailing_newline: \"a\\nb\\n\"\n"), "{text}");
+        assert!(text.contains("with_tab: \"a\\tb\\nc\"\n"), "{text}");
         roundtrip(&v);
     }
 
