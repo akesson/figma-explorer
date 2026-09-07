@@ -44,7 +44,7 @@ Name | Type | Description  | Required | Notes
 
 ## get_dev_resources
 
-> models::InlineObject30 get_dev_resources(file_key, node_ids)
+> models::InlineObject36 get_dev_resources(file_key, node_ids)
 Get dev resources
 
 Get dev resources in a file
@@ -59,7 +59,7 @@ Name | Type | Description  | Required | Notes
 
 ### Return type
 
-[**models::InlineObject30**](inline_object_30.md)
+[**models::InlineObject36**](inline_object_36.md)
 
 ### Authorization
 
@@ -75,7 +75,7 @@ Name | Type | Description  | Required | Notes
 
 ## post_dev_resources
 
-> models::InlineObject31 post_dev_resources(post_dev_resources_request)
+> models::InlineObject37 post_dev_resources(post_dev_resources_request)
 Create dev resources
 
 Bulk create dev resources across multiple files. Dev resources that are successfully created will show up in the links_created array in the response.  If there are any dev resources that cannot be created, you may still get a 200 response. These resources will show up in the errors array. Some reasons a dev resource cannot be created include:  - Resource points to a `file_key` that cannot be found. - The node already has the maximum of 10 dev resources. - Another dev resource for the node has the same url.
@@ -89,7 +89,7 @@ Name | Type | Description  | Required | Notes
 
 ### Return type
 
-[**models::InlineObject31**](inline_object_31.md)
+[**models::InlineObject37**](inline_object_37.md)
 
 ### Authorization
 
@@ -105,7 +105,7 @@ Name | Type | Description  | Required | Notes
 
 ## put_dev_resources
 
-> models::InlineObject32 put_dev_resources(put_dev_resources_request)
+> models::InlineObject38 put_dev_resources(put_dev_resources_request)
 Update dev resources
 
 Bulk update dev resources across multiple files.  Ids for dev resources that are successfully updated will show up in the `links_updated` array in the response.  If there are any dev resources that cannot be updated, you may still get a 200 response. These resources will show up in the `errors` array.
@@ -119,7 +119,7 @@ Name | Type | Description  | Required | Notes
 
 ### Return type
 
-[**models::InlineObject32**](inline_object_32.md)
+[**models::InlineObject38**](inline_object_38.md)
 
 ### Authorization
 

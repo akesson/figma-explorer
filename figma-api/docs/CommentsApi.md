@@ -12,7 +12,7 @@ Method | HTTP request | Description
 
 ## delete_comment
 
-> models::InlineObject9 delete_comment(file_key, comment_id)
+> models::InlineObject14 delete_comment(file_key, comment_id)
 Delete a comment
 
 Deletes a specific comment. Only the person who made the comment is allowed to delete it.
@@ -27,7 +27,7 @@ Name | Type | Description  | Required | Notes
 
 ### Return type
 
-[**models::InlineObject9**](inline_object_9.md)
+[**models::InlineObject14**](inline_object_14.md)
 
 ### Authorization
 
@@ -43,7 +43,7 @@ Name | Type | Description  | Required | Notes
 
 ## get_comments
 
-> models::InlineObject8 get_comments(file_key, as_md)
+> models::InlineObject13 get_comments(file_key, as_md)
 Get comments in a file
 
 Gets a list of comments left on the file.
@@ -58,7 +58,7 @@ Name | Type | Description  | Required | Notes
 
 ### Return type
 
-[**models::InlineObject8**](inline_object_8.md)
+[**models::InlineObject13**](inline_object_13.md)
 
 ### Authorization
 

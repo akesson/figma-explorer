@@ -10,7 +10,7 @@ Method | HTTP request | Description
 
 ## get_o_embed
 
-> models::InlineObject39 get_o_embed(url, maxwidth, maxheight)
+> models::InlineObject45 get_o_embed(url, maxwidth, maxheight)
 Get oEmbed data
 
 Returns oEmbed data for a Figma file or published Make site URL, following the [oEmbed specification](https://oembed.com/).
@@ -26,7 +26,7 @@ Name | Type | Description  | Required | Notes
 
 ### Return type
 
-[**models::InlineObject39**](inline_object_39.md)
+[**models::InlineObject45**](inline_object_45.md)
 
 ### Authorization
 

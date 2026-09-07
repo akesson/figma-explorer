@@ -4,9 +4,9 @@
 
 Name | Type | Description | Notes
 ------------ | ------------- | ------------- | -------------
-**rows** | [**models::InlineObject33Rows**](inline_object_33_rows.md) |  | 
-**next_page** | **bool** | Whether there is a next page of data that can be fetched. | 
-**cursor** | Option<**String**> | The cursor to use to fetch the next page of data. Not present if next_page is false. | [optional]
+**status** | **f64** | The response status code. | 
+**error** | **bool** | For successful requests, this value is always `false`. | 
+**meta** | [**models::InlineObject33Meta**](inline_object_33_meta.md) |  | 
 
 [[Back to Model list]](../README.md#documentation-for-models) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to README]](../README.md)
 

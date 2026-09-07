@@ -4,8 +4,8 @@
 
 Name | Type | Description | Notes
 ------------ | ------------- | ------------- | -------------
-**versions** | [**Vec<models::Version>**](Version.md) | An array of versions. | 
-**pagination** | [**models::ResponsePagination**](ResponsePagination.md) |  | 
+**name** | **String** | The project's name. | 
+**files** | [**Vec<models::InlineObject7FilesInner>**](inline_object_7_files_inner.md) | An array of files. | 
 
 [[Back to Model list]](../README.md#documentation-for-models) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to README]](../README.md)
 

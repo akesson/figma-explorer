@@ -4,8 +4,9 @@
 
 Name | Type | Description | Notes
 ------------ | ------------- | ------------- | -------------
-**status** | **f64** | Status code | 
-**err** | **String** | A string describing the error | 
+**rows** | [**models::InlineObject43Rows**](inline_object_43_rows.md) |  | 
+**next_page** | **bool** | Whether there is a next page of data that can be fetched. | 
+**cursor** | Option<**String**> | The cursor to use to fetch the next page of data. Not present if next_page is false. | [optional]
 
 [[Back to Model list]](../README.md#documentation-for-models) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to README]](../README.md)
 

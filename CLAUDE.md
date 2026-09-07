@@ -21,7 +21,7 @@ cargo fmt
 cargo run -p figma-explorer -- <subcommand>  # run the CLI locally
 ```
 
-The repo auto-loads `.env` via `dotenvy`, walking from cwd up to the filesystem root, then `$XDG_CONFIG_HOME`-or-`~/.config/figma-explorer/.env` as the lowest-priority global fallback (covers git worktrees that don't see the canonical checkout's `.env`). The closest `.env` wins; ancestors fill in keys it didn't define; the real environment beats them all. Required: `FIGMA_TOKEN`. Cache prefetch needs `FIGMA_PROJECTS_IDS` (comma-separated project IDs); `library search` and the `cache prefetch` catalog warm need `FIGMA_TEAM_ID`. Cache location override: `FIGMA_EXPLORER_CACHE_DIR` (else `dirs::cache_dir()`).
+The repo auto-loads `.env` via `dotenvy`, walking from cwd up to the filesystem root, then `$XDG_CONFIG_HOME`-or-`~/.config/figma-explorer/.env` as the lowest-priority global fallback (covers git worktrees that don't see the canonical checkout's `.env`). The closest `.env` wins; ancestors fill in keys it didn't define; the real environment beats them all. Required: `FIGMA_TOKEN`. Cache prefetch needs `FIGMA_PROJECTS_IDS` (comma-separated Figma folder IDs — Figma renamed projects to folders in Aug 2026, ids unchanged; listings go through `GET /v2/folders/{id}/files` with a one-shot v1 fallback on 403 for pre-rename tokens); `library search` and the `cache prefetch` catalog warm need `FIGMA_TEAM_ID`. Cache location override: `FIGMA_EXPLORER_CACHE_DIR` (else `dirs::cache_dir()`).
 
 ## Architecture — figma-explorer
 

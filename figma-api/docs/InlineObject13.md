@@ -4,9 +4,7 @@
 
 Name | Type | Description | Notes
 ------------ | ------------- | ------------- | -------------
-**status** | **f64** | The status of the request. | 
-**error** | **bool** | For successful requests, this value is always `false`. | 
-**meta** | [**models::InlineObject13Meta**](inline_object_13_meta.md) |  | 
+**comments** | [**Vec<models::Comment>**](Comment.md) | An array of comments. | 
 
 [[Back to Model list]](../README.md#documentation-for-models) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to README]](../README.md)
 

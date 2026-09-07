@@ -4,9 +4,9 @@
 
 Name | Type | Description | Notes
 ------------ | ------------- | ------------- | -------------
-**status** | Option<**f64**> | The response status code. | [optional]
-**error** | Option<**bool**> | For successful requests, this value is always `false`. | [optional]
-**meta** | Option<[**models::InlineObject24Meta**](inline_object_24_meta.md)> |  | [optional]
+**status** | **f64** | The status of the request. | 
+**error** | **bool** | For successful requests, this value is always `false`. | 
+**meta** | [**models::InlineObject24Meta**](inline_object_24_meta.md) |  | 
 
 [[Back to Model list]](../README.md#documentation-for-models) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to README]](../README.md)
 

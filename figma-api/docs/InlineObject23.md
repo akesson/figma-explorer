@@ -4,7 +4,9 @@
 
 Name | Type | Description | Notes
 ------------ | ------------- | ------------- | -------------
-**requests** | [**Vec<models::WebhookV2Request>**](WebhookV2Request.md) | An array of webhook requests. | 
+**status** | **f64** | The status of the request. | 
+**error** | **bool** | For successful requests, this value is always `false`. | 
+**meta** | [**models::InlineObject23Meta**](inline_object_23_meta.md) |  | 
 
 [[Back to Model list]](../README.md#documentation-for-models) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to README]](../README.md)
 

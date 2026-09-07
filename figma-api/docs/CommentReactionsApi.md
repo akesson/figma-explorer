@@ -12,7 +12,7 @@ Method | HTTP request | Description
 
 ## delete_comment_reaction
 
-> models::InlineObject9 delete_comment_reaction(file_key, comment_id, emoji)
+> models::InlineObject14 delete_comment_reaction(file_key, comment_id, emoji)
 Delete a reaction
 
 Deletes a specific comment reaction. Only the person who made the reaction is allowed to delete it.
@@ -28,7 +28,7 @@ Name | Type | Description  | Required | Notes
 
 ### Return type
 
-[**models::InlineObject9**](inline_object_9.md)
+[**models::InlineObject14**](inline_object_14.md)
 
 ### Authorization
 
@@ -44,7 +44,7 @@ Name | Type | Description  | Required | Notes
 
 ## get_comment_reactions
 
-> models::InlineObject10 get_comment_reactions(file_key, comment_id, cursor)
+> models::InlineObject15 get_comment_reactions(file_key, comment_id, cursor)
 Get reactions for a comment
 
 Gets a paginated list of reactions left on the comment.
@@ -60,7 +60,7 @@ Name | Type | Description  | Required | Notes
 
 ### Return type
 
-[**models::InlineObject10**](inline_object_10.md)
+[**models::InlineObject15**](inline_object_15.md)
 
 ### Authorization
 
@@ -76,7 +76,7 @@ Name | Type | Description  | Required | Notes
 
 ## post_comment_reaction
 
-> models::InlineObject9 post_comment_reaction(file_key, comment_id, post_comment_reaction_request)
+> models::InlineObject14 post_comment_reaction(file_key, comment_id, post_comment_reaction_request)
 Add a reaction to a comment
 
 Posts a new comment reaction on a file comment.
@@ -92,7 +92,7 @@ Name | Type | Description  | Required | Notes
 
 ### Return type
 
-[**models::InlineObject9**](inline_object_9.md)
+[**models::InlineObject14**](inline_object_14.md)
 
 ### Authorization
 

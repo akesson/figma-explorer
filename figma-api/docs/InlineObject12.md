@@ -4,9 +4,8 @@
 
 Name | Type | Description | Notes
 ------------ | ------------- | ------------- | -------------
-**status** | **f64** | The status of the request. | 
-**error** | **bool** | For successful requests, this value is always `false`. | 
-**meta** | [**models::InlineObject12Meta**](inline_object_12_meta.md) |  | 
+**versions** | [**Vec<models::Version>**](Version.md) | An array of versions. | 
+**pagination** | [**models::ResponsePagination**](ResponsePagination.md) |  | 
 
 [[Back to Model list]](../README.md#documentation-for-models) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to README]](../README.md)
 

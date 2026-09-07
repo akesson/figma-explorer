@@ -114,6 +114,7 @@ impl From<&str> for ContentType {
 }
 
 pub mod activity_logs_api;
+pub mod ai_usage_api;
 pub mod comment_reactions_api;
 pub mod comments_api;
 pub mod component_sets_api;
@@ -121,6 +122,7 @@ pub mod components_api;
 pub mod dev_resources_api;
 pub mod developer_logs_api;
 pub mod files_api;
+pub mod folders_api;
 pub mod library_analytics_api;
 pub mod o_embed_api;
 pub mod payments_api;

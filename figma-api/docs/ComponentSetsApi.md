@@ -12,7 +12,7 @@ Method | HTTP request | Description
 
 ## get_component_set
 
-> models::InlineObject17 get_component_set(key)
+> models::InlineObject22 get_component_set(key)
 Get component set
 
 Get metadata on a published component set by key.
@@ -26,7 +26,7 @@ Name | Type | Description  | Required | Notes
 
 ### Return type
 
-[**models::InlineObject17**](inline_object_17.md)
+[**models::InlineObject22**](inline_object_22.md)
 
 ### Authorization
 
@@ -42,7 +42,7 @@ Name | Type | Description  | Required | Notes
 
 ## get_file_component_sets
 
-> models::InlineObject16 get_file_component_sets(file_key)
+> models::InlineObject21 get_file_component_sets(file_key)
 Get file component sets
 
 Get a list of published component sets within a file library.
@@ -56,7 +56,7 @@ Name | Type | Description  | Required | Notes
 
 ### Return type
 
-[**models::InlineObject16**](inline_object_16.md)
+[**models::InlineObject21**](inline_object_21.md)
 
 ### Authorization
 
@@ -72,7 +72,7 @@ Name | Type | Description  | Required | Notes
 
 ## get_team_component_sets
 
-> models::InlineObject15 get_team_component_sets(team_id, page_size, after, before)
+> models::InlineObject20 get_team_component_sets(team_id, page_size, after, before)
 Get team component sets
 
 Get a paginated list of published component sets within a team library.
@@ -89,7 +89,7 @@ Name | Type | Description  | Required | Notes
 
 ### Return type
 
-[**models::InlineObject15**](inline_object_15.md)
+[**models::InlineObject20**](inline_object_20.md)
 
 ### Authorization
 

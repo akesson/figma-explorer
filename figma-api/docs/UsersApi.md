@@ -10,7 +10,7 @@ Method | HTTP request | Description
 
 ## get_me
 
-> models::InlineObject11 get_me()
+> models::InlineObject16 get_me()
 Get current user
 
 Returns the user information for the currently authenticated user.
@@ -21,7 +21,7 @@ This endpoint does not need any parameter.
 
 ### Return type
 
-[**models::InlineObject11**](inline_object_11.md)
+[**models::InlineObject16**](inline_object_16.md)
 
 ### Authorization
 
