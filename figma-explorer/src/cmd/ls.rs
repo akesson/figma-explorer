@@ -24,6 +24,7 @@ use crate::cache::{CacheNode, EntryStatus, FileMeta};
 use crate::comment_assoc::AssociatedComment;
 use crate::id::Id;
 use crate::resolver::{parse_id, render_resolve_error, ResolvedTarget, Resolver};
+use crate::synth::SynthState;
 use crate::tree::{
     collect_visible, comment_count_suffix, comment_row_json, group_comments,
     render_flat_with_comment_counts, render_flat_with_comments, render_subtree_json_with_comments,
@@ -397,21 +398,7 @@ fn render_root(
     let synth = resolver.synth();
     let metas = resolver.cache().list_metas()?;
 
-    // Group OK files by project synth, pre-resolving each file's synth so the
-    // render helpers don't have to re-look-it-up (and so synth-less files are
-    // simply skipped rather than panicking).
-    let mut groups: Vec<ProjectGroup> = Vec::new();
-    for (project_id, &project_synth) in &synth.projects {
-        let mut files: Vec<(u32, FileMeta)> = metas
-            .iter()
-            .filter(|m| m.status == EntryStatus::Ok && m.project_id == *project_id)
-            .filter_map(|m| synth.file_synth(&m.file_key).map(|s| (s, m.clone())))
-            .collect();
-        files.sort_by_key(|(_, m)| m.name.to_lowercase());
-        let project_name = derive_project_name(&metas, project_id);
-        groups.push((project_synth, project_id.clone(), project_name, files));
-    }
-    groups.sort_by_key(|(s, _, _, _)| *s);
+    let groups = root_groups(synth, &metas);
 
     // A cache with no OK file metas (fresh, or just cleared) has nothing to
     // list — the depth hint is pointless and a "run prefetch" nudge is what the
@@ -895,6 +882,31 @@ fn build_file_json(
     Some(Value::Object(obj))
 }
 
+/// Group OK files by project synth, pre-resolving each file's synth so the
+/// render helpers don't have to re-look-it-up (and so synth-less files are
+/// simply skipped rather than panicking). Sorted by project synth.
+fn root_groups(synth: &SynthState, metas: &[FileMeta]) -> Vec<ProjectGroup> {
+    let mut groups: Vec<ProjectGroup> = Vec::new();
+    for (project_id, &project_synth) in &synth.projects {
+        let mut files: Vec<(u32, FileMeta)> = metas
+            .iter()
+            .filter(|m| m.status == EntryStatus::Ok && m.project_id == *project_id)
+            .filter_map(|m| synth.file_synth(&m.file_key).map(|s| (s, m.clone())))
+            .collect();
+        // Project synths outlive their files (dropped from FIGMA_PROJECTS_IDS,
+        // or `cache clear`). With no cached file there is nothing to descend
+        // into and no meta to name it — it would render as a bare folder id.
+        if files.is_empty() {
+            continue;
+        }
+        files.sort_by_key(|(_, m)| m.name.to_lowercase());
+        let project_name = derive_project_name(metas, project_id);
+        groups.push((project_synth, project_id.clone(), project_name, files));
+    }
+    groups.sort_by_key(|(s, _, _, _)| *s);
+    groups
+}
+
 /// Best-effort lookup of the human-readable project name for `project_id` by
 /// scanning file metas. Falls back to `project_id` when no file in the project
 /// carries a non-empty name (project never listed, or listing predated the
@@ -1269,6 +1281,30 @@ mod tests {
     use crate::cache::{build_cached_file, CacheDir, FileRef};
     use crate::tree::render_flat;
     use serde_json::json;
+
+    #[test]
+    fn root_groups_skip_projects_without_cached_files() {
+        // Regression: a folder once prefetched keeps its synth after being
+        // dropped from FIGMA_PROJECTS_IDS; root `ls` rendered it as an empty
+        // `proj:3 "571382610"` because no meta was left to name it.
+        let mut synth = SynthState::default();
+        synth.intern_project("77195660");
+        synth.intern_project("571382610");
+        synth.intern_file("abc");
+        let file_ref = FileRef {
+            file_key: "abc".into(),
+            name: "My Year".into(),
+            last_modified: "t".into(),
+            project_id: "77195660".into(),
+            project_name: "Desktop".into(),
+        };
+        let payload = build_cached_file(&file_ref, &json!({"id": "0:0", "type": "DOCUMENT"}), 0);
+        let metas = vec![FileMeta::from_success(&file_ref, &payload, 0, 0)];
+
+        let groups = root_groups(&synth, &metas);
+        assert_eq!(groups.len(), 1, "empty folder omitted: {groups:?}");
+        assert_eq!((groups[0].0, groups[0].2.as_str()), (1, "Desktop"));
+    }
 
     /// End-to-end check of the spine: build a fixture cache + synth state,
     /// resolve `file:N` via `Resolver`, synthesize the file root, render

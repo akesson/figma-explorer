@@ -160,8 +160,6 @@ impl PrefetchArgs {
 
             let current = listing_by_key.get(&m.file_key).copied();
             let unchanged = current.is_some_and(|c| c.last_modified == m.last_modified);
-            let payload_ok =
-                m.status == EntryStatus::Ok && cache_dir.file_path(&m.file_key).exists();
 
             if self.force && in_jurisdiction {
                 let _ = cache_dir.delete_entry(&m.file_key);
@@ -174,7 +172,18 @@ impl PrefetchArgs {
                     let _ = cache_dir.delete_entry(&m.file_key);
                     pruned += 1;
                 }
-                Some(current) if unchanged && payload_ok => {
+                Some(_) if unchanged && m.status == EntryStatus::NotExportable => {
+                    let mut updated = m.clone();
+                    updated.last_listed_at_epoch = now_pre;
+                    if let Err(e) = cache_dir.write_meta(&updated) {
+                        eprintln!("cache: write_meta failed for {}: {e:#}", m.file_key);
+                    }
+                }
+                // Complete entry (payload, and full sidecar unless --no-full):
+                // keep it. Anything incomplete falls through to the refetch
+                // arm — staging it here would let the comments pass rewrite
+                // the meta after the fetch and drop its full-sidecar stamp.
+                Some(current) if !needs_fetch(Some(m), current, &cache_dir, !self.no_full) => {
                     let mut staged = m.clone();
                     if upgradable {
                         staged.project_id = current.project_id.clone();
@@ -192,13 +201,6 @@ impl PrefetchArgs {
                     // sidecar in the current shape and stamps the version.
                     to_refresh_comments.push((staged, current.clone()));
                 }
-                Some(_) if unchanged && m.status == EntryStatus::NotExportable => {
-                    let mut updated = m.clone();
-                    updated.last_listed_at_epoch = now_pre;
-                    if let Err(e) = cache_dir.write_meta(&updated) {
-                        eprintln!("cache: write_meta failed for {}: {e:#}", m.file_key);
-                    }
-                }
                 Some(_) => {
                     // Stale or transient-failed — drop and refetch below.
                     let _ = cache_dir.delete_entry(&m.file_key);
@@ -213,14 +215,8 @@ impl PrefetchArgs {
                 if self.force {
                     return true;
                 }
-                match cache_dir.read_meta(&f.file_key).ok().flatten() {
-                    Some(m) if m.last_modified == f.last_modified => match m.status {
-                        EntryStatus::Ok => !cache_dir.file_path(&f.file_key).exists(),
-                        EntryStatus::NotExportable => false,
-                        EntryStatus::Failed => true,
-                    },
-                    _ => true,
-                }
+                let meta = cache_dir.read_meta(&f.file_key).ok().flatten();
+                needs_fetch(meta.as_ref(), f, &cache_dir, !self.no_full)
             })
             .cloned()
             .collect();
@@ -743,6 +739,31 @@ fn list_team_catalogs(cache_dir: &CacheDir, now: u64) -> Vec<Value> {
     out
 }
 
+/// Prefetch skip decision for one listed file. An unchanged `Ok` entry still
+/// needs a fetch when its payload is gone or, with `want_full`, when its
+/// `.full.json.gz` sidecar is missing or stamped with another schema version —
+/// e.g. a file first cold-fetched by `ls <url>`, which writes no full sidecar.
+fn needs_fetch(
+    meta: Option<&FileMeta>,
+    f: &FileRef,
+    cache_dir: &CacheDir,
+    want_full: bool,
+) -> bool {
+    match meta {
+        Some(m) if m.last_modified == f.last_modified => match m.status {
+            EntryStatus::Ok => {
+                !cache_dir.file_path(&f.file_key).exists()
+                    || (want_full
+                        && (m.full_schema_version != Some(cache::FULL_SCHEMA_VERSION)
+                            || !cache_dir.full_path(&f.file_key).exists()))
+            }
+            EntryStatus::NotExportable => false,
+            EntryStatus::Failed => true,
+        },
+        _ => true,
+    }
+}
+
 /// Compact "how long ago" for status rows: `42s`, `17m`, `5h`, `3d`.
 /// Clock-skew safe — a timestamp in the future reads as `0s`.
 fn age(now: u64, then: u64) -> String {
@@ -852,6 +873,92 @@ mod tests {
         assert_eq!(age(1000, 900), "1m");
         assert_eq!(age(10_000, 0), "2h");
         assert_eq!(age(200_000, 0), "2d");
+    }
+
+    fn listed(key: &str) -> FileRef {
+        FileRef {
+            file_key: key.into(),
+            name: "F".into(),
+            last_modified: "t1".into(),
+            project_id: "77195660".into(),
+            project_name: "Desktop".into(),
+        }
+    }
+
+    fn ok_meta(f: &FileRef) -> FileMeta {
+        let mut m = FileMeta::failure_marker(
+            f.file_key.clone(),
+            f.name.clone(),
+            f.project_id.clone(),
+            f.project_name.clone(),
+            f.last_modified.clone(),
+            EntryStatus::Ok,
+            String::new(),
+            0,
+        );
+        m.error = None;
+        m
+    }
+
+    #[test]
+    fn needs_fetch_repairs_missing_full_sidecar() {
+        // Regression: a file first cold-fetched by `ls <url>` has a meta +
+        // payload but no `.full.json.gz`; prefetch used to skip it as
+        // up-to-date forever, leaving `node-info` without offline data.
+        let td = TempDir::new().unwrap();
+        let cache = CacheDir::new(td.path());
+        cache.ensure().unwrap();
+        let f = listed("abc");
+        std::fs::write(cache.file_path("abc"), b"payload").unwrap();
+        let mut m = ok_meta(&f);
+
+        assert!(
+            needs_fetch(Some(&m), &f, &cache, true),
+            "no full sidecar → fetch"
+        );
+        assert!(
+            !needs_fetch(Some(&m), &f, &cache, false),
+            "--no-full → skip"
+        );
+
+        std::fs::write(cache.full_path("abc"), b"gz").unwrap();
+        assert!(
+            needs_fetch(Some(&m), &f, &cache, true),
+            "unstamped sidecar → fetch"
+        );
+
+        m.full_schema_version = Some(cache::FULL_SCHEMA_VERSION);
+        assert!(
+            !needs_fetch(Some(&m), &f, &cache, true),
+            "complete entry → skip"
+        );
+
+        std::fs::remove_file(cache.full_path("abc")).unwrap();
+        assert!(
+            needs_fetch(Some(&m), &f, &cache, true),
+            "stamped but deleted → fetch"
+        );
+    }
+
+    #[test]
+    fn needs_fetch_status_and_staleness() {
+        let td = TempDir::new().unwrap();
+        let cache = CacheDir::new(td.path());
+        let f = listed("abc");
+        assert!(needs_fetch(None, &f, &cache, false), "never cached");
+
+        let mut m = ok_meta(&f);
+        m.last_modified = "t0".into();
+        assert!(needs_fetch(Some(&m), &f, &cache, false), "changed upstream");
+
+        m.last_modified = f.last_modified.clone();
+        m.status = EntryStatus::NotExportable;
+        assert!(
+            !needs_fetch(Some(&m), &f, &cache, true),
+            "not exportable stays skipped"
+        );
+        m.status = EntryStatus::Failed;
+        assert!(needs_fetch(Some(&m), &f, &cache, false), "failed retries");
     }
 
     #[test]

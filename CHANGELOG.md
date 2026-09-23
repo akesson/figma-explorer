@@ -7,8 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-09-23
+
 ### Fixed
 
+- **`cache prefetch` now backfills a missing `.full.json.gz` sidecar.** A file
+  first cached by opening it via URL (`ls <url>`, `node-info <url>`, …) has a
+  payload but no full sidecar, and prefetch used to count it as up to date
+  forever — so `node-info --cache-only` never worked offline for it. Prefetch
+  now refetches an unchanged file whose full sidecar is missing or stamped
+  with another schema version (unless `--no-full`).
+- **Root `ls` no longer lists folders with no cached files.** A folder dropped
+  from `FIGMA_PROJECTS_IDS` keeps its `proj:N` id (synthetic ids are stable),
+  and root `ls` rendered it as an empty project named by its raw folder id
+  (e.g. `proj:3 "571382610"`). Such folders are now omitted; `ls proj:N` still
+  works, and `cache prefetch --folder-ids <id>` brings a folder back with its
+  real name.
 - **`cache prefetch`, root `ls` refresh and `ls proj:N` refresh no longer 403
   with a Figma token created after 2026-08-03.** Figma renamed projects to
   folders; new personal access tokens carry `folders:read` instead of
