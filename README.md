@@ -5,14 +5,12 @@ A command-line tool for navigating, inspecting, and exporting from Figma files v
 ## What it does
 
 - **`ls`** / **`find`** — navigate projects, files, and node trees by name or visible text without copy-pasting node ids. `find` speaks web-search syntax: `"exact phrases"`, uppercase `OR`, `-exclusion`.
-- **`node-info`** — single-target view with layout, fills, strokes, effects, text, bound variables, comments, and a ready-made figma.com `url:`. Hidden subtrees are pruned (listed as `hidden_children`), defaults elided, and variables referenced by short handles, so a full screen is a few dozen KB rather than hundreds. Designed to be pasted into an agent prompt.
+- **`node-info`** — single-target view with layout, fills, strokes, effects, text, bound variables, comments, and a ready-made figma.com `url:`. Hidden subtrees are pruned (listed as `hidden_children`), defaults elided, and variables referenced by short handles, so a full screen is a few dozen KB rather than hundreds. Designed to be pasted into an agent prompt. On a file (`node-info file:N --only styles`) it lists the file's named styles with their values — fill hex, text font, shadow effects.
 - **`comments`** — list a file's comment threads (replies inline, newest first), threads under a node, or a single thread; filter with `--unresolved` / `--since` / `--grep`.
 - **`mark`** — curated keyword→node bookmarks (`mark add key file:N:x:y --alias …`); `find` and `library search` surface matching marks ahead of their own hits, and `mark:key` resolves anywhere an id is accepted.
 - **`library search`** — fuzzy search across a team's published component library (components, component sets, styles).
 - **`screenshot`** — export a node as PNG / JPG / SVG / PDF.
-- **`tokens`** — extract design tokens (colors, fonts, sizes, spacing).
-- **`assets`** — bulk-export every icon/image below a node.
-- **`context`** — aggregate: tree + screenshot + tokens + assets for a node.
+- **`assets`** — bulk-export every icon (SVG) and image (PNG) below a node, with a manifest.
 - **`cache prefetch`** / **`cache status`** — pre-warm a local cache so subsequent commands are offline-fast, and report what it holds (per-file age, sidecars, catalog) without touching the network.
 
 All commands share a tagged-id grammar — `proj:N`, `file:N`, `file:N:x:y`, or a full `figma.com` URL — so you never paste raw node identifiers by hand.
@@ -90,8 +88,8 @@ figma-explorer node-info file:2:1094:66591
 # Search the team component library
 figma-explorer library search "icon arrow"
 
-# Export everything below a node as PNGs
-figma-explorer assets file:2:1094:66591 ./out/
+# Export every icon and image below a node
+figma-explorer assets file:2:1094:66591 --out-dir ./out/
 
 # Pre-warm the cache so subsequent reads are offline
 figma-explorer cache prefetch

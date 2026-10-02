@@ -3,7 +3,12 @@
 //! comments. Split out of `node_view` because it shapes a *file* overview, not
 //! a node view — `node_view` is strictly per-node shaping.
 
+use std::collections::HashMap;
+
 use serde_json::{json, Value};
+
+use crate::node::{children, is_visible};
+use crate::node_view::style_value;
 
 /// Per-list display caps. The full totals are always reported under `counts`;
 /// these only bound how many individual entries are inlined.
@@ -82,16 +87,26 @@ pub fn build_file_summary(
         .get("styles")
         .and_then(Value::as_object)
         .map(|m| {
-            let entries: Vec<Value> = m
+            let shown: Vec<(&String, &Value)> = m.iter().take(STYLES_CAP).collect();
+            let mut values = resolve_style_values(file_root.get("document"), &shown);
+            let entries: Vec<Value> = shown
                 .iter()
-                .take(STYLES_CAP)
                 .map(|(id, v)| {
-                    json!({
+                    let mut entry = json!({
                         "id": id,
                         "key": v.get("key").cloned().unwrap_or(Value::Null),
                         "name": v.get("name").cloned().unwrap_or(Value::Null),
                         "type": v.get("styleType").cloned().unwrap_or(Value::Null),
-                    })
+                    });
+                    // A library copy can share its key and name with a local
+                    // style yet carry a different value; flag which is which.
+                    if v.get("remote").and_then(Value::as_bool) == Some(true) {
+                        entry["remote"] = json!(true);
+                    }
+                    if let Some(value) = values.remove(id.as_str()) {
+                        entry["value"] = value;
+                    }
+                    entry
                 })
                 .collect();
             (m.len(), entries)
@@ -166,6 +181,53 @@ pub fn build_file_summary(
     })
 }
 
+/// Resolve each listed style's value through the first visible node that
+/// applies it (see [`style_value`]). One pre-order walk that skips hidden
+/// subtrees and stops once every style has a value; styles no visible node
+/// uses are simply absent from the result.
+fn resolve_style_values(
+    document: Option<&Value>,
+    styles: &[(&String, &Value)],
+) -> HashMap<String, Value> {
+    let wanted: HashMap<&str, &str> = styles
+        .iter()
+        .filter_map(|(id, v)| Some((id.as_str(), v.get("styleType")?.as_str()?)))
+        .collect();
+    let mut found = HashMap::new();
+    if let Some(doc) = document {
+        resolve_style_values_rec(doc, &wanted, &mut found, 0);
+    }
+    found
+}
+
+fn resolve_style_values_rec(
+    node: &Value,
+    wanted: &HashMap<&str, &str>,
+    found: &mut HashMap<String, Value>,
+    depth: usize,
+) {
+    if found.len() == wanted.len() || !is_visible(node) || depth >= crate::MAX_NODE_DEPTH {
+        return;
+    }
+    if let Some(map) = node.get("styles").and_then(Value::as_object) {
+        for (slot, sid) in map {
+            let Some(sid) = sid.as_str() else { continue };
+            let Some(style_type) = wanted.get(sid) else {
+                continue;
+            };
+            if found.contains_key(sid) {
+                continue;
+            }
+            if let Some(value) = style_value(node, slot, style_type) {
+                found.insert(sid.to_owned(), value);
+            }
+        }
+    }
+    for c in children(node) {
+        resolve_style_values_rec(c, wanted, found, depth + 1);
+    }
+}
+
 fn count_nodes_value(node: Option<&Value>) -> usize {
     count_nodes_value_rec(node, 0)
 }
@@ -191,6 +253,83 @@ fn count_nodes_value_rec(node: Option<&Value>, depth: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn styles_of(file: &Value) -> Vec<Value> {
+        build_file_summary(file, None, 0, None)["styles"]
+            .as_array()
+            .unwrap()
+            .clone()
+    }
+
+    fn style_named<'a>(styles: &'a [Value], name: &str) -> &'a Value {
+        styles.iter().find(|s| s["name"] == name).unwrap()
+    }
+
+    #[test]
+    fn style_values_resolve_through_using_nodes() {
+        let red = json!({ "r": 1.0, "g": 0.0, "b": 0.0, "a": 1.0 });
+        let file = json!({
+            "styles": {
+                "S:fill": { "name": "Red", "styleType": "FILL" },
+                "S:line": { "name": "Line", "styleType": "FILL" },
+                "S:text": { "name": "Body", "styleType": "TEXT" },
+                "S:fx":   { "name": "Shadow", "styleType": "EFFECT" },
+            },
+            "document": { "id": "0:0", "type": "DOCUMENT", "children": [
+                { "id": "1:1", "type": "RECTANGLE",
+                  "styles": { "fill": "S:fill", "stroke": "S:line", "effect": "S:fx" },
+                  "fills": [{ "type": "SOLID", "color": red }],
+                  "strokes": [{ "type": "SOLID", "color": { "r": 0.0, "g": 0.0, "b": 0.0, "a": 1.0 } }],
+                  "effects": [
+                      { "type": "DROP_SHADOW", "radius": 4.0, "offset": { "x": 0.0, "y": 2.0 },
+                        "color": { "r": 0.0, "g": 0.0, "b": 0.0, "a": 0.5 } },
+                      { "type": "LAYER_BLUR", "radius": 9.0, "visible": false },
+                  ] },
+                { "id": "1:2", "type": "TEXT", "styles": { "text": "S:text" },
+                  "style": { "fontFamily": "Inter", "fontWeight": 500, "fontSize": 16.0,
+                             "lineHeightPx": 24.0, "textAlignHorizontal": "CENTER",
+                             "textAutoResize": "HEIGHT" } },
+            ]},
+        });
+        let styles = styles_of(&file);
+        assert_eq!(style_named(&styles, "Red")["value"], json!("#ff0000"));
+        assert_eq!(style_named(&styles, "Line")["value"], json!("#000000"));
+        assert_eq!(
+            style_named(&styles, "Body")["value"],
+            json!({ "font_family": "Inter", "font_weight": 500, "font_size": 16.0, "line_height_px": 24.0 }),
+            "node-specific alignment/auto-resize must not leak into a TEXT style value",
+        );
+        assert_eq!(
+            style_named(&styles, "Shadow")["value"],
+            json!([{ "type": "DROP_SHADOW", "offset": { "x": 0.0, "y": 2.0 }, "radius": 4.0, "hex": "#00000080" }]),
+        );
+    }
+
+    #[test]
+    fn style_values_skip_hidden_and_unused_styles() {
+        let file = json!({
+            "styles": {
+                "S:hidden": { "name": "Hidden", "styleType": "FILL" },
+                "S:unused": { "name": "Unused", "styleType": "FILL" },
+                "S:grid":   { "name": "Grid", "styleType": "GRID" },
+            },
+            "document": { "id": "0:0", "type": "DOCUMENT", "children": [
+                { "id": "1:1", "type": "FRAME", "visible": false, "children": [
+                    { "id": "1:2", "type": "RECTANGLE", "styles": { "fill": "S:hidden" },
+                      "fills": [{ "type": "SOLID", "color": { "r": 1.0, "g": 1.0, "b": 1.0 } }] },
+                ]},
+                { "id": "1:3", "type": "FRAME", "styles": { "grid": "S:grid" },
+                  "layoutGrids": [{ "pattern": "COLUMNS" }] },
+            ]},
+        });
+        let styles = styles_of(&file);
+        for name in ["Hidden", "Unused", "Grid"] {
+            assert!(
+                style_named(&styles, name).get("value").is_none(),
+                "{name} should carry no value"
+            );
+        }
+    }
 
     #[test]
     fn count_nodes_value_caps_depth_on_deep_tree() {

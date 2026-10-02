@@ -1,9 +1,9 @@
 //! Two unrelated lookups over Figma documents:
 //!
 //! - `resolve_node_id`: single-node lookup by native node id on a raw
-//!   `serde_json::Value` document. Used by the live-data commands
-//!   (`tokens`, `assets`, `context`, `node_info`) that need fields the cache
-//!   projection drops (fills, strokes, characters, …).
+//!   `serde_json::Value` document. Used by `node_info` and `assets`,
+//!   which need fields the cache projection drops (fills, strokes,
+//!   characters, …).
 //! - `multi_token_search`: ancestor-chain ranked search over `CacheNode`
 //!   trees. Used by `find`. See the section header further down for the
 //!   algorithm.

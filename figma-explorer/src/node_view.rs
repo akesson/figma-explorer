@@ -1822,6 +1822,101 @@ pub fn build_styles_index_block(file_root: &Value, refs: &BTreeSet<String>) -> V
 // File-level summaries (used by node-info on file:N targets)
 // ───────────────────────────────────────────────────────────────────────────
 
+/// Fields of a type style that belong to a published TEXT style. The rest of
+/// `build_type_style`'s output (alignment, auto-resize, truncation, fills,
+/// hyperlink) is a property of the particular node the value was read from.
+const TEXT_STYLE_FIELDS: &[&str] = &[
+    "font_family",
+    "font_style",
+    "italic",
+    "font_weight",
+    "font_size",
+    "text_case",
+    "text_decoration",
+    "letter_spacing",
+    "line_height_px",
+    "line_height_unit",
+    "paragraph_spacing",
+    "paragraph_indent",
+    "list_spacing",
+    "opentype_flags",
+];
+
+/// Value of a named style, read off a node that applies it via `slot` (a key
+/// of the node's `styles` map: `fill`, `stroke`, `text`, `effect`, …). Figma's
+/// file response carries no values for styles, only name/type, so the file
+/// summary resolves each style through the first visible node using it.
+///
+/// Shapes match the node views: a FILL is its visible paint list, collapsed
+/// to the hex string when it is a single plain solid; TEXT is the type style
+/// restricted to [`TEXT_STYLE_FIELDS`]; EFFECT is the visible effect list.
+/// GRID styles return `None`. Variable handles are stripped — the file
+/// summary has no `variables` block for them to resolve against — as is
+/// the default `NORMAL` blend mode; floats are rounded like node views.
+pub fn style_value(node: &Value, slot: &str, style_type: &str) -> Option<Value> {
+    let mut scratch = Collector::default();
+    let node_id = node.get("id").and_then(Value::as_str).unwrap_or("");
+    let visible = |v: &&Value| !matches!(v.get("visible"), Some(Value::Bool(false)));
+    let strip_vars = |mut v: Value| {
+        if let Value::Object(m) = &mut v {
+            m.remove("bound_variable");
+            m.remove("bound_variables");
+            if m.get("blend_mode").is_some_and(|b| b == "NORMAL") {
+                m.remove("blend_mode");
+            }
+        }
+        v
+    };
+    let mut value = match style_type {
+        "FILL" => {
+            let key = if slot.starts_with("stroke") {
+                "strokes"
+            } else {
+                "fills"
+            };
+            let paints: Vec<Value> = node
+                .get(key)
+                .and_then(Value::as_array)?
+                .iter()
+                .filter(visible)
+                .map(|p| strip_vars(build_paint(p, &mut scratch, node_id)))
+                .collect();
+            match paints.as_slice() {
+                [] => None,
+                [one]
+                    if one.as_object().is_some_and(|m| m.len() == 2) && one["type"] == "SOLID" =>
+                {
+                    one.get("hex").cloned()
+                }
+                _ => Some(Value::Array(paints)),
+            }
+        }
+        "TEXT" => {
+            let built = build_type_style(node.get("style")?, &mut scratch, node_id);
+            let out: Map<String, Value> = built
+                .as_object()?
+                .iter()
+                .filter(|(k, _)| TEXT_STYLE_FIELDS.contains(&k.as_str()))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            (!out.is_empty()).then_some(Value::Object(out))
+        }
+        "EFFECT" => {
+            let effects: Vec<Value> = node
+                .get("effects")
+                .and_then(Value::as_array)?
+                .iter()
+                .filter(visible)
+                .map(|e| strip_vars(build_effect(e, &mut scratch, node_id)))
+                .collect();
+            (!effects.is_empty()).then_some(Value::Array(effects))
+        }
+        _ => None,
+    }?;
+    round_floats(&mut value);
+    Some(value)
+}
+
 // ───────────────────────────────────────────────────────────────────────────
 // Helpers
 // ───────────────────────────────────────────────────────────────────────────
