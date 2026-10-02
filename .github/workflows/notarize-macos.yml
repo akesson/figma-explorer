@@ -90,7 +90,7 @@ jobs:
               fi
               if ! grep -qE 'flags=0x[0-9a-f]*\(.*runtime.*\)' <<< "$details"; then
                 echo "$details"
-                echo "::error::$exe lacks the hardened runtime; Apple will reject it. CODESIGN_OPTIONS=runtime must reach the build job (see .github/workflows/build-setup.yml)."
+                echo "::error::$exe lacks the hardened runtime; Apple will reject it. CODESIGN_OPTIONS=runtime must reach the build job (see .github/build-setup.yml)."
                 exit 1
               fi
               if ! grep -q '^Timestamp=' <<< "$details"; then
