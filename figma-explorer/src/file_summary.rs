@@ -306,6 +306,29 @@ mod tests {
     }
 
     #[test]
+    fn style_values_strip_variable_handles_at_any_depth() {
+        // The file summary has no `variables` block, so a `vN` handle — here
+        // on a gradient stop, nested below the paint — would point nowhere.
+        let file = json!({
+            "styles": { "S:grad": { "name": "Sunset", "styleType": "FILL" } },
+            "document": { "id": "0:0", "type": "DOCUMENT", "children": [
+                { "id": "1:1", "type": "RECTANGLE", "styles": { "fill": "S:grad" },
+                  "fills": [{ "type": "GRADIENT_LINEAR", "gradientStops": [
+                      { "position": 0.0, "color": { "r": 1.0, "g": 0.0, "b": 0.0, "a": 1.0 },
+                        "boundVariables": { "color": { "id": "VariableID:1:2" } } },
+                      { "position": 1.0, "color": { "r": 0.0, "g": 0.0, "b": 1.0, "a": 1.0 } },
+                  ]}] },
+            ]},
+        });
+        let value = style_named(&styles_of(&file), "Sunset")["value"].clone();
+        assert_eq!(
+            value[0]["stops"],
+            json!([{ "position": 0.0, "hex": "#ff0000" }, { "position": 1.0, "hex": "#0000ff" }]),
+        );
+        assert!(!value.to_string().contains("bound_variable"));
+    }
+
+    #[test]
     fn style_values_skip_hidden_and_unused_styles() {
         let file = json!({
             "styles": {

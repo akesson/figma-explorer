@@ -1857,10 +1857,8 @@ pub fn style_value(node: &Value, slot: &str, style_type: &str) -> Option<Value> 
     let mut scratch = Collector::default();
     let node_id = node.get("id").and_then(Value::as_str).unwrap_or("");
     let visible = |v: &&Value| !matches!(v.get("visible"), Some(Value::Bool(false)));
-    let strip_vars = |mut v: Value| {
+    let drop_default_blend = |mut v: Value| {
         if let Value::Object(m) = &mut v {
-            m.remove("bound_variable");
-            m.remove("bound_variables");
             if m.get("blend_mode").is_some_and(|b| b == "NORMAL") {
                 m.remove("blend_mode");
             }
@@ -1879,7 +1877,7 @@ pub fn style_value(node: &Value, slot: &str, style_type: &str) -> Option<Value> 
                 .and_then(Value::as_array)?
                 .iter()
                 .filter(visible)
-                .map(|p| strip_vars(build_paint(p, &mut scratch, node_id)))
+                .map(|p| drop_default_blend(build_paint(p, &mut scratch, node_id)))
                 .collect();
             match paints.as_slice() {
                 [] => None,
@@ -1907,14 +1905,29 @@ pub fn style_value(node: &Value, slot: &str, style_type: &str) -> Option<Value> 
                 .and_then(Value::as_array)?
                 .iter()
                 .filter(visible)
-                .map(|e| strip_vars(build_effect(e, &mut scratch, node_id)))
+                .map(|e| drop_default_blend(build_effect(e, &mut scratch, node_id)))
                 .collect();
             (!effects.is_empty()).then_some(Value::Array(effects))
         }
         _ => None,
     }?;
+    strip_variable_handles(&mut value);
     round_floats(&mut value);
     Some(value)
+}
+
+/// Drop every `bound_variable` / `bound_variables` key at any depth —
+/// including the per-stop bindings inside a gradient paint's `stops`.
+fn strip_variable_handles(v: &mut Value) {
+    match v {
+        Value::Object(m) => {
+            m.remove("bound_variable");
+            m.remove("bound_variables");
+            m.values_mut().for_each(strip_variable_handles);
+        }
+        Value::Array(a) => a.iter_mut().for_each(strip_variable_handles),
+        _ => {}
+    }
 }
 
 // ───────────────────────────────────────────────────────────────────────────
