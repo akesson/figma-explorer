@@ -288,8 +288,7 @@ impl PrefetchArgs {
                             fetch_comments_into_meta(cfg, &cache, &f.file_key, now, &mut meta).await;
 
                             // Full-JSON sidecar — keep the raw response so
-                            // `node-info` (and future migrations of tokens/
-                            // assets/context) can work offline.
+                            // `node-info` can work offline.
                             if !no_full {
                                 match full_cache::write_full(&cache, &f.file_key, &file) {
                                     Ok(n) => {

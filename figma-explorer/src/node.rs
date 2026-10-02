@@ -103,39 +103,6 @@ pub fn fills(node: &Value) -> &[Value] {
         .unwrap_or(&[])
 }
 
-pub fn strokes(node: &Value) -> &[Value] {
-    node.get("strokes")
-        .and_then(|f| f.as_array())
-        .map(Vec::as_slice)
-        .unwrap_or(&[])
-}
-
-pub fn effects(node: &Value) -> &[Value] {
-    node.get("effects")
-        .and_then(|e| e.as_array())
-        .map(Vec::as_slice)
-        .unwrap_or(&[])
-}
-
-pub fn type_style(node: &Value) -> Option<&Value> {
-    node.get("style")
-}
-
-/// First visible solid fill, as a 6- or 8-digit hex string (`#rrggbb` or `#rrggbbaa`).
-pub fn primary_solid_hex(node: &Value) -> Option<String> {
-    for paint in fills(node) {
-        if !is_paint_visible(paint) {
-            continue;
-        }
-        if paint.get("type").and_then(|v| v.as_str()) == Some("SOLID") {
-            if let Some(color) = paint.get("color") {
-                return Some(rgba_to_hex(color));
-            }
-        }
-    }
-    None
-}
-
 pub fn is_paint_visible(paint: &Value) -> bool {
     !matches!(paint.get("visible"), Some(Value::Bool(false)))
 }

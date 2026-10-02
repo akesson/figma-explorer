@@ -1,13 +1,13 @@
 [package]
 name = "figma-explorer"
 version = "0.2.3"
-description = "High-level CLI on top of the Figma REST API: name-based navigation, asset extraction, design tokens, and bundled context export."
+description = "High-level CLI on top of the Figma REST API: name-based navigation, implementation-ready node views, comments, screenshots, and asset export."
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage = "https://github.com/akesson/figma-explorer"
 readme = "../README.md"
-keywords = ["figma", "cli", "design", "design-tokens"]
+keywords = ["figma", "cli", "design", "design-to-code"]
 categories = ["command-line-utilities"]
 
 [[bin]]

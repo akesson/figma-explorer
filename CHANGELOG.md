@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`node-info file:N` now shows each named style's value.** Every entry in
+  the file summary's `styles` list carries a `value`: a FILL style's hex (or
+  its paint list for gradients and stacked paints), a TEXT style's font
+  family, weight, size, line height and letter spacing, an EFFECT style's
+  shadow list. Figma returns no values for styles, so each is read off the
+  first visible node applying it, offline from the full-file sidecar; a style
+  no visible node uses has no `value`. Library copies are flagged
+  `remote: true`, since one can share a name with a local style yet differ.
+  `node-info file:N --only styles` gives just this table.
+
+### Removed
+
+- **`tokens` is gone.** Its output wasn't usable as design tokens: outside
+  `--scope file` it named colors after the layers they were found on
+  (`--color-rectangle-13`, `--color-vector`), and it read only fill and text
+  styles, so effect styles (shadows, focus rings) never appeared even with
+  `--only shadows`. Use instead:
+  - a file's named styles and their values → `node-info file:N --only styles`
+    (above), which covers effect styles too;
+  - the colors, type and effects a frame uses → `node-info file:N:x:y`, which
+    lists them with the named style each one comes from.
+- **`context` is gone.** It bundled a tree, a screenshot, `tokens` output and
+  `assets` into one directory. Run the parts directly: `node-info` for the
+  structure, `screenshot --out` for the image, `assets --out-dir` for icons
+  and images.
+
 ### Fixed
 
 - **macOS binaries are now codesigned and notarized.** Downloading a release

@@ -4,8 +4,8 @@ use figma_explorer::{build_config, cmd::Command, Globals, Output};
 /// High-level CLI on top of the Figma REST API.
 ///
 /// Designed for design-to-code workflows: navigate by tagged IDs, render
-/// compact tree listings, export screenshots, extract assets and design
-/// tokens.
+/// compact tree listings, dump implementation-ready node views, and export
+/// screenshots.
 #[derive(Parser, Debug)]
 #[command(name = "figma-explorer", version, about, long_about = None)]
 struct Cli {
@@ -29,7 +29,7 @@ struct Cli {
     /// Other commands ignore it. Accepts any tagged id (e.g. `file:2`,
     /// `file:2:1094:66591`).
     // `id = "scope_in"` namespaces this flag in clap so it doesn't collide
-    // with subcommand-local fields named `scope` (e.g. `tokens --scope`).
+    // with any subcommand-local field named `scope`.
     #[arg(long = "in", id = "scope_in", value_name = "ID", global = true)]
     scope: Option<String>,
 

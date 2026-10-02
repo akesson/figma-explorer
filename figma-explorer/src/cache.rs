@@ -546,8 +546,7 @@ impl CacheDir {
 
     /// Path of the gzipped full-JSON sidecar (raw `/v1/files/{key}` body).
     /// The structural cache (`.rkyv`) drops most fields; this sidecar keeps
-    /// them so `node-info` (and future migrations of tokens/assets/context)
-    /// can run offline.
+    /// them so `node-info` can run offline.
     pub fn full_path(&self, file_key: &str) -> PathBuf {
         self.files_dir().join(format!("{file_key}.full.json.gz"))
     }

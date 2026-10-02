@@ -7,14 +7,12 @@ use crate::Globals;
 pub mod assets;
 pub mod cache;
 pub mod comments;
-pub mod context;
 pub mod find;
 pub mod library;
 pub mod ls;
 pub mod mark;
 pub mod node_info;
 pub mod screenshot;
-pub mod tokens;
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
@@ -29,12 +27,8 @@ pub enum Command {
     Library(library::Args),
     /// Export a node as PNG/JPG/SVG/PDF.
     Screenshot(screenshot::Args),
-    /// Extract design tokens (colors, fonts, sizes, spacing, …).
-    Tokens(tokens::Args),
     /// Export every icon/image/composite below a node into a directory.
     Assets(assets::Args),
-    /// Aggregate: dump tree + screenshot + tokens + assets for a node.
-    Context(context::Args),
     /// Comprehensive single-target view: node properties, layout, fills,
     /// effects, component metadata, bound variables, comments. Designed for
     /// Claude Code agents implementing designs in application code. Accepts
@@ -59,9 +53,7 @@ impl Command {
             Self::Find(a) => a.run(cfg, globals).await,
             Self::Library(a) => a.run(cfg, globals).await,
             Self::Screenshot(a) => a.run(cfg, globals).await,
-            Self::Tokens(a) => a.run(cfg, globals).await,
             Self::Assets(a) => a.run(cfg, globals).await,
-            Self::Context(a) => a.run(cfg, globals).await,
             Self::NodeInfo(a) => a.run(cfg, globals).await,
             Self::Comments(a) => a.run(cfg, globals).await,
             Self::Mark(a) => a.run(cfg, globals).await,
