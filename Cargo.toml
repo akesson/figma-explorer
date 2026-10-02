@@ -27,6 +27,12 @@ npm-scope = "@akesson"
 publish-jobs = ["homebrew", "./publish-npm"]
 # Which actions to run on pull requests
 pr-run-mode = "plan"
+# Codesign macOS binaries with a Developer ID cert (see CODESIGN_* secrets)
+macos-sign = true
+# Injects CODESIGN_OPTIONS=runtime into the build job (dist has no config for it)
+github-build-setup = "./build-setup.yml"
+# Notarize the signed macOS binary with Apple (hand-maintained workflow)
+global-artifacts-jobs = ["./notarize-macos"]
 # Path that installers should place binaries in
 install-path = "CARGO_HOME"
 # Whether to install an updater program

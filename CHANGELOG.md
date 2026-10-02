@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **macOS binaries are now codesigned and notarized.** Downloading a release
+  tarball from GitHub in a browser previously produced "cannot be opened
+  because the developer cannot be verified" on first run. Binaries are now
+  signed with a Developer ID certificate under the hardened runtime and
+  notarized with Apple. Homebrew, npm, and the shell installer were never
+  affected (none of them set the quarantine attribute).
+
 ## [0.2.3] - 2026-09-23
 
 ### Fixed

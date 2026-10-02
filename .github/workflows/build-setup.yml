@@ -1,0 +1,9 @@
+# Injected into dist's `build-local-artifacts` job via `github-build-setup`.
+# dist 0.32 passes `--options $CODESIGN_OPTIONS` to codesign but has no config
+# knob for it, and without `runtime` the hardened runtime is off and Apple's
+# notary service rejects the binary. Setting it here reaches the later
+# `dist build` step in the same job via $GITHUB_ENV.
+- name: Enable hardened runtime for macOS codesigning
+  if: ${{ runner.os == 'macOS' }}
+  shell: bash
+  run: echo "CODESIGN_OPTIONS=runtime" >> "$GITHUB_ENV"

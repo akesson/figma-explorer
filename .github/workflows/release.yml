@@ -112,6 +112,9 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       BUILD_MANIFEST_NAME: target/distrib/${{ join(matrix.targets, '-') }}-dist-manifest.json
+      CODESIGN_CERTIFICATE: ${{ secrets.CODESIGN_CERTIFICATE }}
+      CODESIGN_CERTIFICATE_PASSWORD: ${{ secrets.CODESIGN_CERTIFICATE_PASSWORD }}
+      CODESIGN_IDENTITY: ${{ secrets.CODESIGN_IDENTITY }}
     steps:
       - name: enable windows longpaths
         run: |
@@ -127,6 +130,10 @@ jobs:
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
             echo "$HOME/.cargo/bin" >> $GITHUB_PATH
           fi
+      - name: "Enable hardened runtime for macOS codesigning"
+        if: "${{ runner.os == 'macOS' }}"
+        run: "echo \"CODESIGN_OPTIONS=runtime\" >> \"$GITHUB_ENV\""
+        shell: "bash"
       - name: Install dist
         run: ${{ matrix.install_dist.run }}
       # Get the dist-manifest
@@ -211,14 +218,24 @@ jobs:
           path: |
             ${{ steps.cargo-dist.outputs.paths }}
             ${{ env.BUILD_MANIFEST_NAME }}
+
+  custom-notarize-macos:
+    needs:
+      - plan
+      - build-local-artifacts
+    uses: ./.github/workflows/notarize-macos.yml
+    with:
+      plan: ${{ needs.plan.outputs.val }}
+    secrets: inherit
   # Determines if we should publish/announce
   host:
     needs:
       - plan
       - build-local-artifacts
       - build-global-artifacts
+      - custom-notarize-macos
     # Only run if we're "publishing", and only if plan, local and global didn't fail (skipped is fine)
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') }}
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.custom-notarize-macos.result == 'skipped' || needs.custom-notarize-macos.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     runs-on: "ubuntu-22.04"
