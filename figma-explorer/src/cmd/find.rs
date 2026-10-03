@@ -145,6 +145,7 @@ impl Args {
                 // top-N via score ties.
                 let synth = resolver.synth();
                 let metas = resolver.cache().list_metas()?;
+                resolver.freshen(cfg, &metas).await;
                 let mut searched = 0usize;
                 for m in metas.iter().filter(|m| m.status == EntryStatus::Ok) {
                     let Some(file_synth) = synth.file_synth(&m.file_key) else {

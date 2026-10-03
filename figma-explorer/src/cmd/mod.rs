@@ -120,6 +120,41 @@ pub async fn fetch_local_variables(
     get_json(cfg, &url).await
 }
 
+/// Fetch a file's current `version` via `/v1/files/{key}/meta` — about 1 KB
+/// against a full file body that can run to 100+ MB, so it is the cheap
+/// change probe behind `cache::ensure_fresh`. Raw JSON for the same reason as
+/// `fetch_file_json`: the typed `get_file_meta` model has required fields
+/// (`creator`, `editorType`, …) we don't need and can't vouch for.
+///
+/// `/meta` needs the `file_metadata:read` scope, separate from the
+/// `file_content:read` that `/v1/files` needs, so a token with only the
+/// latter gets a 403 here. On a 403 fall back to `?depth=1` (~8 KB, also
+/// carries `version`); only if that 403s too is the file really unreadable.
+pub async fn fetch_file_version(cfg: &Configuration, file_key: &str) -> Result<String> {
+    let url = format!("{}/v1/files/{}/meta", cfg.base_path, file_key);
+    let (v, source) = match get_json(cfg, &url).await {
+        Ok(v) => (v["file"].clone(), "/meta"),
+        Err(e) if format!("{e:#}").contains("(403 ") => {
+            (fetch_file_json(cfg, file_key, Some(1.0)).await?, "?depth=1")
+        }
+        Err(e) => return Err(e),
+    };
+    file_version(&v).ok_or_else(|| {
+        anyhow::anyhow!("Figma {source} response for file {file_key} has no `version`")
+    })
+}
+
+/// Read the `version` field from a `/v1/files/{key}` body (or the `file`
+/// object of a `/meta` body). Figma documents it as a string; tolerate a bare
+/// number so a wire-format quirk can't turn every probe into a refetch.
+pub fn file_version(v: &serde_json::Value) -> Option<String> {
+    match v.get("version")? {
+        serde_json::Value::String(s) if !s.is_empty() => Some(s.clone()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
+}
+
 /// Heuristic: does this error string look like a Variables-API 403?
 /// Used by `cache prefetch` to decide whether to disable further variables
 /// fetches for the rest of the run after a few consecutive 403s.

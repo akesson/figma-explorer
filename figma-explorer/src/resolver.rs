@@ -129,6 +129,21 @@ impl Resolver {
         self.cache_only
     }
 
+    /// Version-check `metas` before a multi-file sweep that reads payloads
+    /// straight from the cache (`find` without `--in`, `ls` on root/project)
+    /// rather than through [`Self::resolve`]. Same policy as single-file
+    /// resolution: [`cache::ensure_fresh`] normally, a stderr staleness note
+    /// under `--cache-only`.
+    pub async fn freshen(&self, cfg: &Configuration, metas: &[FileMeta]) -> cache::FreshReport {
+        if self.cache_only {
+            cache::note_unverified_cache_only(metas);
+            cache::FreshReport::default()
+        } else {
+            let keys: Vec<String> = metas.iter().map(|m| m.file_key.clone()).collect();
+            cache::ensure_fresh(cfg, &self.cache, &keys).await
+        }
+    }
+
     /// Build the node index on first call, cache it for the rest of the
     /// invocation. Errors from index construction surface as [`ResolveError::Internal`].
     pub fn node_index(&self) -> Result<&NodeIndex, ResolveError> {
@@ -289,8 +304,19 @@ impl Resolver {
         cfg: &Configuration,
         node_id: &str,
     ) -> Result<ResolvedTarget, ResolveError> {
-        let index = self.node_index()?;
-        let candidates = index.lookup(node_id);
+        let mut candidates: Vec<u32> = self.node_index()?.lookup(node_id).to_vec();
+        if candidates.is_empty() && !self.cache_only {
+            // The index is built from cached payloads, so a node a designer
+            // added since caching only shows up after a refetch. Pay for the
+            // version sweep on a miss only, and rebuild only if it changed
+            // anything.
+            let metas = self.cache.list_metas().map_err(ResolveError::internal)?;
+            if !self.freshen(cfg, &metas).await.refetched.is_empty() {
+                let fresh = NodeIndex::load_or_build(&self.cache, &self.synth)
+                    .map_err(ResolveError::internal)?;
+                candidates = fresh.lookup(node_id).to_vec();
+            }
+        }
         match candidates.len() {
             0 => Err(ResolveError::NotCached(format!(
                 "{node_id} (no cached file contains this node id; paste a Figma URL if the file isn't cached)"
@@ -477,22 +503,34 @@ impl Resolver {
         })
     }
 
-    /// [`Self::read_file`] with a cold-fetch fallback. Tagged synth paths
-    /// behave like the URL lane: on a cache miss, refetch via
-    /// [`cache::load_file`] when allowed (its `decide_action` throttles
+    /// [`Self::read_file`] with a version check and a cold-fetch fallback.
+    ///
+    /// A cached file is first run through [`cache::ensure_fresh`], so a file a
+    /// designer has edited since it was cached is refetched before it is
+    /// served (at most one `/meta` probe per file per
+    /// [`cache::VERSION_CHECK_SECS`]). Under `--cache-only` nothing is probed;
+    /// a stderr note flags data past that window instead.
+    ///
+    /// Tagged synth paths behave like the URL lane: on a cache miss, refetch
+    /// via [`cache::load_file`] when allowed (its `decide_action` throttles
     /// NotExportable markers by TTL, so a 403'd file is not re-hammered), or
     /// fail with [`ResolveError::CacheOnlyMiss`] under `--cache-only`.
-    /// Deliberately does NOT pre-warm node-info's `.full.json.gz` sidecar —
-    /// that would tax every refresh to save one API call on a fully-cold
-    /// `node-info`; its own `load_full` self-heals on the next call.
     async fn read_file_or_fetch(
         &self,
         cfg: &Configuration,
         display_id: &str,
         file_key: &str,
     ) -> Result<(FileMeta, CachedFile), ResolveError> {
+        if !self.cache_only {
+            cache::ensure_fresh(cfg, &self.cache, &[file_key.to_owned()]).await;
+        }
         match self.read_file(file_key) {
-            Ok(pair) => Ok(pair),
+            Ok(pair) => {
+                if self.cache_only {
+                    cache::note_unverified_cache_only([&pair.0]);
+                }
+                Ok(pair)
+            }
             Err(ResolveError::NotCached(_)) if self.cache_only => {
                 Err(ResolveError::CacheOnlyMiss(display_id.to_owned()))
             }
@@ -730,6 +768,62 @@ mod tests {
 
     fn dummy_cfg() -> Configuration {
         Configuration::new()
+    }
+
+    /// A node a designer added after the file was cached: the bare id misses
+    /// the index, so the resolver version-checks, refetches the changed file,
+    /// rebuilds the index and resolves — like `file:N:x:y` would.
+    #[tokio::test]
+    async fn bare_id_miss_refetches_changed_files_and_retries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = CacheDir::new(tmp.path());
+        cache.ensure().unwrap();
+        let file_ref = FileRef {
+            file_key: "file-a".into(),
+            name: "A".into(),
+            last_modified: "2024-01-01".into(),
+            project_id: "p1".into(),
+            project_name: "P".into(),
+        };
+        let doc = json!({"id": "0:0", "name": "doc", "type": "DOCUMENT", "children": []});
+        let payload = build_cached_file(&file_ref, &doc, 0);
+        cache.write_file("file-a", &payload).unwrap();
+        let mut meta = FileMeta::from_success(&file_ref, &payload, 0, 0);
+        meta.version = Some("v1".into());
+        meta.version_checked_at_epoch = Some(0);
+        cache.write_meta(&meta).unwrap();
+        crate::synth::with_lock(&cache, |s| {
+            s.intern_project("p1");
+            s.intern_file("file-a");
+        })
+        .unwrap();
+
+        let file_v2 = r#"{"name":"A","lastModified":"2024-02-02","version":"v2",
+            "document":{"id":"0:0","name":"doc","type":"DOCUMENT","children":[
+                {"id":"0:1","name":"Page","type":"CANVAS","children":[
+                    {"id":"12:34","name":"New Frame","type":"FRAME"}]}]}}"#;
+        let server = crate::test_http::serve(vec![
+            (200, r#"{"file":{"name":"A","version":"v2"}}"#.into()),
+            (200, file_v2.into()),
+            (200, r#"{"comments":[]}"#.into()),
+        ]);
+        let cfg = crate::test_http::cfg_for(&server);
+        let r = Resolver::from_cache(CacheDir::new(tmp.path()), false).unwrap();
+
+        let target = r.resolve(&cfg, &"12:34".parse().unwrap()).await.unwrap();
+
+        match target {
+            ResolvedTarget::Node { node, .. } => assert_eq!(node.name, "New Frame"),
+            other => panic!("expected node, got {other:?}"),
+        }
+        assert_eq!(
+            server.paths(),
+            vec![
+                "/v1/files/file-a/meta",
+                "/v1/files/file-a",
+                "/v1/files/file-a/comments"
+            ]
+        );
     }
 
     #[tokio::test]

@@ -164,22 +164,31 @@ fn node_index_path(cache_dir: &CacheDir) -> PathBuf {
 }
 
 fn compute_fingerprint(metas: &[FileMeta], synth: &SynthState) -> u64 {
-    let mut entries: Vec<(&str, u32, &str)> = metas
+    // `cached_at_epoch` changes on every payload rewrite, so a version-check
+    // refetch invalidates the index even when Figma's `lastModified` didn't
+    // move with its `version`.
+    let mut entries: Vec<(&str, u32, &str, u64)> = metas
         .iter()
         .filter(|m| m.status == EntryStatus::Ok)
         .filter_map(|m| {
-            synth
-                .file_synth(&m.file_key)
-                .map(|s| (m.file_key.as_str(), s, m.last_modified.as_str()))
+            synth.file_synth(&m.file_key).map(|s| {
+                (
+                    m.file_key.as_str(),
+                    s,
+                    m.last_modified.as_str(),
+                    m.cached_at_epoch,
+                )
+            })
         })
         .collect();
     entries.sort();
     let mut hasher = StableHasher::default();
     NODE_INDEX_SCHEMA_VERSION.hash(&mut hasher);
-    for (k, s, lm) in entries {
+    for (k, s, lm, at) in entries {
         k.hash(&mut hasher);
         s.hash(&mut hasher);
         lm.hash(&mut hasher);
+        at.hash(&mut hasher);
     }
     hasher.finish()
 }
@@ -358,6 +367,9 @@ mod tests {
             variables_bytes: None,
             variables_error: None,
             variables_schema_version: None,
+            version: None,
+            version_checked_at_epoch: None,
+            refetch_failed_at_epoch: None,
         };
         cache.write_meta(&meta).unwrap();
 

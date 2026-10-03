@@ -282,6 +282,8 @@ impl PrefetchArgs {
                                 }
                             };
                             let mut meta = FileMeta::from_success(&f, &payload, bytes, now);
+                            meta.version = crate::cmd::file_version(&file);
+                            meta.version_checked_at_epoch = Some(now);
                             // Fetch comments alongside the document. Best-effort:
                             // failures flip `meta.comments_error` but don't fail
                             // the entry.
@@ -765,7 +767,7 @@ fn needs_fetch(
 
 /// Compact "how long ago" for status rows: `42s`, `17m`, `5h`, `3d`.
 /// Clock-skew safe — a timestamp in the future reads as `0s`.
-fn age(now: u64, then: u64) -> String {
+pub(crate) fn age(now: u64, then: u64) -> String {
     let secs = now.saturating_sub(then);
     match secs {
         0..=59 => format!("{secs}s"),

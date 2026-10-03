@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Cached files are checked against Figma before they're served.** Designers
+  edit files while you work, and until now a cached file was served as-is
+  until the next `cache prefetch` — days out of date with no warning. Every
+  command that reads cached file data now compares the file's Figma `version`
+  (a ~1 KB `/meta` request) at most once every 5 minutes per file, and
+  refetches a changed file before answering; stderr says
+  `cache: N files changed on Figma (…) — refetching…`. Cross-file `find` and
+  `ls` at `--depth 2`+ check all the files they read. If the check or the
+  refetch fails, the cached copy is served with a note rather than an error.
+  `--cache-only` makes no requests and notes data past the 5-minute window.
+  The first run after upgrading refetches each file once, since older caches
+  don't record a version.
+
 - **`node-info file:N` now shows each named style's value.** Every entry in
   the file summary's `styles` list carries a `value`: a FILL style's hex (or
   its paint list for gradients and stacked paints), a TEXT style's font

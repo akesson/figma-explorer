@@ -55,6 +55,8 @@ Get a personal access token at https://www.figma.com/developers/api#access-token
 export FIGMA_TOKEN=figd_...
 ```
 
+Give the token the **File content** (`file_content:read`) and **File metadata** (`file_metadata:read`) read scopes. The metadata scope powers the cheap freshness check (`/v1/files/{key}/meta`); without it, checks fall back to a slower depth-limited file request.
+
 Optional environment variables:
 
 - `FIGMA_PROJECTS_IDS` — comma-separated Figma folder ids (Figma renamed "projects" to "folders" in August 2026; the numeric ids are unchanged, so existing values keep working); needed by `cache prefetch`.
@@ -102,6 +104,8 @@ YAML by default (terse, agent-friendly: block style for the tree, flow style `{k
 ## Cache
 
 A local rkyv cache lives at `$FIGMA_EXPLORER_CACHE_DIR` or the OS cache dir. It is **per-machine** — rkyv archives are not endianness-portable, so don't sync the cache directory across architectures. `cache clear` removes everything; `cache prefetch` warms it from `FIGMA_PROJECTS_IDS`.
+
+Designers edit files live, so cached data is checked against Figma before it is served: at most once every 5 minutes per file, a ~1 KB `GET /v1/files/{key}/meta` compares Figma's `version` with the cached one, and a changed file is refetched (payload and `node-info` sidecar together) before the command answers. If the check or refetch fails, the cached copy is served with a note on stderr. `--cache-only` never checks; it notes data older than the window instead.
 
 ## License
 

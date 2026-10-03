@@ -620,18 +620,39 @@ fn emit_root(resolver: &Resolver) -> Result<Value> {
 // Helpers
 // ───────────────────────────────────────────────────────────────────────────
 
-/// Load the `.full.json.gz` sidecar for a file. With `cache_only=true` we
-/// refuse to fall back to a live fetch; instead we error with the standard
-/// "run `cache prefetch`" hint. Without it, a missing or stale sidecar
-/// triggers a live fetch and we write the sidecar opportunistically so the
-/// next call is offline.
+/// Load the `.full.json.gz` sidecar for a file — the raw `/v1/files/{key}`
+/// body, for the paint/text/effect fields the structural cache drops.
+///
+/// A sidecar is served only when [`cache::full_sidecar_current`] says it came
+/// from the same response as the structural payload (which the resolver has
+/// already version-checked). Otherwise the file is refetched through
+/// [`cache::refetch_file`], rewriting payload + sidecar + meta together so the
+/// two can't drift; if that refetch fails, an existing older sidecar is served
+/// with a stderr note. With `cache_only=true` there is no refetch: an
+/// out-of-step sidecar is served with a stderr note, and a missing one errors
+/// with the standard "run `cache prefetch`" hint.
 async fn load_full(
     cfg: &Configuration,
     cache: &CacheDir,
     file_key: &str,
     cache_only: bool,
 ) -> Result<Value> {
-    if let Some(v) = full_cache::read_full(cache, file_key)? {
+    let current = cache
+        .read_meta(file_key)
+        .ok()
+        .flatten()
+        .is_some_and(|m| cache::full_sidecar_current(&m));
+    let sidecar = if current || cache_only {
+        full_cache::read_full(cache, file_key)?
+    } else {
+        None
+    };
+    if let Some(v) = sidecar {
+        if !current {
+            eprintln!(
+                "node-info: full-JSON sidecar for {file_key} predates the cached tree (--cache-only) — may be stale"
+            );
+        }
         return Ok(v);
     }
     if cache_only {
@@ -639,25 +660,19 @@ async fn load_full(
             "no full-JSON sidecar for {file_key} (and --cache-only is set); run `figma-explorer cache prefetch` to populate the local cache, then retry"
         );
     }
-    // Cold path: live-fetch and write the sidecar so future calls are offline.
-    let v = crate::cmd::fetch_file_json(cfg, file_key, None).await?;
-    // Write the sidecar once and reuse the returned byte count for the meta —
-    // an earlier version called write_full twice (once to write, once to learn
-    // the size), doubling the gzip + I/O on every cold fetch.
-    match full_cache::write_full(cache, file_key, &v) {
-        Err(e) => eprintln!("node-info: write_full failed for {file_key}: {e:#}"),
-        Ok(n) => {
-            if let Ok(Some(mut meta)) = cache.read_meta(file_key) {
-                meta.full_fetched_at_epoch = Some(cache::now_epoch());
-                meta.full_bytes = Some(n);
-                meta.full_schema_version = Some(cache::FULL_SCHEMA_VERSION);
-                if let Err(e) = cache.write_meta(&meta) {
-                    eprintln!("node-info: write_meta failed for {file_key}: {e:#}");
-                }
+    match cache::refetch_file(cfg, cache, file_key).await {
+        Ok(v) => Ok(v),
+        // Offline or timed out: an older sidecar beats no answer.
+        Err(e) => match full_cache::read_full(cache, file_key)? {
+            Some(v) => {
+                eprintln!(
+                    "node-info: refetch of {file_key} failed ({e:#}) — using the older full-JSON sidecar, which may be stale"
+                );
+                Ok(v)
             }
-        }
+            None => Err(e),
+        },
     }
-    Ok(v)
 }
 
 /// Walk the cached structural document and return `[{id, type, name}, ...]`
@@ -776,6 +791,38 @@ fn file_block_with_doc_info(synth: u32, meta: &FileMeta, doc: &crate::cache::Cac
 mod tests {
     use super::*;
     use clap::Parser;
+
+    /// A sidecar older than the payload triggers a refetch; when that fails
+    /// (offline, timeout) the older sidecar is served rather than an error.
+    #[tokio::test]
+    async fn load_full_serves_older_sidecar_when_refetch_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = CacheDir::new(tmp.path());
+        cache.ensure().unwrap();
+        let file_ref = cache::FileRef {
+            file_key: "K".into(),
+            name: "F".into(),
+            last_modified: "t1".into(),
+            project_id: "10".into(),
+            project_name: "P".into(),
+        };
+        let doc = json!({"id": "0:0", "name": "Document", "type": "DOCUMENT", "children": []});
+        let payload = cache::build_cached_file(&file_ref, &doc, 100);
+        cache.write_file("K", &payload).unwrap();
+        // No full stamps → the sidecar on disk is not current.
+        cache
+            .write_meta(&cache::FileMeta::from_success(&file_ref, &payload, 0, 100))
+            .unwrap();
+        full_cache::write_full(&cache, "K", &json!({"version": "old"})).unwrap();
+
+        let server = crate::test_http::serve(vec![(500, "{}".into())]);
+        let v = load_full(&crate::test_http::cfg_for(&server), &cache, "K", false)
+            .await
+            .unwrap();
+
+        assert_eq!(server.paths(), vec!["/v1/files/K"]);
+        assert_eq!(v["version"], "old");
+    }
 
     #[derive(Parser, Debug)]
     struct TestCli {

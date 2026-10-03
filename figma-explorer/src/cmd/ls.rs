@@ -167,16 +167,20 @@ impl Args {
         let name_filter = self.name.as_deref().map(str::to_lowercase);
         let name_filter = name_filter.as_deref();
         match self.id.as_deref() {
-            None => render_root(
-                &resolver,
-                effective_depth(explicit_depth, true),
-                explicit_depth.is_none(),
-                format,
-                show_all,
-                resolved,
-                inline_comments,
-                name_filter,
-            ),
+            None => {
+                freshen_for_listing(&resolver, cfg, effective_depth(explicit_depth, true), None)
+                    .await?;
+                render_root(
+                    &resolver,
+                    effective_depth(explicit_depth, true),
+                    explicit_depth.is_none(),
+                    format,
+                    show_all,
+                    resolved,
+                    inline_comments,
+                    name_filter,
+                )
+            }
             Some(s) => {
                 let id = parse_id(s).map_err(|e| anyhow::anyhow!("{e}"))?;
                 // Promote a bare native id to a qualified one when --in
@@ -189,27 +193,35 @@ impl Args {
                     .await
                     .map_err(|e| render_resolve_error(e, format))?;
                 match target {
-                    ResolvedTarget::Root => render_root(
-                        &resolver,
-                        effective_depth(explicit_depth, true),
-                        explicit_depth.is_none(),
-                        format,
-                        show_all,
-                        resolved,
-                        inline_comments,
-                        name_filter,
-                    ),
-                    ResolvedTarget::Project { synth, project_id } => render_project(
-                        &resolver,
-                        synth,
-                        &project_id,
-                        effective_depth(explicit_depth, false),
-                        format,
-                        show_all,
-                        resolved,
-                        inline_comments,
-                        name_filter,
-                    ),
+                    ResolvedTarget::Root => {
+                        let depth = effective_depth(explicit_depth, true);
+                        freshen_for_listing(&resolver, cfg, depth, None).await?;
+                        render_root(
+                            &resolver,
+                            depth,
+                            explicit_depth.is_none(),
+                            format,
+                            show_all,
+                            resolved,
+                            inline_comments,
+                            name_filter,
+                        )
+                    }
+                    ResolvedTarget::Project { synth, project_id } => {
+                        let depth = effective_depth(explicit_depth, false);
+                        freshen_for_listing(&resolver, cfg, depth, Some(&project_id)).await?;
+                        render_project(
+                            &resolver,
+                            synth,
+                            &project_id,
+                            depth,
+                            format,
+                            show_all,
+                            resolved,
+                            inline_comments,
+                            name_filter,
+                        )
+                    }
                     ResolvedTarget::File {
                         synth,
                         meta,
@@ -377,6 +389,42 @@ fn project_files_json(
             )
         })
         .collect()
+}
+
+/// Root/project listings read file payloads straight from the cache once
+/// they descend past the file rows (depth ≥ 2), bypassing the resolver's
+/// per-file version check — so check the listed files up front. At depth ≤ 1
+/// only names from the metas are shown, and nothing is probed.
+async fn freshen_for_listing(
+    resolver: &Resolver,
+    cfg: &Configuration,
+    depth: usize,
+    project_id: Option<&str>,
+) -> Result<()> {
+    if depth < 2 {
+        return Ok(());
+    }
+    let metas = resolver.cache().list_metas()?;
+    let shown = listed_metas(resolver.synth(), &metas, project_id);
+    resolver.freshen(cfg, &shown).await;
+    Ok(())
+}
+
+/// The file metas a root (`project_id = None`) or project listing actually
+/// renders. Root goes through [`root_groups`], so URL-fetched files (no
+/// project) — which the root listing never shows — aren't probed for it.
+fn listed_metas(synth: &SynthState, metas: &[FileMeta], project_id: Option<&str>) -> Vec<FileMeta> {
+    match project_id {
+        None => root_groups(synth, metas)
+            .into_iter()
+            .flat_map(|(_, _, _, files)| files.into_iter().map(|(_, m)| m))
+            .collect(),
+        Some(p) => metas
+            .iter()
+            .filter(|m| m.status == EntryStatus::Ok && m.project_id == p)
+            .cloned()
+            .collect(),
+    }
 }
 
 /// Root listing — projects + their files, recursing into each file's
@@ -1304,6 +1352,35 @@ mod tests {
         let groups = root_groups(&synth, &metas);
         assert_eq!(groups.len(), 1, "empty folder omitted: {groups:?}");
         assert_eq!((groups[0].0, groups[0].2.as_str()), (1, "Desktop"));
+    }
+
+    /// Root listings only render files grouped under a project, so only
+    /// those get version-checked — not URL-fetched files with no project.
+    #[test]
+    fn listed_metas_root_skips_files_without_a_project() {
+        let mut synth = SynthState::default();
+        synth.intern_project("77195660");
+        synth.intern_file("in-folder");
+        synth.intern_file("from-url");
+        let doc = json!({"id": "0:0", "type": "DOCUMENT"});
+        let meta = |key: &str, project: &str| {
+            let r = FileRef {
+                file_key: key.into(),
+                name: key.into(),
+                last_modified: "t".into(),
+                project_id: project.into(),
+                project_name: "Desktop".into(),
+            };
+            FileMeta::from_success(&r, &build_cached_file(&r, &doc, 0), 0, 0)
+        };
+        let metas = vec![meta("in-folder", "77195660"), meta("from-url", "")];
+
+        let keys = |v: Vec<FileMeta>| v.into_iter().map(|m| m.file_key).collect::<Vec<_>>();
+        assert_eq!(keys(listed_metas(&synth, &metas, None)), vec!["in-folder"]);
+        assert_eq!(
+            keys(listed_metas(&synth, &metas, Some("77195660"))),
+            vec!["in-folder"]
+        );
     }
 
     /// End-to-end check of the spine: build a fixture cache + synth state,
