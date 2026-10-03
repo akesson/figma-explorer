@@ -1166,13 +1166,20 @@ async fn write_fetched(
         project_id,
         project_name,
     };
-    // Read before the payload write: the variables sidecar isn't part of this
-    // response and stays on disk, so its stamps must survive the new meta.
+    // Read before the payload write: the variables and comments sidecars
+    // aren't part of this response and stay on disk, so their stamps must
+    // survive the new meta.
     let prev = cache.read_meta(file_key).ok().flatten();
     let payload = build_cached_file(&synthetic_ref, doc, now);
     let bytes = cache.write_file(file_key, &payload)?;
     let mut meta = FileMeta::from_success(&synthetic_ref, &payload, bytes, now);
     if let Some(p) = prev {
+        // Likewise the comments sidecar: if this response's comments fetch
+        // fails below, the old sidecar is still served, so its stamps must
+        // still describe it.
+        meta.comments_fetched_at_epoch = p.comments_fetched_at_epoch;
+        meta.comments_fingerprint = p.comments_fingerprint;
+        meta.comments_schema_version = p.comments_schema_version;
         meta.variables_fetched_at_epoch = p.variables_fetched_at_epoch;
         meta.variables_bytes = p.variables_bytes;
         meta.variables_error = p.variables_error;
@@ -3186,6 +3193,32 @@ mod tests {
         let server = mock_http::serve(vec![]);
         assert!(!ensure_comments_fresh(&cfg_for(&server), &cache, FRESH_KEY, 1).await);
         assert!(server.paths().is_empty(), "backed off for the window");
+    }
+
+    /// A version refetch whose comments call fails still serves the old
+    /// sidecar, so the new meta must keep that sidecar's stamps.
+    #[tokio::test]
+    async fn refetch_keeps_comments_stamps_when_comments_fetch_fails() {
+        let (_td, cache) = seed_comments(5).await;
+        let mut meta = cache.read_meta(FRESH_KEY).unwrap().unwrap();
+        meta.version_checked_at_epoch = Some(0);
+        cache.write_meta(&meta).unwrap();
+
+        let server = mock_http::serve(vec![
+            (200, meta_body("v2")),
+            (200, FILE_V2.into()),
+            (500, "{}".into()),
+        ]);
+        let report = ensure_fresh(&cfg_for(&server), &cache, &keys()).await;
+        assert_eq!(report.refetched, keys());
+
+        let meta = cache.read_meta(FRESH_KEY).unwrap().unwrap();
+        assert_eq!(meta.version.as_deref(), Some("v2"));
+        assert_eq!(meta.comments_fetched_at_epoch, Some(5));
+        assert!(meta.comments_fingerprint.is_some());
+        assert_eq!(meta.comments_schema_version, Some(COMMENTS_SCHEMA_VERSION));
+        assert!(meta.comments_error.is_some());
+        assert_eq!(comment_ids(&cache), ["old"]);
     }
 
     /// Metas from before `comments_checked_at_epoch` fall back to the last
