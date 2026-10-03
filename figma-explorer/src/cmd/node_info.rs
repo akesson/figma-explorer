@@ -242,6 +242,27 @@ impl Args {
     }
 }
 
+/// Warn when the variables sidecar predates the payload: a refetch brought in
+/// a newer document but couldn't refresh its variables (silent when the
+/// env opt-out turned the refresh off). Reads the meta from
+/// disk because `load_full` may have refetched since the target resolved.
+fn warn_if_variables_stale(cache: &CacheDir, file_key: &str) {
+    // `FIGMA_EXPLORER_FETCH_VARIABLES=0` skips the refresh on purpose; saying
+    // it "couldn't" be refreshed would report a failure that didn't happen.
+    if cache::variables_disabled_by_env() {
+        return;
+    }
+    if let Ok(Some(meta)) = cache.read_meta(file_key) {
+        if cache::variables_predate_payload(&meta) {
+            eprintln!(
+                "cache: the variables for {} predate its latest change and couldn't be refreshed ({}) — variable values may be out of date",
+                meta.name,
+                meta.variables_error.as_deref().unwrap_or("unknown error")
+            );
+        }
+    }
+}
+
 /// Assemble [`ViewOptions`] from the CLI args. `--only prototype` /
 /// `--only meta` imply those opt-in bools — without this the tokens would
 /// select sections whose builders then gate themselves off and emit nothing.
@@ -328,6 +349,9 @@ async fn emit_node(
     } else {
         full_cache::read_variables(cache, &meta.file_key)?
     };
+    if vars_root.is_some() {
+        warn_if_variables_stale(cache, &meta.file_key);
+    }
     let mut variables = build_variables_block(vars_root.as_ref(), &mut collector);
     // The node view is rounded inside `build_node_view`; the sidecar's
     // FLOAT `valuesByMode` carry the same f32 noise and are copied verbatim.
@@ -473,6 +497,9 @@ async fn emit_file(
     let cache = resolver.cache();
     let file_root = load_full(cfg, cache, &meta.file_key, cache_only).await?;
     let vars_root = full_cache::read_variables(cache, &meta.file_key)?;
+    if vars_root.is_some() {
+        warn_if_variables_stale(cache, &meta.file_key);
+    }
     let comments = cache.read_comments(&meta.file_key)?.unwrap_or_default();
     let synth_state = SynthState::load(cache)?;
     let heads_total = comments.iter().filter(|c| c.parent_id.is_none()).count();

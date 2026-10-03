@@ -13,9 +13,7 @@ use crate::cache::{
     self, build_cached_file, default_dir, fetch_comments_into_meta, CacheDir, EntryStatus,
     FileMeta, FileRef,
 };
-use crate::cmd::{
-    fetch_file_json, fetch_local_variables, is_variables_forbidden_error, require_document,
-};
+use crate::cmd::{fetch_file_json, is_variables_forbidden_error, require_document};
 use crate::full_cache;
 use crate::team_catalog;
 use crate::{print, Globals, Output};
@@ -229,13 +227,7 @@ impl PrefetchArgs {
             self.concurrency
         );
 
-        // Env opt-out: `FIGMA_EXPLORER_FETCH_VARIABLES=0` disables variables
-        // fetches without requiring the flag. Honors any value other than "0"
-        // as "enabled" — typical bool-y env conventions.
-        let env_no_variables = std::env::var("FIGMA_EXPLORER_FETCH_VARIABLES")
-            .map(|s| s.trim() == "0")
-            .unwrap_or(false);
-        let no_variables = self.no_variables || env_no_variables;
+        let no_variables = self.no_variables || cache::variables_disabled_by_env();
         let no_full = self.no_full;
 
         // Adaptive-disable state for variables: shared across the worker pool.
@@ -268,6 +260,9 @@ impl PrefetchArgs {
                     match fetched {
                         Ok(file) => {
                             // `document` validated present in the fetch chain above.
+                            // Read before the payload write — see the carry-over
+                            // below.
+                            let prev = cache.read_meta(&f.file_key).ok().flatten();
                             let payload = build_cached_file(&f, &file["document"], now);
                             let node_count = payload.node_count as usize;
                             let bytes = match cache.write_file(&f.file_key, &payload) {
@@ -282,6 +277,19 @@ impl PrefetchArgs {
                                 }
                             };
                             let mut meta = FileMeta::from_success(&f, &payload, bytes, now);
+                            // Usually the entry was deleted above, sidecars and
+                            // all, but not always (a file listed here whose meta
+                            // sits under another folder, or a failed delete). If
+                            // a variables sidecar survived, keep its stamps so a
+                            // skipped or failed variables fetch below doesn't
+                            // orphan it: `write_fetched` only refreshes, and
+                            // `node-info` only flags, sidecars it has stamps for.
+                            if let Some(p) = prev {
+                                meta.variables_fetched_at_epoch = p.variables_fetched_at_epoch;
+                                meta.variables_bytes = p.variables_bytes;
+                                meta.variables_error = p.variables_error;
+                                meta.variables_schema_version = p.variables_schema_version;
+                            }
                             meta.version = crate::cmd::file_version(&file);
                             meta.version_checked_at_epoch = Some(now);
                             // Fetch comments alongside the document. Best-effort:
@@ -309,46 +317,33 @@ impl PrefetchArgs {
                             // Local-variables sidecar — paid-tier endpoint.
                             // Skip when disabled (flag, env, or adaptive 403).
                             if !variables_disabled.load(Ordering::Relaxed) {
-                                match fetch_local_variables(cfg, &f.file_key).await {
-                                    Ok(vars) => {
-                                        match full_cache::write_variables(&cache, &f.file_key, &vars) {
-                                            Ok(n) => {
-                                                meta.variables_fetched_at_epoch = Some(now);
-                                                meta.variables_bytes = Some(n);
-                                                meta.variables_schema_version =
-                                                    Some(cache::VARIABLES_SCHEMA_VERSION);
-                                                meta.variables_error = None;
-                                                variables_ok.fetch_add(1, Ordering::Relaxed);
-                                                // Reset the 403 streak on success.
-                                                consecutive_403.store(0, Ordering::Relaxed);
-                                            }
-                                            Err(e) => {
-                                                let msg = format!("write_variables: {e:#}");
-                                                eprintln!(
-                                                    "cache: {} variables: {msg}",
-                                                    f.file_key
-                                                );
-                                                meta.variables_error = Some(msg);
-                                            }
+                                match cache::fetch_variables_into_meta(
+                                    cfg,
+                                    &cache,
+                                    &f.file_key,
+                                    now,
+                                    &mut meta,
+                                )
+                                .await
+                                {
+                                    Ok(()) => {
+                                        variables_ok.fetch_add(1, Ordering::Relaxed);
+                                        // Reset the 403 streak on success.
+                                        consecutive_403.store(0, Ordering::Relaxed);
+                                    }
+                                    Err(msg) if is_variables_forbidden_error(&msg) => {
+                                        variables_403.fetch_add(1, Ordering::Relaxed);
+                                        let n = consecutive_403.fetch_add(1, Ordering::Relaxed) + 1;
+                                        if n >= VARIABLES_403_DISABLE_THRESHOLD
+                                            && !variables_disabled.swap(true, Ordering::Relaxed)
+                                        {
+                                            eprintln!(
+                                                "cache: {VARIABLES_403_DISABLE_THRESHOLD} consecutive 403s on /variables/local — disabling for the rest of this run (account likely lacks Variables REST API access)"
+                                            );
                                         }
                                     }
-                                    Err(e) => {
-                                        let msg = format!("{e:#}");
-                                        meta.variables_error = Some(msg.clone());
-                                        if is_variables_forbidden_error(&msg) {
-                                            variables_403.fetch_add(1, Ordering::Relaxed);
-                                            let n = consecutive_403
-                                                .fetch_add(1, Ordering::Relaxed)
-                                                + 1;
-                                            if n >= VARIABLES_403_DISABLE_THRESHOLD
-                                                && !variables_disabled
-                                                    .swap(true, Ordering::Relaxed)
-                                            {
-                                                eprintln!(
-                                                    "cache: {VARIABLES_403_DISABLE_THRESHOLD} consecutive 403s on /variables/local — disabling for the rest of this run (account likely lacks Variables REST API access)"
-                                                );
-                                            }
-                                        }
+                                    Err(msg) => {
+                                        eprintln!("cache: {} variables: {msg}", f.file_key)
                                     }
                                 }
                             }
