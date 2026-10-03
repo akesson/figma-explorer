@@ -40,6 +40,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   may be out of date. Files that never had variables (every file on other
   plans) make no extra request.
 
+- **New and deleted files show up without a prefetch.** The version check
+  only covers files already in the cache, so a file a designer added to a
+  folder never appeared in `ls` or `find` until the next `cache prefetch`, and
+  a deleted one kept showing. `ls` (root or a folder) and `find` without
+  `--in` now check each configured folder's file list at most once every 5
+  minutes (one request per folder). New files are fetched, files gone from
+  Figma are dropped, and renamed or moved files get their new name or folder.
+  stderr reports what changed. Only folders that already have cached files
+  get new files fetched automatically, so the first `ls` on an empty cache
+  doesn't quietly turn into a full prefetch. `--cache-only` skips the check.
+
 - **`node-info file:N` now shows each named style's value.** Every entry in
   the file summary's `styles` list carries a `value`: a FILL style's hex (or
   its paint list for gradients and stacked paints), a TEXT style's font
