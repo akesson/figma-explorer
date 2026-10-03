@@ -455,6 +455,14 @@ pub struct FileMeta {
     /// fetch wrote it). Probes are skipped within [`VERSION_CHECK_SECS`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version_checked_at_epoch: Option<u64>,
+    /// When [`ensure_fresh`] last failed to refetch this file after seeing a
+    /// changed `version` (e.g. Figma took >30s to start sending a big file).
+    /// Within [`VERSION_CHECK_SECS`] of it the file is neither re-probed nor
+    /// refetched — each command just says it is serving an out-of-date copy —
+    /// so a struggling file costs one timeout per window, not one per
+    /// command. Cleared by any successful fetch (`from_success`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refetch_failed_at_epoch: Option<u64>,
 }
 
 impl FileMeta {
@@ -484,6 +492,7 @@ impl FileMeta {
             variables_schema_version: None,
             version: None,
             version_checked_at_epoch: None,
+            refetch_failed_at_epoch: None,
         }
     }
 
@@ -528,6 +537,7 @@ impl FileMeta {
             variables_schema_version: None,
             version: None,
             version_checked_at_epoch: None,
+            refetch_failed_at_epoch: None,
         }
     }
 }
@@ -1221,11 +1231,23 @@ pub async fn ensure_fresh(
 
     let mut report = FreshReport::default();
     let now = now_epoch();
-    let due: Vec<FileMeta> = file_keys
+    let (backing_off, due): (Vec<FileMeta>, Vec<FileMeta>) = file_keys
         .iter()
         .filter_map(|k| cache.read_meta(k).ok().flatten())
         .filter(|m| version_check_due(m, now))
-        .collect();
+        .partition(|m| {
+            m.refetch_failed_at_epoch
+                .is_some_and(|t| now.saturating_sub(t) < VERSION_CHECK_SECS)
+        });
+    for m in backing_off {
+        let ago = crate::cmd::cache::age(now, m.refetch_failed_at_epoch.unwrap_or(now));
+        eprintln!(
+            "cache: {} changed on Figma but its refetch failed {ago} ago — serving the cached copy, which is out of date (retrying within {}m)",
+            m.name,
+            VERSION_CHECK_SECS / 60
+        );
+        report.unverified.push(m.file_key);
+    }
     if due.is_empty() {
         return report;
     }
@@ -1297,6 +1319,13 @@ pub async fn ensure_fresh(
                     "cache: refetch of {} failed ({e:#}) — serving the cached copy, which is out of date",
                     m.name
                 );
+                // Back off: the next commands in this window warn without
+                // re-probing or waiting on another timeout.
+                let mut m = m;
+                m.refetch_failed_at_epoch = Some(now_epoch());
+                if let Err(we) = cache.write_meta(&m) {
+                    eprintln!("cache: write_meta failed for {}: {we:#}", m.file_key);
+                }
                 report.unverified.push(m.file_key);
             }
         }
@@ -1949,6 +1978,7 @@ mod tests {
             variables_schema_version: None,
             version: None,
             version_checked_at_epoch: None,
+            refetch_failed_at_epoch: None,
         }
     }
 
@@ -2141,6 +2171,7 @@ mod tests {
             variables_schema_version: None,
             version: None,
             version_checked_at_epoch: None,
+            refetch_failed_at_epoch: None,
         }
     }
 
@@ -2516,6 +2547,40 @@ mod tests {
         assert_eq!(meta.status, EntryStatus::Ok);
         assert_eq!(meta.version.as_deref(), Some("v1"));
         assert!(cache.read_file(FRESH_KEY).unwrap().is_some());
+    }
+
+    /// After a failed refetch the file backs off for a window: no probe, no
+    /// second timeout — just a warning — and it retries once the window ends.
+    #[tokio::test]
+    async fn ensure_fresh_failed_refetch_backs_off_then_retries() {
+        let (_td, cache) = seed_fresh(Some("v1"), Some(0));
+        let server = mock_http::serve(vec![(200, meta_body("v2")), (500, "{}".into())]);
+        ensure_fresh(&cfg_for(&server), &cache, &keys()).await;
+        assert_eq!(server.paths().len(), 2);
+        let meta = cache.read_meta(FRESH_KEY).unwrap().unwrap();
+        assert!(meta.refetch_failed_at_epoch.is_some(), "failure recorded");
+
+        // Within the window: zero requests, still reported.
+        let server = mock_http::serve(vec![]);
+        let report = ensure_fresh(&cfg_for(&server), &cache, &keys()).await;
+        assert!(server.paths().is_empty());
+        assert_eq!(report.unverified, keys());
+
+        // Window over: probe + refetch again; success clears the marker.
+        let mut meta = cache.read_meta(FRESH_KEY).unwrap().unwrap();
+        meta.refetch_failed_at_epoch = Some(0);
+        cache.write_meta(&meta).unwrap();
+        let server = mock_http::serve(vec![
+            (200, meta_body("v2")),
+            (200, FILE_V2.into()),
+            (200, r#"{"comments":[]}"#.into()),
+        ]);
+        let report = ensure_fresh(&cfg_for(&server), &cache, &keys()).await;
+        assert_eq!(server.paths().len(), 3);
+        assert_eq!(report.refetched, keys());
+        let meta = cache.read_meta(FRESH_KEY).unwrap().unwrap();
+        assert_eq!(meta.refetch_failed_at_epoch, None);
+        assert_eq!(meta.version.as_deref(), Some("v2"));
     }
 
     #[tokio::test]

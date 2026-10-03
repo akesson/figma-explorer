@@ -369,6 +369,7 @@ mod tests {
             variables_schema_version: None,
             version: None,
             version_checked_at_epoch: None,
+            refetch_failed_at_epoch: None,
         };
         cache.write_meta(&meta).unwrap();
 
