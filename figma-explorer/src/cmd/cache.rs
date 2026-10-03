@@ -260,6 +260,9 @@ impl PrefetchArgs {
                     match fetched {
                         Ok(file) => {
                             // `document` validated present in the fetch chain above.
+                            // Read before the payload write — see the carry-over
+                            // below.
+                            let prev = cache.read_meta(&f.file_key).ok().flatten();
                             let payload = build_cached_file(&f, &file["document"], now);
                             let node_count = payload.node_count as usize;
                             let bytes = match cache.write_file(&f.file_key, &payload) {
@@ -274,6 +277,19 @@ impl PrefetchArgs {
                                 }
                             };
                             let mut meta = FileMeta::from_success(&f, &payload, bytes, now);
+                            // Usually the entry was deleted above, sidecars and
+                            // all, but not always (a file listed here whose meta
+                            // sits under another folder, or a failed delete). If
+                            // a variables sidecar survived, keep its stamps so a
+                            // skipped or failed variables fetch below doesn't
+                            // orphan it: `write_fetched` only refreshes, and
+                            // `node-info` only flags, sidecars it has stamps for.
+                            if let Some(p) = prev {
+                                meta.variables_fetched_at_epoch = p.variables_fetched_at_epoch;
+                                meta.variables_bytes = p.variables_bytes;
+                                meta.variables_error = p.variables_error;
+                                meta.variables_schema_version = p.variables_schema_version;
+                            }
                             meta.version = crate::cmd::file_version(&file);
                             meta.version_checked_at_epoch = Some(now);
                             // Fetch comments alongside the document. Best-effort:
