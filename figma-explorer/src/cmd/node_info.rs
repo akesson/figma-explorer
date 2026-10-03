@@ -180,7 +180,9 @@ impl Args {
             }
             ResolvedTarget::Node {
                 file_synth, meta, ..
-            } if !self.no_comments && opts.wants(Section::Comments) => Some((*file_synth, meta)),
+            } if !self.raw && !self.no_comments && opts.wants(Section::Comments) => {
+                Some((*file_synth, meta))
+            }
             ResolvedTarget::Comment {
                 file_synth, meta, ..
             } => Some((*file_synth, meta)),
@@ -447,6 +449,17 @@ fn emit_comment(
     // (when the requested id is a thread head) or the parent (when it's a
     // reply) without a second lookup.
     let all = cache.read_comments(&meta.file_key)?.unwrap_or_default();
+    // `requested` was captured when the id resolved, before `run` refreshed
+    // the sidecar — re-find it so an edited or resolved head isn't shown
+    // next to the current replies, and a deleted thread isn't shown at all.
+    let requested = all
+        .iter()
+        .find(|c| c.comment_id == requested.comment_id)
+        .ok_or_else(|| {
+            anyhow!(
+                "comment file:{file_synth}:comm:{comm_synth} no longer exists upstream (deleted?)"
+            )
+        })?;
     let synth_state = SynthState::load(cache)?;
     let comment_obj = thread_value(file_synth, &synth_state, &all, requested);
 
