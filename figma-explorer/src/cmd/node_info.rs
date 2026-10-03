@@ -169,6 +169,27 @@ impl Args {
 
         let opts = view_options(&self);
 
+        // Comment activity doesn't change Figma's `version`, so resolving
+        // didn't freshen the comments sidecar — do it here, but only when the
+        // output will actually show comments.
+        let comments_shown = match &target {
+            ResolvedTarget::File { synth, meta, .. }
+                if self.only.is_empty() || self.only.contains(&Section::Comments) =>
+            {
+                Some((*synth, meta))
+            }
+            ResolvedTarget::Node {
+                file_synth, meta, ..
+            } if !self.no_comments && opts.wants(Section::Comments) => Some((*file_synth, meta)),
+            ResolvedTarget::Comment {
+                file_synth, meta, ..
+            } => Some((*file_synth, meta)),
+            _ => None,
+        };
+        if let (Some((file_synth, meta)), false) = (comments_shown, globals.cache_only) {
+            cache::ensure_comments_fresh(cfg, resolver.cache(), &meta.file_key, file_synth).await;
+        }
+
         let payload = match target {
             ResolvedTarget::Root => emit_root(&resolver)?,
             ResolvedTarget::Project { synth, project_id } => {

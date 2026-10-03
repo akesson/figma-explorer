@@ -415,6 +415,13 @@ pub struct FileMeta {
     /// [`COMMENTS_SCHEMA_VERSION`] after every successful sidecar write.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comments_schema_version: Option<u32>,
+    /// Last comments fetch *attempt*, successful or not. Comment activity
+    /// doesn't change Figma's `version`, so [`ensure_fresh`] never notices it;
+    /// [`ensure_comments_fresh`] re-fetches once this is older than
+    /// [`VERSION_CHECK_SECS`]. Stamped on failure too, so an unreachable
+    /// comments endpoint costs one attempt per window, not one per command.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comments_checked_at_epoch: Option<u64>,
     /// Epoch seconds when the full raw-JSON sidecar (`{file_key}.full.json.gz`)
     /// was last written. `None` means it's never been written. Drives the
     /// `node-info` cache-only path: a missing sidecar with `cache_only=true`
@@ -483,6 +490,7 @@ impl FileMeta {
             comments_fingerprint: None,
             comments_error: None,
             comments_schema_version: None,
+            comments_checked_at_epoch: None,
             full_fetched_at_epoch: None,
             full_bytes: None,
             full_schema_version: None,
@@ -528,6 +536,7 @@ impl FileMeta {
             comments_fingerprint: None,
             comments_error: None,
             comments_schema_version: None,
+            comments_checked_at_epoch: None,
             full_fetched_at_epoch: None,
             full_bytes: None,
             full_schema_version: None,
@@ -1559,6 +1568,7 @@ pub async fn fetch_comments_into_meta(
     now: u64,
     meta: &mut FileMeta,
 ) {
+    meta.comments_checked_at_epoch = Some(now);
     let url = format!("{}/v1/files/{}/comments", cfg.base_path, file_key);
     let raw_json = match crate::cmd::get_json(cfg, &url).await {
         Ok(v) => v,
@@ -1698,6 +1708,58 @@ pub async fn refresh_file_comments(
     let comments = cache.read_comments(file_key)?.unwrap_or_default();
     intern_comment_synths(cache, file_synth, &comments);
     Ok((comments, meta))
+}
+
+/// Whether `meta`'s comments are due a re-fetch: never attempted, or last
+/// attempted more than [`VERSION_CHECK_SECS`] ago. Metas written before
+/// `comments_checked_at_epoch` existed fall back to the last success.
+pub fn comments_check_due(meta: &FileMeta, now: u64) -> bool {
+    meta.comments_checked_at_epoch
+        .or(meta.comments_fetched_at_epoch)
+        .is_none_or(|t| now.saturating_sub(t) >= VERSION_CHECK_SECS)
+}
+
+/// Keep a file's comments current before a command reads them. Comment
+/// activity doesn't change Figma's `version`, so [`ensure_fresh`] can't see
+/// it; this gives comments their own clock on the same window.
+///
+/// Best-effort, like [`ensure_fresh`]: within the window it does nothing; past
+/// it, it re-fetches once, and a failure keeps the existing sidecar and says
+/// on stderr that it is serving an older copy. Returns whether the sidecar was
+/// rewritten, so a caller holding comments or a meta read earlier reloads.
+pub async fn ensure_comments_fresh(
+    cfg: &Configuration,
+    cache: &CacheDir,
+    file_key: &str,
+    file_synth: u32,
+) -> bool {
+    let Ok(Some(mut meta)) = cache.read_meta(file_key) else {
+        return false;
+    };
+    let now = now_epoch();
+    if meta.status != EntryStatus::Ok || !comments_check_due(&meta, now) {
+        return false;
+    }
+    let before = meta.comments_fetched_at_epoch;
+    fetch_comments_into_meta(cfg, cache, file_key, now, &mut meta).await;
+    if let Err(e) = cache.write_meta(&meta) {
+        eprintln!("cache: write_meta failed for {file_key}: {e:#}");
+    }
+    if meta.comments_error.is_some() {
+        let ago = before
+            .map(|t| format!("fetched {} ago", crate::cmd::cache::age(now, t)))
+            .unwrap_or_else(|| "never fetched".to_owned());
+        eprintln!(
+            "comments: serving the cached comments for {} ({ago}); retrying within {}m",
+            meta.name,
+            VERSION_CHECK_SECS / 60
+        );
+        return false;
+    }
+    if let Ok(Some(comments)) = cache.read_comments(file_key) {
+        intern_comment_synths(cache, file_synth, &comments);
+    }
+    true
 }
 
 /// Intern every comment id from `comments` under `file_synth`. Best-effort —
@@ -1978,6 +2040,7 @@ mod tests {
             comments_fingerprint: None,
             comments_error: None,
             comments_schema_version: None,
+            comments_checked_at_epoch: None,
             full_fetched_at_epoch: None,
             full_bytes: None,
             full_schema_version: None,
@@ -2168,6 +2231,7 @@ mod tests {
             node_count: Some(1),
             bytes: Some(1),
             comments_schema_version: None,
+            comments_checked_at_epoch: None,
             comments_fetched_at_epoch: None,
             comments_fingerprint: None,
             comments_error: None,
@@ -2766,5 +2830,94 @@ mod tests {
         assert!(version_check_due(&m, 1_000 + VERSION_CHECK_SECS));
         m.status = EntryStatus::NotExportable;
         assert!(!version_check_due(&m, 10_000), "only Ok entries");
+    }
+
+    // ── ensure_comments_fresh ───────────────────────────────────────────
+
+    /// `GET /v1/files/K/comments` body with one canvas-level thread `id`.
+    fn comments_body(id: &str) -> String {
+        format!(
+            r#"{{"comments":[{{"id":"{id}","file_key":"K","parent_id":"","message":"m",
+            "user":{{"id":"u","handle":"h","img_url":""}},"created_at":"2026-10-01T00:00:00Z",
+            "resolved_at":null,"client_meta":{{"x":0,"y":0}},"order_id":"1","reactions":[]}}]}}"#
+        )
+    }
+
+    fn comment_ids(cache: &CacheDir) -> Vec<String> {
+        cache
+            .read_comments(FRESH_KEY)
+            .unwrap()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|c| c.comment_id)
+            .collect()
+    }
+
+    /// [`seed_fresh`] plus a comments sidecar holding thread `old`, last
+    /// fetched and checked at `checked_at`.
+    async fn seed_comments(checked_at: u64) -> (TempDir, CacheDir) {
+        let (td, cache) = seed_fresh(Some("v1"), Some(now_epoch()));
+        let mut meta = cache.read_meta(FRESH_KEY).unwrap().unwrap();
+        let server = mock_http::serve(vec![(200, comments_body("old"))]);
+        fetch_comments_into_meta(&cfg_for(&server), &cache, FRESH_KEY, checked_at, &mut meta).await;
+        cache.write_meta(&meta).unwrap();
+        assert_eq!(comment_ids(&cache), ["old"]);
+        (td, cache)
+    }
+
+    #[tokio::test]
+    async fn ensure_comments_fresh_within_window_makes_no_requests() {
+        let (_td, cache) = seed_comments(now_epoch()).await;
+        let server = mock_http::serve(vec![]);
+        assert!(!ensure_comments_fresh(&cfg_for(&server), &cache, FRESH_KEY, 1).await);
+        assert!(server.paths().is_empty());
+    }
+
+    /// The bug this guards: a new comment doesn't change the file's
+    /// `version`, so only the comments clock can pick it up.
+    #[tokio::test]
+    async fn ensure_comments_fresh_refetches_past_window() {
+        let (_td, cache) = seed_comments(0).await;
+        let server = mock_http::serve(vec![(200, comments_body("new"))]);
+        let before = now_epoch();
+        assert!(ensure_comments_fresh(&cfg_for(&server), &cache, FRESH_KEY, 1).await);
+
+        assert_eq!(server.paths(), vec!["/v1/files/K/comments"]);
+        assert_eq!(comment_ids(&cache), ["new"]);
+        let meta = cache.read_meta(FRESH_KEY).unwrap().unwrap();
+        assert!(meta.comments_fetched_at_epoch.unwrap() >= before);
+        assert!(meta.comments_checked_at_epoch.unwrap() >= before);
+    }
+
+    /// A failed fetch keeps the old sidecar and still stamps the attempt, so
+    /// the next command in the window doesn't hit the endpoint again.
+    #[tokio::test]
+    async fn ensure_comments_fresh_failure_keeps_sidecar_and_backs_off() {
+        let (_td, cache) = seed_comments(0).await;
+        let server = mock_http::serve(vec![(500, "{}".into())]);
+        assert!(!ensure_comments_fresh(&cfg_for(&server), &cache, FRESH_KEY, 1).await);
+        assert_eq!(server.paths().len(), 1);
+        assert_eq!(comment_ids(&cache), ["old"], "old sidecar served");
+        let meta = cache.read_meta(FRESH_KEY).unwrap().unwrap();
+        assert_eq!(meta.comments_fetched_at_epoch, Some(0), "success not faked");
+        assert!(meta.comments_error.is_some());
+
+        let server = mock_http::serve(vec![]);
+        assert!(!ensure_comments_fresh(&cfg_for(&server), &cache, FRESH_KEY, 1).await);
+        assert!(server.paths().is_empty(), "backed off for the window");
+    }
+
+    /// Metas from before `comments_checked_at_epoch` fall back to the last
+    /// successful fetch rather than counting as never checked.
+    #[test]
+    fn comments_check_due_falls_back_to_last_fetch() {
+        let (_td, cache) = seed_fresh(Some("v1"), None);
+        let mut meta = cache.read_meta(FRESH_KEY).unwrap().unwrap();
+        let now = 10_000;
+        assert!(comments_check_due(&meta, now), "never fetched");
+        meta.comments_fetched_at_epoch = Some(now - 10);
+        assert!(!comments_check_due(&meta, now));
+        meta.comments_checked_at_epoch = Some(now - VERSION_CHECK_SECS);
+        assert!(comments_check_due(&meta, now), "attempt stamp wins");
     }
 }
