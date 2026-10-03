@@ -243,9 +243,15 @@ impl Args {
 }
 
 /// Warn when the variables sidecar predates the payload: a refetch brought in
-/// a newer document but couldn't refresh its variables. Reads the meta from
+/// a newer document but couldn't refresh its variables (silent when the
+/// env opt-out turned the refresh off). Reads the meta from
 /// disk because `load_full` may have refetched since the target resolved.
 fn warn_if_variables_stale(cache: &CacheDir, file_key: &str) {
+    // `FIGMA_EXPLORER_FETCH_VARIABLES=0` skips the refresh on purpose; saying
+    // it "couldn't" be refreshed would report a failure that didn't happen.
+    if cache::variables_disabled_by_env() {
+        return;
+    }
     if let Ok(Some(meta)) = cache.read_meta(file_key) {
         if cache::variables_predate_payload(&meta) {
             eprintln!(
