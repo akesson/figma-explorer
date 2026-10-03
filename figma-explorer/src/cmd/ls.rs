@@ -155,7 +155,7 @@ pub struct Args {
 
 impl Args {
     pub async fn run(self, cfg: &Configuration, globals: &Globals) -> Result<()> {
-        let resolver = Resolver::new(globals.cache_only)?;
+        let mut resolver = Resolver::new(globals.cache_only)?;
         let format = globals.output;
         let explicit_depth = self.depth;
 
@@ -168,6 +168,7 @@ impl Args {
         let name_filter = name_filter.as_deref();
         match self.id.as_deref() {
             None => {
+                resolver.sync_folders(cfg, None).await;
                 freshen_for_listing(&resolver, cfg, effective_depth(explicit_depth, true), None)
                     .await?;
                 render_root(
@@ -195,6 +196,7 @@ impl Args {
                 match target {
                     ResolvedTarget::Root => {
                         let depth = effective_depth(explicit_depth, true);
+                        resolver.sync_folders(cfg, None).await;
                         freshen_for_listing(&resolver, cfg, depth, None).await?;
                         render_root(
                             &resolver,
@@ -209,6 +211,7 @@ impl Args {
                     }
                     ResolvedTarget::Project { synth, project_id } => {
                         let depth = effective_depth(explicit_depth, false);
+                        resolver.sync_folders(cfg, Some(&project_id)).await;
                         freshen_for_listing(&resolver, cfg, depth, Some(&project_id)).await?;
                         render_project(
                             &resolver,

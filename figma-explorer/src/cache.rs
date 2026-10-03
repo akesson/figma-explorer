@@ -603,6 +603,33 @@ impl CacheDir {
         self.root.join("teams")
     }
 
+    /// Per-folder listing stamps (`folders/{folder_id}.json`) — when each
+    /// configured folder's file list was last checked against Figma. See
+    /// [`sync_folders`].
+    pub fn folders_dir(&self) -> PathBuf {
+        self.root.join("folders")
+    }
+
+    fn folder_stamp_path(&self, folder_id: &str) -> PathBuf {
+        self.folders_dir().join(format!("{folder_id}.json"))
+    }
+
+    /// When `folder_id`'s file list was last checked. Lenient: a missing or
+    /// unreadable stamp reads as never, which only costs one listing request.
+    pub fn folder_listed_at(&self, folder_id: &str) -> Option<u64> {
+        let bytes = fs::read(self.folder_stamp_path(folder_id)).ok()?;
+        serde_json::from_slice::<FolderStamp>(&bytes)
+            .ok()
+            .map(|s| s.listed_at_epoch)
+    }
+
+    pub fn stamp_folder_listed(&self, folder_id: &str, now: u64) -> Result<()> {
+        let bytes = serde_json::to_vec(&FolderStamp {
+            listed_at_epoch: now,
+        })?;
+        atomic_write(&self.folder_stamp_path(folder_id), &bytes)
+    }
+
     /// Path of the gzipped team-library catalog sidecar — the published
     /// components, component sets, and styles across a team's libraries.
     pub fn catalog_path(&self, team_id: &str) -> PathBuf {
@@ -1388,6 +1415,170 @@ pub fn note_unverified_cache_only<'a>(metas: impl IntoIterator<Item = &'a FileMe
             oldest.name
         );
     }
+}
+
+#[derive(Serialize, Deserialize)]
+struct FolderStamp {
+    listed_at_epoch: u64,
+}
+
+/// The folders this process may list and prune: `FIGMA_PROJECTS_IDS`.
+/// Folders another repo's cache entries belong to are shown but never
+/// synced — the same jurisdiction rule `cache prefetch` follows.
+pub fn configured_folder_ids() -> Vec<String> {
+    parse_project_ids_env()
+}
+
+/// What [`sync_folders`] changed, by file name.
+#[derive(Debug, Default)]
+pub struct FolderSyncReport {
+    pub added: Vec<String>,
+    pub removed: Vec<String>,
+    /// Files whose name or folder changed (meta updated in place).
+    pub updated: Vec<String>,
+}
+
+/// Keep the cached file *list* of `folder_ids` in step with Figma.
+/// [`ensure_fresh`] keeps each cached file current, but only for files the
+/// cache already knows: a file added to a folder never appeared, and a
+/// deleted one lingered, until the next `cache prefetch`.
+///
+/// At most once per [`VERSION_CHECK_SECS`] per folder, lists the folder (one
+/// request) and, for files in it:
+/// - not cached yet → fetched (bounded concurrency), but only in folders
+///   that already have cached files — an empty cache is `cache prefetch`'s
+///   job;
+/// - cached under a synced folder but no longer listed → entry deleted;
+/// - renamed or moved between folders → meta name/folder updated in place.
+///
+/// Changed `last_modified` is deliberately ignored — the version check owns
+/// content freshness. A failed listing leaves the folder's cache as it was
+/// and is stamped like a success, so a broken folder costs one request per
+/// window; the caller keeps serving what is cached.
+pub async fn sync_folders(
+    cfg: &Configuration,
+    cache: &CacheDir,
+    folder_ids: &[String],
+) -> FolderSyncReport {
+    use futures::stream::{self, StreamExt};
+    use std::collections::{HashMap, HashSet};
+
+    let mut report = FolderSyncReport::default();
+    let now = now_epoch();
+    let due: Vec<String> = folder_ids
+        .iter()
+        .filter(|id| {
+            cache
+                .folder_listed_at(id)
+                .is_none_or(|t| now.saturating_sub(t) >= VERSION_CHECK_SECS)
+        })
+        .cloned()
+        .collect();
+    if due.is_empty() {
+        return report;
+    }
+
+    let listings: Vec<(String, Result<Vec<FileRef>>)> =
+        stream::iter(due.into_iter().map(|id| async {
+            let r = list_project_files(cfg, std::slice::from_ref(&id)).await;
+            (id, r)
+        }))
+        .buffer_unordered(PROBE_CONCURRENCY)
+        .collect()
+        .await;
+
+    let mut synced: HashSet<String> = HashSet::new();
+    let mut listed: Vec<FileRef> = Vec::new();
+    for (id, r) in listings {
+        match r {
+            Ok(refs) => {
+                synced.insert(id.clone());
+                listed.extend(refs);
+            }
+            Err(e) => eprintln!(
+                "cache: couldn't list folder {id} ({e:#}) — showing its cached files, which may be out of date"
+            ),
+        }
+        if let Err(e) = cache.stamp_folder_listed(&id, now) {
+            eprintln!("cache: stamping folder {id} failed: {e:#}");
+        }
+    }
+
+    let by_key: HashMap<&str, &FileRef> = listed.iter().map(|r| (r.file_key.as_str(), r)).collect();
+    let metas = cache.list_metas().unwrap_or_default();
+    let known: HashSet<&str> = metas.iter().map(|m| m.file_key.as_str()).collect();
+    for m in &metas {
+        match by_key.get(m.file_key.as_str()) {
+            Some(r)
+                if m.name != r.name
+                    || m.project_id != r.project_id
+                    || m.project_name != r.project_name =>
+            {
+                let mut updated = m.clone();
+                updated.name = r.name.clone();
+                updated.project_id = r.project_id.clone();
+                updated.project_name = r.project_name.clone();
+                match cache.write_meta(&updated) {
+                    Ok(()) => report.updated.push(r.name.clone()),
+                    Err(e) => eprintln!("cache: write_meta failed for {}: {e:#}", m.file_key),
+                }
+            }
+            Some(_) => {}
+            None if synced.contains(&m.project_id) => match cache.delete_entry(&m.file_key) {
+                Ok(()) => report.removed.push(m.name.clone()),
+                Err(e) => eprintln!("cache: removing {} failed: {e:#}", m.file_key),
+            },
+            None => {}
+        }
+    }
+
+    // Only folders the cache already holds files for: syncing keeps a
+    // populated cache current, it doesn't populate one. Otherwise the first
+    // `ls` on a fresh (or just-cleared) cache would quietly become a full
+    // `cache prefetch`.
+    let populated: HashSet<&str> = metas
+        .iter()
+        .filter(|m| m.status == EntryStatus::Ok)
+        .map(|m| m.project_id.as_str())
+        .collect();
+    let new: Vec<&FileRef> = listed
+        .iter()
+        .filter(|r| {
+            !known.contains(r.file_key.as_str()) && populated.contains(r.project_id.as_str())
+        })
+        .collect();
+    if !report.removed.is_empty() {
+        eprintln!(
+            "cache: {} removed from Figma folders ({}) — dropped from the cache",
+            count_files(report.removed.len()),
+            name_list(report.removed.iter().map(String::as_str), 5)
+        );
+    }
+    if new.is_empty() {
+        return report;
+    }
+    eprintln!(
+        "cache: {} added to Figma folders ({}) — fetching…",
+        count_files(new.len()),
+        name_list(new.iter().map(|r| r.name.as_str()), 5)
+    );
+    let fetched: Vec<(&FileRef, Result<CachedFile>)> =
+        stream::iter(new.into_iter().map(|r| async move {
+            (
+                r,
+                fetch_and_cache(cfg, cache, &r.file_key, Some(r), now_epoch()).await,
+            )
+        }))
+        .buffer_unordered(REFETCH_CONCURRENCY)
+        .collect()
+        .await;
+    for (r, res) in fetched {
+        match res {
+            Ok(_) => report.added.push(r.name.clone()),
+            Err(e) => eprintln!("cache: fetching new file {} failed: {e:#}", r.name),
+        }
+    }
+    report
 }
 
 /// Refetch a file that already has a meta, keeping its project context.
@@ -3009,5 +3200,134 @@ mod tests {
         assert!(!comments_check_due(&meta, now));
         meta.comments_checked_at_epoch = Some(now - VERSION_CHECK_SECS);
         assert!(comments_check_due(&meta, now), "attempt stamp wins");
+    }
+
+    // ── sync_folders ────────────────────────────────────────────────────
+
+    /// `GET /v2/folders/10/files` body listing `(key, name)` pairs.
+    fn folder_body(files: &[(&str, &str)]) -> String {
+        let files: Vec<Value> = files
+            .iter()
+            .map(|(k, n)| json!({"key": k, "name": n, "thumbnail_url": "", "last_modified": "t"}))
+            .collect();
+        json!({"name": "P", "files": files}).to_string()
+    }
+
+    fn folders() -> Vec<String> {
+        vec!["10".to_owned()]
+    }
+
+    #[tokio::test]
+    async fn sync_folders_within_window_makes_no_requests() {
+        let (_td, cache) = seed_fresh(Some("v1"), Some(now_epoch()));
+        cache.stamp_folder_listed("10", now_epoch()).unwrap();
+        let server = mock_http::serve(vec![]);
+        let report = sync_folders(&cfg_for(&server), &cache, &folders()).await;
+        assert!(server.paths().is_empty());
+        assert!(report.added.is_empty() && report.removed.is_empty());
+    }
+
+    /// The bug this guards: a file added to a folder on Figma never showed up
+    /// until the next `cache prefetch`.
+    #[tokio::test]
+    async fn sync_folders_fetches_new_file_in_populated_folder() {
+        let (_td, cache) = seed_fresh(Some("v1"), Some(now_epoch()));
+        let server = mock_http::serve(vec![
+            (200, folder_body(&[("K", "F"), ("N", "New")])),
+            (200, FILE_V2.into()),
+            (200, r#"{"comments":[]}"#.into()),
+        ]);
+        let report = sync_folders(&cfg_for(&server), &cache, &folders()).await;
+
+        assert_eq!(
+            server.paths(),
+            vec![
+                "/v2/folders/10/files",
+                "/v1/files/N",
+                "/v1/files/N/comments"
+            ]
+        );
+        assert_eq!(report.added, ["New"]);
+        let meta = cache.read_meta("N").unwrap().unwrap();
+        assert_eq!(meta.status, EntryStatus::Ok);
+        assert_eq!(meta.project_id, "10");
+        assert!(
+            meta.version_checked_at_epoch.is_some(),
+            "no probe needed next"
+        );
+        assert!(crate::synth::SynthState::load(&cache)
+            .unwrap()
+            .file_synth("N")
+            .is_some());
+        assert!(cache.folder_listed_at("10").is_some());
+    }
+
+    #[tokio::test]
+    async fn sync_folders_drops_removed_and_updates_renamed_files() {
+        let (_td, cache) = seed_fresh(Some("v1"), Some(now_epoch()));
+        // A second cached file in the same folder, about to be deleted.
+        let mut gone = cache.read_meta(FRESH_KEY).unwrap().unwrap();
+        gone.file_key = "G".into();
+        gone.name = "Gone".into();
+        cache.write_meta(&gone).unwrap();
+
+        let server = mock_http::serve(vec![(200, folder_body(&[("K", "Renamed")]))]);
+        let report = sync_folders(&cfg_for(&server), &cache, &folders()).await;
+
+        assert_eq!(server.paths().len(), 1);
+        assert_eq!(report.removed, ["Gone"]);
+        assert!(cache.read_meta("G").unwrap().is_none());
+        assert_eq!(report.updated, ["Renamed"]);
+        let meta = cache.read_meta(FRESH_KEY).unwrap().unwrap();
+        assert_eq!(meta.name, "Renamed");
+        assert!(
+            cache.read_file(FRESH_KEY).unwrap().is_some(),
+            "not refetched"
+        );
+    }
+
+    /// Syncing keeps a populated cache current; it never turns `ls` on an
+    /// empty cache into a full prefetch.
+    #[tokio::test]
+    async fn sync_folders_leaves_unpopulated_folder_to_prefetch() {
+        let td = TempDir::new().unwrap();
+        let cache = CacheDir::new(td.path());
+        cache.ensure().unwrap();
+        let server = mock_http::serve(vec![(200, folder_body(&[("N", "New")]))]);
+        let report = sync_folders(&cfg_for(&server), &cache, &folders()).await;
+        assert_eq!(server.paths(), vec!["/v2/folders/10/files"]);
+        assert!(report.added.is_empty());
+        assert!(cache.read_meta("N").unwrap().is_none());
+    }
+
+    /// A failed listing changes nothing — no file is treated as removed — and
+    /// backs off for the window.
+    #[tokio::test]
+    async fn sync_folders_listing_failure_keeps_cache_and_backs_off() {
+        let (_td, cache) = seed_fresh(Some("v1"), Some(now_epoch()));
+        let server = mock_http::serve(vec![(500, "{}".into())]);
+        let report = sync_folders(&cfg_for(&server), &cache, &folders()).await;
+        assert!(report.removed.is_empty());
+        assert!(cache.read_meta(FRESH_KEY).unwrap().is_some());
+
+        let server = mock_http::serve(vec![]);
+        sync_folders(&cfg_for(&server), &cache, &folders()).await;
+        assert!(server.paths().is_empty(), "backed off for the window");
+    }
+
+    /// Files cached under folders outside the synced set (another repo's
+    /// `FIGMA_PROJECTS_IDS`) are never pruned.
+    #[tokio::test]
+    async fn sync_folders_leaves_other_folders_alone() {
+        let (_td, cache) = seed_fresh(Some("v1"), Some(now_epoch()));
+        let mut other = cache.read_meta(FRESH_KEY).unwrap().unwrap();
+        other.file_key = "O".into();
+        other.project_id = "20".into();
+        cache.write_meta(&other).unwrap();
+
+        let server = mock_http::serve(vec![(200, folder_body(&[("K", "F")]))]);
+        let report = sync_folders(&cfg_for(&server), &cache, &folders()).await;
+        assert!(report.removed.is_empty());
+        assert!(cache.read_meta("O").unwrap().is_some());
     }
 }

@@ -144,6 +144,28 @@ impl Resolver {
         }
     }
 
+    /// Bring the cached file lists of the configured folders up to date
+    /// ([`cache::sync_folders`]) before a listing or cross-file sweep reads
+    /// them — all configured folders, or just `folder_id` when it is one.
+    /// No-op under `--cache-only`. Reloads the synth state when files were
+    /// added, so their freshly interned `file:N` ids render.
+    pub async fn sync_folders(&mut self, cfg: &Configuration, folder_id: Option<&str>) {
+        if self.cache_only {
+            return;
+        }
+        let mut folders = cache::configured_folder_ids();
+        if let Some(id) = folder_id {
+            folders.retain(|f| f == id);
+        }
+        let report = cache::sync_folders(cfg, &self.cache, &folders).await;
+        if !report.added.is_empty() {
+            match SynthState::load(&self.cache) {
+                Ok(s) => self.synth = s,
+                Err(e) => eprintln!("cache: reloading synth state failed: {e:#}"),
+            }
+        }
+    }
+
     /// Build the node index on first call, cache it for the rest of the
     /// invocation. Errors from index construction surface as [`ResolveError::Internal`].
     pub fn node_index(&self) -> Result<&NodeIndex, ResolveError> {

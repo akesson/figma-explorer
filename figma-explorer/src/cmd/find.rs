@@ -53,7 +53,7 @@ pub struct Args {
 
 impl Args {
     pub async fn run(self, cfg: &Configuration, globals: &Globals) -> Result<()> {
-        let resolver = Resolver::new(globals.cache_only)?;
+        let mut resolver = Resolver::new(globals.cache_only)?;
         let format = globals.output;
         // `--in <ID>` is the global scope override; `find` reads it from
         // there rather than reintroducing a per-command flag.
@@ -142,7 +142,9 @@ impl Args {
             None => {
                 // No scope — search every cached file. Per-file results are
                 // unbounded here so a single file can't monopolize the global
-                // top-N via score ties.
+                // top-N via score ties. Sync the folder lists first so files
+                // added on Figma since the last look are searched too.
+                resolver.sync_folders(cfg, None).await;
                 let synth = resolver.synth();
                 let metas = resolver.cache().list_metas()?;
                 resolver.freshen(cfg, &metas).await;

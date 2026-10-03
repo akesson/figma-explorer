@@ -130,6 +130,14 @@ impl PrefetchArgs {
 
         // (1) Pull the listing for every configured project.
         let listing: Vec<FileRef> = cache::list_project_files(cfg, &self.project_ids).await?;
+        // This listing is as fresh as `sync_folders`' own — stamp it so the
+        // next `ls`/`find` doesn't re-list every folder straight away.
+        let listed_at = cache::now_epoch();
+        for pid in &self.project_ids {
+            if let Err(e) = cache_dir.stamp_folder_listed(pid, listed_at) {
+                eprintln!("cache: stamping folder {pid} failed: {e:#}");
+            }
+        }
         let listing_keys: HashSet<String> = listing.iter().map(|f| f.file_key.clone()).collect();
         let listing_by_key: std::collections::HashMap<String, &FileRef> =
             listing.iter().map(|f| (f.file_key.clone(), f)).collect();
@@ -756,13 +764,17 @@ pub(crate) fn age(now: u64, then: u64) -> String {
     }
 }
 
-/// Sweep every per-file sidecar and every team-scoped catalog sidecar from
-/// the cache. `synth.json` is intentionally left intact so synth IDs stay
+/// Sweep every per-file sidecar, every team-scoped catalog sidecar, and every
+/// folder listing stamp from the cache. `synth.json` is intentionally left intact so synth IDs stay
 /// stable across a clear. Returns `(deleted, errors)`.
 fn clear_all_sidecars(cache_dir: &CacheDir) -> Result<(usize, usize)> {
     let mut deleted = 0usize;
     let mut errors = 0usize;
-    for dir in [cache_dir.files_dir(), cache_dir.teams_dir()] {
+    for dir in [
+        cache_dir.files_dir(),
+        cache_dir.teams_dir(),
+        cache_dir.folders_dir(),
+    ] {
         if !dir.exists() {
             continue;
         }
@@ -949,10 +961,15 @@ mod tests {
         std::fs::write(cache.meta_path("abc"), b"{}").unwrap();
         std::fs::write(cache.file_path("abc"), b"payload").unwrap();
         std::fs::write(cache.catalog_path("99"), b"catalog").unwrap();
+        cache.stamp_folder_listed("10", 1).unwrap();
 
         let (deleted, errors) = clear_all_sidecars(&cache).unwrap();
         assert_eq!(errors, 0);
-        assert_eq!(deleted, 3, "both per-file sidecars and the team catalog");
+        assert_eq!(
+            deleted, 4,
+            "both per-file sidecars, the team catalog, and the folder stamp"
+        );
+        assert_eq!(cache.folder_listed_at("10"), None);
         assert!(!cache.meta_path("abc").exists());
         assert!(!cache.file_path("abc").exists());
         assert!(!cache.catalog_path("99").exists());
