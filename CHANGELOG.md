@@ -31,6 +31,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   waits for the next 5-minute window. `find` and `ls` still read the cached
   comments as-is, since they span every file.
 
+- **Local variables are refreshed with the file.** On accounts with the
+  Variables REST API (Enterprise), the cached variables were only re-fetched
+  by `cache prefetch`, so after a designer's change `node-info` could pair
+  the new design with old variable values. A file that already has cached
+  variables now re-fetches them whenever the file itself is refetched. If
+  that fails, the old values are kept and `node-info` says on stderr that they
+  may be out of date. Files that never had variables (every file on other
+  plans) make no extra request.
+
 - **`node-info file:N` now shows each named style's value.** Every entry in
   the file summary's `styles` list carries a `value`: a FILL style's hex (or
   its paint list for gradients and stacked paints), a TEXT style's font

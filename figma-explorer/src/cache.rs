@@ -1170,6 +1170,16 @@ async fn write_fetched(
     // the tree refresh. Comments are pre-associated against the just-written
     // tree.
     fetch_comments_into_meta(cfg, cache, file_key, now, &mut meta).await;
+    // The variables sidecar describes the same document, so refresh it with
+    // the payload — but only for files that have had one: everywhere else
+    // the endpoint is a 403 (it's Enterprise-only), and probing it on every
+    // refetch would be one wasted request each. A failure keeps the old
+    // sidecar; `node-info` warns that it predates the payload.
+    if meta.variables_fetched_at_epoch.is_some() && !variables_disabled_by_env() {
+        if let Err(msg) = fetch_variables_into_meta(cfg, cache, file_key, now, &mut meta).await {
+            eprintln!("cache: {file_key} variables: {msg}");
+        }
+    }
     cache.write_meta(&meta)?;
     // Intern synth IDs so downstream commands (`ls`, etc.) can render
     // qualified `file:N:x:y` / `file:N:comm:M` lines. File synth is assigned
@@ -1708,6 +1718,52 @@ pub async fn refresh_file_comments(
     let comments = cache.read_comments(file_key)?.unwrap_or_default();
     intern_comment_synths(cache, file_synth, &comments);
     Ok((comments, meta))
+}
+
+/// `FIGMA_EXPLORER_FETCH_VARIABLES=0` turns off every variables fetch —
+/// `cache prefetch` and the refetch in [`write_fetched`] alike. Any other
+/// value (or none) leaves them on.
+pub fn variables_disabled_by_env() -> bool {
+    std::env::var("FIGMA_EXPLORER_FETCH_VARIABLES").is_ok_and(|s| s.trim() == "0")
+}
+
+/// Fetch `file_key`'s local variables and write the `.variables.json`
+/// sidecar. On success stamps `meta` and clears `variables_error`; on failure
+/// leaves any prior sidecar (and its stamps) untouched, records the error on
+/// `meta`, and returns it for the caller to report (`cache prefetch` counts
+/// 403s rather than printing each).
+pub async fn fetch_variables_into_meta(
+    cfg: &Configuration,
+    cache: &CacheDir,
+    file_key: &str,
+    now: u64,
+    meta: &mut FileMeta,
+) -> std::result::Result<(), String> {
+    let written = match crate::cmd::fetch_local_variables(cfg, file_key).await {
+        Ok(vars) => crate::full_cache::write_variables(cache, file_key, &vars)
+            .map_err(|e| format!("write_variables: {e:#}")),
+        Err(e) => Err(format!("{e:#}")),
+    };
+    match written {
+        Ok(n) => {
+            meta.variables_fetched_at_epoch = Some(now);
+            meta.variables_bytes = Some(n);
+            meta.variables_schema_version = Some(VARIABLES_SCHEMA_VERSION);
+            meta.variables_error = None;
+            Ok(())
+        }
+        Err(msg) => {
+            meta.variables_error = Some(msg.clone());
+            Err(msg)
+        }
+    }
+}
+
+/// Whether the variables sidecar was written before the current payload —
+/// a refetch brought in a newer document but couldn't refresh variables.
+pub fn variables_predate_payload(meta: &FileMeta) -> bool {
+    meta.variables_fetched_at_epoch
+        .is_some_and(|t| t < meta.cached_at_epoch)
 }
 
 /// Whether `meta`'s comments are due a re-fetch: never attempted, or last
@@ -2742,34 +2798,68 @@ mod tests {
         assert!(meta.version_checked_at_epoch.unwrap() >= before);
     }
 
-    /// The variables sidecar isn't part of a file refetch and stays on disk,
-    /// so the rewritten meta must keep pointing at it.
-    #[tokio::test]
-    async fn refetch_keeps_variables_stamps() {
-        let (_td, cache) = seed_fresh(Some("v1"), Some(0));
+    /// [`seed_fresh`] at `v1` (version check due) with a variables sidecar
+    /// written at epoch 0, before the payload's `cached_at_epoch`.
+    fn seed_with_variables() -> (TempDir, CacheDir) {
+        let (td, cache) = seed_fresh(Some("v1"), Some(0));
+        crate::full_cache::write_variables(&cache, FRESH_KEY, &json!({"old": true})).unwrap();
         let mut meta = cache.read_meta(FRESH_KEY).unwrap().unwrap();
-        meta.variables_fetched_at_epoch = Some(7);
+        meta.variables_fetched_at_epoch = Some(0);
         meta.variables_bytes = Some(42);
         meta.variables_schema_version = Some(VARIABLES_SCHEMA_VERSION);
         cache.write_meta(&meta).unwrap();
+        (td, cache)
+    }
 
+    /// A file that has a variables sidecar gets it refreshed along with the
+    /// payload, so variable values never describe an older document.
+    #[tokio::test]
+    async fn refetch_refreshes_existing_variables_sidecar() {
+        let (_td, cache) = seed_with_variables();
         let server = mock_http::serve(vec![
             (200, meta_body("v2")),
             (200, FILE_V2.into()),
             (200, r#"{"comments":[]}"#.into()),
+            (200, r#"{"meta":{"variables":{"new":1}}}"#.into()),
         ]);
         let report = ensure_fresh(&cfg_for(&server), &cache, &keys()).await;
-        assert_eq!(server.paths().len(), 3);
+        assert_eq!(server.paths()[3], "/v1/files/K/variables/local");
         assert_eq!(report.refetched, keys());
 
         let meta = cache.read_meta(FRESH_KEY).unwrap().unwrap();
         assert_eq!(meta.version.as_deref(), Some("v2"));
-        assert_eq!(meta.variables_fetched_at_epoch, Some(7));
+        assert_eq!(meta.variables_fetched_at_epoch, Some(meta.cached_at_epoch));
+        assert!(!variables_predate_payload(&meta));
+        let vars = crate::full_cache::read_variables(&cache, FRESH_KEY)
+            .unwrap()
+            .unwrap();
+        assert_eq!(vars["meta"]["variables"]["new"], 1);
+    }
+
+    /// A failed variables fetch doesn't fail the refetch: the old sidecar and
+    /// its stamps stay, and the meta shows they predate the new payload.
+    #[tokio::test]
+    async fn refetch_keeps_old_variables_when_their_fetch_fails() {
+        let (_td, cache) = seed_with_variables();
+        let server = mock_http::serve(vec![
+            (200, meta_body("v2")),
+            (200, FILE_V2.into()),
+            (200, r#"{"comments":[]}"#.into()),
+            (500, "{}".into()),
+        ]);
+        let report = ensure_fresh(&cfg_for(&server), &cache, &keys()).await;
+        assert_eq!(report.refetched, keys());
+
+        let meta = cache.read_meta(FRESH_KEY).unwrap().unwrap();
+        assert_eq!(meta.version.as_deref(), Some("v2"));
+        assert_eq!(meta.variables_fetched_at_epoch, Some(0));
         assert_eq!(meta.variables_bytes, Some(42));
-        assert_eq!(
-            meta.variables_schema_version,
-            Some(VARIABLES_SCHEMA_VERSION)
-        );
+        assert!(meta.variables_error.is_some());
+        assert!(variables_predate_payload(&meta));
+        let vars = crate::full_cache::read_variables(&cache, FRESH_KEY)
+            .unwrap()
+            .unwrap();
+        assert_eq!(vars["old"], true);
     }
 
     #[test]
