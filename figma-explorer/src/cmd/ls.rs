@@ -404,15 +404,27 @@ async fn freshen_for_listing(
     if depth < 2 {
         return Ok(());
     }
-    let metas: Vec<FileMeta> = resolver
-        .cache()
-        .list_metas()?
-        .into_iter()
-        .filter(|m| m.status == EntryStatus::Ok)
-        .filter(|m| project_id.is_none_or(|p| m.project_id == p))
-        .collect();
-    resolver.freshen(cfg, &metas).await;
+    let metas = resolver.cache().list_metas()?;
+    let shown = listed_metas(resolver.synth(), &metas, project_id);
+    resolver.freshen(cfg, &shown).await;
     Ok(())
+}
+
+/// The file metas a root (`project_id = None`) or project listing actually
+/// renders. Root goes through [`root_groups`], so URL-fetched files (no
+/// project) — which the root listing never shows — aren't probed for it.
+fn listed_metas(synth: &SynthState, metas: &[FileMeta], project_id: Option<&str>) -> Vec<FileMeta> {
+    match project_id {
+        None => root_groups(synth, metas)
+            .into_iter()
+            .flat_map(|(_, _, _, files)| files.into_iter().map(|(_, m)| m))
+            .collect(),
+        Some(p) => metas
+            .iter()
+            .filter(|m| m.status == EntryStatus::Ok && m.project_id == p)
+            .cloned()
+            .collect(),
+    }
 }
 
 /// Root listing — projects + their files, recursing into each file's
@@ -1340,6 +1352,35 @@ mod tests {
         let groups = root_groups(&synth, &metas);
         assert_eq!(groups.len(), 1, "empty folder omitted: {groups:?}");
         assert_eq!((groups[0].0, groups[0].2.as_str()), (1, "Desktop"));
+    }
+
+    /// Root listings only render files grouped under a project, so only
+    /// those get version-checked — not URL-fetched files with no project.
+    #[test]
+    fn listed_metas_root_skips_files_without_a_project() {
+        let mut synth = SynthState::default();
+        synth.intern_project("77195660");
+        synth.intern_file("in-folder");
+        synth.intern_file("from-url");
+        let doc = json!({"id": "0:0", "type": "DOCUMENT"});
+        let meta = |key: &str, project: &str| {
+            let r = FileRef {
+                file_key: key.into(),
+                name: key.into(),
+                last_modified: "t".into(),
+                project_id: project.into(),
+                project_name: "Desktop".into(),
+            };
+            FileMeta::from_success(&r, &build_cached_file(&r, &doc, 0), 0, 0)
+        };
+        let metas = vec![meta("in-folder", "77195660"), meta("from-url", "")];
+
+        let keys = |v: Vec<FileMeta>| v.into_iter().map(|m| m.file_key).collect::<Vec<_>>();
+        assert_eq!(keys(listed_metas(&synth, &metas, None)), vec!["in-folder"]);
+        assert_eq!(
+            keys(listed_metas(&synth, &metas, Some("77195660"))),
+            vec!["in-folder"]
+        );
     }
 
     /// End-to-end check of the spine: build a fixture cache + synth state,

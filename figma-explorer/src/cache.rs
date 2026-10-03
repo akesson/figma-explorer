@@ -1130,9 +1130,18 @@ async fn write_fetched(
         project_id,
         project_name,
     };
+    // Read before the payload write: the variables sidecar isn't part of this
+    // response and stays on disk, so its stamps must survive the new meta.
+    let prev = cache.read_meta(file_key).ok().flatten();
     let payload = build_cached_file(&synthetic_ref, doc, now);
     let bytes = cache.write_file(file_key, &payload)?;
     let mut meta = FileMeta::from_success(&synthetic_ref, &payload, bytes, now);
+    if let Some(p) = prev {
+        meta.variables_fetched_at_epoch = p.variables_fetched_at_epoch;
+        meta.variables_bytes = p.variables_bytes;
+        meta.variables_error = p.variables_error;
+        meta.variables_schema_version = p.variables_schema_version;
+    }
     meta.version = crate::cmd::file_version(file);
     meta.version_checked_at_epoch = Some(now);
     // Write `node-info`'s full-JSON sidecar from this same response so it can
@@ -2622,11 +2631,16 @@ mod tests {
     #[tokio::test]
     async fn ensure_fresh_access_error_backs_off() {
         let (_td, cache) = seed_fresh(Some("v1"), Some(0));
-        let server = mock_http::serve(vec![(403, r#"{"status":403,"err":"Forbidden"}"#.into())]);
+        let forbidden = r#"{"status":403,"err":"Forbidden"}"#;
+        // `/meta` 403s, and so does the `?depth=1` fallback: no access.
+        let server = mock_http::serve(vec![(403, forbidden.into()), (403, forbidden.into())]);
         let before = now_epoch();
         let report = ensure_fresh(&cfg_for(&server), &cache, &keys()).await;
 
-        assert_eq!(server.paths(), vec!["/v1/files/K/meta"]);
+        assert_eq!(
+            server.paths(),
+            vec!["/v1/files/K/meta", "/v1/files/K?depth=1"]
+        );
         assert_eq!(report.unverified, keys());
         let meta = cache.read_meta(FRESH_KEY).unwrap().unwrap();
         assert!(
@@ -2637,6 +2651,60 @@ mod tests {
             meta.version.as_deref(),
             Some("v1"),
             "still the cached version"
+        );
+    }
+
+    /// A token without `file_metadata:read` gets a scope 403 from `/meta` but
+    /// can still read the file: the probe falls back to `?depth=1` and works.
+    #[tokio::test]
+    async fn ensure_fresh_scope_403_falls_back_to_depth_1() {
+        let (_td, cache) = seed_fresh(Some("v1"), Some(0));
+        let server = mock_http::serve(vec![
+            (403, V1_SCOPE_403.into()),
+            (
+                200,
+                r#"{"name":"F","version":"v1","document":{"id":"0:0","type":"DOCUMENT"}}"#.into(),
+            ),
+        ]);
+        let before = now_epoch();
+        let report = ensure_fresh(&cfg_for(&server), &cache, &keys()).await;
+
+        assert_eq!(
+            server.paths(),
+            vec!["/v1/files/K/meta", "/v1/files/K?depth=1"]
+        );
+        assert!(report.unverified.is_empty() && report.refetched.is_empty());
+        let meta = cache.read_meta(FRESH_KEY).unwrap().unwrap();
+        assert!(meta.version_checked_at_epoch.unwrap() >= before);
+    }
+
+    /// The variables sidecar isn't part of a file refetch and stays on disk,
+    /// so the rewritten meta must keep pointing at it.
+    #[tokio::test]
+    async fn refetch_keeps_variables_stamps() {
+        let (_td, cache) = seed_fresh(Some("v1"), Some(0));
+        let mut meta = cache.read_meta(FRESH_KEY).unwrap().unwrap();
+        meta.variables_fetched_at_epoch = Some(7);
+        meta.variables_bytes = Some(42);
+        meta.variables_schema_version = Some(VARIABLES_SCHEMA_VERSION);
+        cache.write_meta(&meta).unwrap();
+
+        let server = mock_http::serve(vec![
+            (200, meta_body("v2")),
+            (200, FILE_V2.into()),
+            (200, r#"{"comments":[]}"#.into()),
+        ]);
+        let report = ensure_fresh(&cfg_for(&server), &cache, &keys()).await;
+        assert_eq!(server.paths().len(), 3);
+        assert_eq!(report.refetched, keys());
+
+        let meta = cache.read_meta(FRESH_KEY).unwrap().unwrap();
+        assert_eq!(meta.version.as_deref(), Some("v2"));
+        assert_eq!(meta.variables_fetched_at_epoch, Some(7));
+        assert_eq!(meta.variables_bytes, Some(42));
+        assert_eq!(
+            meta.variables_schema_version,
+            Some(VARIABLES_SCHEMA_VERSION)
         );
     }
 

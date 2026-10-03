@@ -55,6 +55,8 @@ Get a personal access token at https://www.figma.com/developers/api#access-token
 export FIGMA_TOKEN=figd_...
 ```
 
+Give the token the **File content** (`file_content:read`) and **File metadata** (`file_metadata:read`) read scopes. The metadata scope powers the cheap freshness check (`/v1/files/{key}/meta`); without it, checks fall back to a slower depth-limited file request.
+
 Optional environment variables:
 
 - `FIGMA_PROJECTS_IDS` — comma-separated Figma folder ids (Figma renamed "projects" to "folders" in August 2026; the numeric ids are unchanged, so existing values keep working); needed by `cache prefetch`.

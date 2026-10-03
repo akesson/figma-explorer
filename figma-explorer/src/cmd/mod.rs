@@ -125,11 +125,22 @@ pub async fn fetch_local_variables(
 /// change probe behind `cache::ensure_fresh`. Raw JSON for the same reason as
 /// `fetch_file_json`: the typed `get_file_meta` model has required fields
 /// (`creator`, `editorType`, …) we don't need and can't vouch for.
+///
+/// `/meta` needs the `file_metadata:read` scope, separate from the
+/// `file_content:read` that `/v1/files` needs, so a token with only the
+/// latter gets a 403 here. On a 403 fall back to `?depth=1` (~8 KB, also
+/// carries `version`); only if that 403s too is the file really unreadable.
 pub async fn fetch_file_version(cfg: &Configuration, file_key: &str) -> Result<String> {
     let url = format!("{}/v1/files/{}/meta", cfg.base_path, file_key);
-    let v = get_json(cfg, &url).await?;
-    file_version(&v["file"]).ok_or_else(|| {
-        anyhow::anyhow!("Figma /meta response for file {file_key} has no `file.version`")
+    let (v, source) = match get_json(cfg, &url).await {
+        Ok(v) => (v["file"].clone(), "/meta"),
+        Err(e) if format!("{e:#}").contains("(403 ") => {
+            (fetch_file_json(cfg, file_key, Some(1.0)).await?, "?depth=1")
+        }
+        Err(e) => return Err(e),
+    };
+    file_version(&v).ok_or_else(|| {
+        anyhow::anyhow!("Figma {source} response for file {file_key} has no `version`")
     })
 }
 
