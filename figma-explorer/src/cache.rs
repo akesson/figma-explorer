@@ -1450,18 +1450,23 @@ pub struct FolderSyncReport {
 /// cache already knows: a file added to a folder never appeared, and a
 /// deleted one lingered, until the next `cache prefetch`.
 ///
-/// At most once per [`VERSION_CHECK_SECS`] per folder, lists the folder (one
-/// request) and, for files in it:
-/// - not cached yet → fetched (bounded concurrency), but only in folders
-///   that already have cached files — an empty cache is `cache prefetch`'s
-///   job;
-/// - cached under a synced folder but no longer listed → entry deleted;
-/// - renamed or moved between folders → meta name/folder updated in place.
+/// `folder_ids` are synced as one set: once any of them is past
+/// [`VERSION_CHECK_SECS`], all are listed (one request each). Listing them
+/// together is what makes "not in any listing" mean "gone": a file moved
+/// from one configured folder to another is still listed, just elsewhere.
+/// Then, for files in the listings:
+/// - not cached yet (or a previous fetch `Failed`) → fetched with bounded
+///   concurrency, but only in folders that already have cached files — an
+///   empty cache is `cache prefetch`'s job;
+/// - cached under one of these folders but in no listing → entry deleted,
+///   only when every listing succeeded (a failed one could hold the file);
+/// - renamed or moved between folders → meta name/folder updated in place,
+///   interning the destination folder's `proj:N`.
 ///
 /// Changed `last_modified` is deliberately ignored — the version check owns
-/// content freshness. A failed listing leaves the folder's cache as it was
-/// and is stamped like a success, so a broken folder costs one request per
-/// window; the caller keeps serving what is cached.
+/// content freshness. Every folder is stamped whether its listing succeeded
+/// or not, so a broken folder costs one request per window; the caller keeps
+/// serving what is cached.
 pub async fn sync_folders(
     cfg: &Configuration,
     cache: &CacheDir,
@@ -1472,32 +1477,20 @@ pub async fn sync_folders(
 
     let mut report = FolderSyncReport::default();
     let now = now_epoch();
-    let due: Vec<String> = folder_ids
-        .iter()
-        .filter(|id| {
-            cache
-                .folder_listed_at(id)
-                .is_none_or(|t| now.saturating_sub(t) >= VERSION_CHECK_SECS)
-        })
-        .cloned()
-        .collect();
-    if due.is_empty() {
+    let any_due = folder_ids.iter().any(|id| {
+        cache
+            .folder_listed_at(id)
+            .is_none_or(|t| now.saturating_sub(t) >= VERSION_CHECK_SECS)
+    });
+    if !any_due {
         return report;
     }
 
-    let listings: Vec<(String, Result<Vec<FileRef>>)> =
-        stream::iter(due.into_iter().map(|id| async {
-            let r = list_project_files(cfg, std::slice::from_ref(&id)).await;
-            (id, r)
-        }))
-        .buffer_unordered(PROBE_CONCURRENCY)
-        .collect()
-        .await;
-
     let mut synced: HashSet<String> = HashSet::new();
     let mut listed: Vec<FileRef> = Vec::new();
-    for (id, r) in listings {
-        match r {
+    // Sequential: a handful of configured folders, ~1 small request each.
+    for id in folder_ids {
+        match list_project_files(cfg, std::slice::from_ref(id)).await {
             Ok(refs) => {
                 synced.insert(id.clone());
                 listed.extend(refs);
@@ -1506,14 +1499,24 @@ pub async fn sync_folders(
                 "cache: couldn't list folder {id} ({e:#}) — showing its cached files, which may be out of date"
             ),
         }
-        if let Err(e) = cache.stamp_folder_listed(&id, now) {
+        if let Err(e) = cache.stamp_folder_listed(id, now) {
             eprintln!("cache: stamping folder {id} failed: {e:#}");
         }
     }
 
+    let all_listed = synced.len() == folder_ids.len();
+
     let by_key: HashMap<&str, &FileRef> = listed.iter().map(|r| (r.file_key.as_str(), r)).collect();
     let metas = cache.list_metas().unwrap_or_default();
-    let known: HashSet<&str> = metas.iter().map(|m| m.file_key.as_str()).collect();
+    // A `Failed` marker (say, a 429 on the first fetch) isn't a cached file:
+    // leave it out so the file is retried — at most once per window, since
+    // that's how often this runs.
+    let known: HashSet<&str> = metas
+        .iter()
+        .filter(|m| m.status != EntryStatus::Failed)
+        .map(|m| m.file_key.as_str())
+        .collect();
+    let mut moved_to: HashSet<String> = HashSet::new();
     for m in &metas {
         match by_key.get(m.file_key.as_str()) {
             Some(r)
@@ -1525,17 +1528,34 @@ pub async fn sync_folders(
                 updated.name = r.name.clone();
                 updated.project_id = r.project_id.clone();
                 updated.project_name = r.project_name.clone();
+                if updated.project_id != m.project_id {
+                    moved_to.insert(updated.project_id.clone());
+                }
                 match cache.write_meta(&updated) {
                     Ok(()) => report.updated.push(r.name.clone()),
                     Err(e) => eprintln!("cache: write_meta failed for {}: {e:#}", m.file_key),
                 }
             }
             Some(_) => {}
-            None if synced.contains(&m.project_id) => match cache.delete_entry(&m.file_key) {
-                Ok(()) => report.removed.push(m.name.clone()),
-                Err(e) => eprintln!("cache: removing {} failed: {e:#}", m.file_key),
-            },
+            None if all_listed && synced.contains(&m.project_id) => {
+                match cache.delete_entry(&m.file_key) {
+                    Ok(()) => report.removed.push(m.name.clone()),
+                    Err(e) => eprintln!("cache: removing {} failed: {e:#}", m.file_key),
+                }
+            }
             None => {}
+        }
+    }
+
+    // Root `ls` groups files under interned projects; a file moved into a
+    // folder with no `proj:N` yet would otherwise drop out of every listing.
+    if !moved_to.is_empty() {
+        if let Err(e) = crate::synth::with_lock(cache, |s| {
+            for p in &moved_to {
+                s.intern_project(p);
+            }
+        }) {
+            eprintln!("cache: synth intern failed: {e:#}");
         }
     }
 
@@ -3362,5 +3382,76 @@ mod tests {
         let report = sync_folders(&cfg_for(&server), &cache, &folders()).await;
         assert!(report.removed.is_empty());
         assert!(cache.read_meta("O").unwrap().is_some());
+    }
+
+    /// `GET /v2/folders/{id}/files` body for folder `name`.
+    fn named_folder_body(name: &str, files: &[(&str, &str)]) -> String {
+        let mut v: Value = serde_json::from_str(&folder_body(files)).unwrap();
+        v["name"] = json!(name);
+        v.to_string()
+    }
+
+    /// Review finding: a `Failed` marker from a transient error on the first
+    /// fetch must not hide the file for good.
+    #[tokio::test]
+    async fn sync_folders_retries_file_whose_fetch_failed() {
+        let (_td, cache) = seed_fresh(Some("v1"), Some(now_epoch()));
+        let mut failed = cache.read_meta(FRESH_KEY).unwrap().unwrap();
+        failed.file_key = "N".into();
+        failed.status = EntryStatus::Failed;
+        cache.write_meta(&failed).unwrap();
+
+        let server = mock_http::serve(vec![
+            (200, folder_body(&[("K", "F"), ("N", "New")])),
+            (200, FILE_V2.into()),
+            (200, r#"{"comments":[]}"#.into()),
+        ]);
+        let report = sync_folders(&cfg_for(&server), &cache, &folders()).await;
+        assert_eq!(report.added, ["New"]);
+        assert_eq!(
+            cache.read_meta("N").unwrap().unwrap().status,
+            EntryStatus::Ok
+        );
+    }
+
+    /// Review finding: a file moved between configured folders is a move,
+    /// not a deletion — and its new folder gets a `proj:N`.
+    #[tokio::test]
+    async fn sync_folders_moves_file_between_folders() {
+        let (_td, cache) = seed_fresh(Some("v1"), Some(now_epoch()));
+        // Folder 20 is within its window; 10 being due still lists both.
+        cache.stamp_folder_listed("20", now_epoch()).unwrap();
+        let server = mock_http::serve(vec![
+            (200, folder_body(&[])),
+            (200, named_folder_body("Q", &[("K", "F")])),
+        ]);
+        let ids = vec!["10".to_owned(), "20".to_owned()];
+        let report = sync_folders(&cfg_for(&server), &cache, &ids).await;
+
+        assert_eq!(server.paths().len(), 2, "whole set listed");
+        assert!(report.removed.is_empty());
+        let meta = cache.read_meta(FRESH_KEY).unwrap().unwrap();
+        assert_eq!(meta.project_id, "20");
+        assert_eq!(meta.project_name, "Q");
+        assert!(
+            cache.read_file(FRESH_KEY).unwrap().is_some(),
+            "payload kept"
+        );
+        assert!(crate::synth::SynthState::load(&cache)
+            .unwrap()
+            .project_synth("20")
+            .is_some());
+    }
+
+    /// Review finding: if any listing failed, a file missing from the others
+    /// may be in that one — delete nothing.
+    #[tokio::test]
+    async fn sync_folders_skips_deletions_when_a_listing_failed() {
+        let (_td, cache) = seed_fresh(Some("v1"), Some(now_epoch()));
+        let server = mock_http::serve(vec![(200, folder_body(&[])), (500, "{}".into())]);
+        let ids = vec!["10".to_owned(), "20".to_owned()];
+        let report = sync_folders(&cfg_for(&server), &cache, &ids).await;
+        assert!(report.removed.is_empty());
+        assert!(cache.read_meta(FRESH_KEY).unwrap().is_some());
     }
 }

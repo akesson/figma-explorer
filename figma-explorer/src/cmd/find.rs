@@ -144,7 +144,7 @@ impl Args {
                 // unbounded here so a single file can't monopolize the global
                 // top-N via score ties. Sync the folder lists first so files
                 // added on Figma since the last look are searched too.
-                resolver.sync_folders(cfg, None).await;
+                resolver.sync_folders(cfg).await;
                 let synth = resolver.synth();
                 let metas = resolver.cache().list_metas()?;
                 resolver.freshen(cfg, &metas).await;

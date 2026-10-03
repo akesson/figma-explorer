@@ -146,19 +146,18 @@ impl Resolver {
 
     /// Bring the cached file lists of the configured folders up to date
     /// ([`cache::sync_folders`]) before a listing or cross-file sweep reads
-    /// them — all configured folders, or just `folder_id` when it is one.
-    /// No-op under `--cache-only`. Reloads the synth state when files were
-    /// added, so their freshly interned `file:N` ids render.
-    pub async fn sync_folders(&mut self, cfg: &Configuration, folder_id: Option<&str>) {
+    /// them. Always the whole configured set, even for `ls proj:N`: a file
+    /// missing from one folder may have moved to another, and only listing
+    /// them all tells a move from a deletion. No-op under `--cache-only`.
+    /// Reloads the synth state when files were added or moved, so their
+    /// freshly interned `file:N` / `proj:N` ids render.
+    pub async fn sync_folders(&mut self, cfg: &Configuration) {
         if self.cache_only {
             return;
         }
-        let mut folders = cache::configured_folder_ids();
-        if let Some(id) = folder_id {
-            folders.retain(|f| f == id);
-        }
+        let folders = cache::configured_folder_ids();
         let report = cache::sync_folders(cfg, &self.cache, &folders).await;
-        if !report.added.is_empty() {
+        if !report.added.is_empty() || !report.updated.is_empty() {
             match SynthState::load(&self.cache) {
                 Ok(s) => self.synth = s,
                 Err(e) => eprintln!("cache: reloading synth state failed: {e:#}"),
