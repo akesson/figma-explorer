@@ -169,6 +169,29 @@ impl Args {
 
         let opts = view_options(&self);
 
+        // Comment activity doesn't change Figma's `version`, so resolving
+        // didn't freshen the comments sidecar — do it here, but only when the
+        // output will actually show comments.
+        let comments_shown = match &target {
+            ResolvedTarget::File { synth, meta, .. }
+                if self.only.is_empty() || self.only.contains(&Section::Comments) =>
+            {
+                Some((*synth, meta))
+            }
+            ResolvedTarget::Node {
+                file_synth, meta, ..
+            } if !self.raw && !self.no_comments && opts.wants(Section::Comments) => {
+                Some((*file_synth, meta))
+            }
+            ResolvedTarget::Comment {
+                file_synth, meta, ..
+            } => Some((*file_synth, meta)),
+            _ => None,
+        };
+        if let (Some((file_synth, meta)), false) = (comments_shown, globals.cache_only) {
+            cache::ensure_comments_fresh(cfg, resolver.cache(), &meta.file_key, file_synth).await;
+        }
+
         let payload = match target {
             ResolvedTarget::Root => emit_root(&resolver)?,
             ResolvedTarget::Project { synth, project_id } => {
@@ -408,6 +431,17 @@ fn emit_comment(
     // (when the requested id is a thread head) or the parent (when it's a
     // reply) without a second lookup.
     let all = cache.read_comments(&meta.file_key)?.unwrap_or_default();
+    // `requested` was captured when the id resolved, before `run` refreshed
+    // the sidecar — re-find it so an edited or resolved head isn't shown
+    // next to the current replies, and a deleted thread isn't shown at all.
+    let requested = all
+        .iter()
+        .find(|c| c.comment_id == requested.comment_id)
+        .ok_or_else(|| {
+            anyhow!(
+                "comment file:{file_synth}:comm:{comm_synth} no longer exists upstream (deleted?)"
+            )
+        })?;
     let synth_state = SynthState::load(cache)?;
     let comment_obj = thread_value(file_synth, &synth_state, &all, requested);
 

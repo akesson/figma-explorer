@@ -360,6 +360,7 @@ mod tests {
             comments_fingerprint: None,
             comments_error: None,
             comments_schema_version: None,
+            comments_checked_at_epoch: None,
             full_fetched_at_epoch: None,
             full_bytes: None,
             full_schema_version: None,

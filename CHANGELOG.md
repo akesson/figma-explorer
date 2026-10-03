@@ -22,6 +22,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The first run after upgrading refetches each file once, since older caches
   don't record a version.
 
+- **Comments are kept current too.** A new comment doesn't change a file's
+  Figma `version`, so the check above never saw it, and `comments` kept
+  serving whatever the last `cache prefetch` fetched. `comments` and
+  `node-info` (when its output includes comments) now re-fetch a file's
+  comments if they haven't been checked in the last 5 minutes. If that fails,
+  the cached comments are served with a note on stderr, and the next attempt
+  waits for the next 5-minute window. `find` and `ls` still read the cached
+  comments as-is, since they span every file.
+
 - **`node-info file:N` now shows each named style's value.** Every entry in
   the file summary's `styles` list carries a `value`: a FILL style's hex (or
   its paint list for gradients and stacked paints), a TEXT style's font

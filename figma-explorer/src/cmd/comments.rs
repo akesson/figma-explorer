@@ -5,7 +5,10 @@
 //! fallback/refresh)* — the same lane `node-info` uses. The listing reads the
 //! `.comments.json` sidecar; `--refresh` (or a missing sidecar without
 //! `--cache-only`) re-fetches just this file's comments via
-//! [`cache::refresh_file_comments`] — no full `cache prefetch` needed.
+//! [`cache::refresh_file_comments`] — no full `cache prefetch` needed. A
+//! sidecar not checked within the freshness window is re-fetched via
+//! [`cache::ensure_comments_fresh`], since new comments don't change the
+//! file's `version`.
 //!
 //! Targets:
 //! - `file:N` / file URL → every thread in the file, replies inlined.
@@ -244,23 +247,26 @@ impl Args {
         format: Output,
     ) -> Result<()> {
         let cache = resolver.cache();
-        let (all, requested) = if self.refresh {
-            let (all, _meta) =
-                cache::refresh_file_comments(cfg, cache, &meta.file_key, file_synth).await?;
-            let requested = all
-                .iter()
-                .find(|c| c.comment_id == resolved.comment_id)
-                .cloned()
-                .ok_or_else(|| {
-                    anyhow!(
-                        "comment file:{file_synth}:comm:{comm_synth} no longer exists upstream (deleted?)"
-                    )
-                })?;
-            (all, requested)
-        } else {
-            let all = cache.read_comments(&meta.file_key)?.unwrap_or_default();
-            (all, resolved)
-        };
+        let (all, _) = load_sidecar(
+            cfg,
+            cache,
+            meta,
+            file_synth,
+            self.refresh,
+            resolver.cache_only(),
+        )
+        .await?;
+        // Re-find the head in the (possibly re-fetched) sidecar so an edited
+        // or resolved thread shows its current state.
+        let requested = all
+            .iter()
+            .find(|c| c.comment_id == resolved.comment_id)
+            .cloned()
+            .ok_or_else(|| {
+                anyhow!(
+                    "comment file:{file_synth}:comm:{comm_synth} no longer exists upstream (deleted?)"
+                )
+            })?;
         let synth_state = SynthState::load(cache)?;
         let comment_obj = thread_value(file_synth, &synth_state, &all, &requested);
         print(
@@ -283,10 +289,11 @@ impl Args {
     }
 }
 
-/// Read the sidecar, refreshing it live when asked (`--refresh`) or when it
-/// is absent/stale-schema (`read_comments` collapses both to `None`) and
-/// `--cache-only` permits. Returns the comments plus the fetch epoch for the
-/// freshness header.
+/// Read the sidecar, refreshing it live when asked (`--refresh`), when it is
+/// absent/stale-schema (`read_comments` collapses both to `None`), or when it
+/// hasn't been checked against Figma within the freshness window — all three
+/// only when `--cache-only` permits. Returns the comments plus the fetch epoch
+/// for the freshness header.
 async fn load_sidecar(
     cfg: &Configuration,
     cache: &CacheDir,
@@ -301,7 +308,15 @@ async fn load_sidecar(
         return Ok((comments, meta.comments_fetched_at_epoch));
     }
     match cache.read_comments(&meta.file_key)? {
-        Some(comments) => Ok((comments, meta.comments_fetched_at_epoch)),
+        Some(comments) if cache_only => Ok((comments, meta.comments_fetched_at_epoch)),
+        Some(comments) => {
+            if !cache::ensure_comments_fresh(cfg, cache, &meta.file_key, file_synth).await {
+                return Ok((comments, meta.comments_fetched_at_epoch));
+            }
+            let fresh = cache.read_meta(&meta.file_key)?;
+            let comments = cache.read_comments(&meta.file_key)?.unwrap_or(comments);
+            Ok((comments, fresh.and_then(|m| m.comments_fetched_at_epoch)))
+        }
         None if cache_only => bail!(
             "no comments sidecar for {} (and --cache-only is set); run `figma-explorer cache prefetch` to populate the local cache, then retry",
             meta.file_key
