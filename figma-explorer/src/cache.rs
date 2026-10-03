@@ -1240,16 +1240,26 @@ pub async fn ensure_fresh(
 
     let mut changed = Vec::new();
     let mut probe_errors = Vec::new();
+    let restamp = |m: &mut FileMeta| {
+        m.version_checked_at_epoch = Some(now);
+        if let Err(e) = cache.write_meta(m) {
+            eprintln!("cache: write_meta failed for {}: {e:#}", m.file_key);
+        }
+    };
     for (mut m, r) in probes {
         match r {
-            Ok(v) if m.version.as_deref() == Some(v.as_str()) => {
-                m.version_checked_at_epoch = Some(now);
-                if let Err(e) = cache.write_meta(&m) {
-                    eprintln!("cache: write_meta failed for {}: {e:#}", m.file_key);
-                }
-            }
+            Ok(v) if m.version.as_deref() == Some(v.as_str()) => restamp(&mut m),
             Ok(_) => changed.push(m),
-            Err(e) => probe_errors.push((m, e)),
+            Err(e) => {
+                // A 403/404 won't heal by retrying on the next command (file
+                // unshared or deleted, or cached under another account's
+                // token): back off for a full window instead of re-probing on
+                // every sweep. Transient failures (network, 5xx) retry.
+                if is_access_error(&format!("{e:#}")) {
+                    restamp(&mut m);
+                }
+                probe_errors.push((m, e));
+            }
         }
     }
     if let Some((m, e)) = probe_errors.first() {
@@ -1328,19 +1338,12 @@ pub fn note_unverified_cache_only<'a>(metas: impl IntoIterator<Item = &'a FileMe
 /// Returns the raw `/v1/files/{key}` body (the caller may want fields the
 /// payload drops — `node-info` does).
 async fn refetch_known(cfg: &Configuration, cache: &CacheDir, meta: &FileMeta) -> Result<Value> {
-    let file_ref = FileRef {
-        file_key: meta.file_key.clone(),
-        name: meta.name.clone(),
-        last_modified: meta.last_modified.clone(),
-        project_id: meta.project_id.clone(),
-        project_name: meta.project_name.clone(),
-    };
     let file = fetch_validated(cfg, &meta.file_key).await?;
     write_fetched(
         cfg,
         cache,
         &meta.file_key,
-        Some(&file_ref),
+        Some(&file_ref_of(meta)),
         &file,
         now_epoch(),
     )
@@ -1348,25 +1351,38 @@ async fn refetch_known(cfg: &Configuration, cache: &CacheDir, meta: &FileMeta) -
     Ok(file)
 }
 
+/// The project context a refetch keeps: identity from the existing meta.
+fn file_ref_of(meta: &FileMeta) -> FileRef {
+    FileRef {
+        file_key: meta.file_key.clone(),
+        name: meta.name.clone(),
+        last_modified: meta.last_modified.clone(),
+        project_id: meta.project_id.clone(),
+        project_name: meta.project_name.clone(),
+    }
+}
+
 /// Refetch `file_key` and rewrite its payload, full sidecar, and meta from one
 /// response, returning the raw body. With no meta on disk this is a cold
 /// fetch (failure marker on error, like [`load_file`]); otherwise a failure
-/// leaves the cached entry as it was.
+/// leaves the cached entry as it was. The caller wants the body itself, so a
+/// cache write failure (full disk, read-only cache dir) is logged and the
+/// body is still returned.
 pub async fn refetch_file(cfg: &Configuration, cache: &CacheDir, file_key: &str) -> Result<Value> {
-    match cache.read_meta(file_key).ok().flatten() {
-        Some(meta) => refetch_known(cfg, cache, &meta).await,
-        None => {
-            let file = match fetch_validated(cfg, file_key).await {
-                Ok(f) => f,
-                Err(e) => {
-                    return record_fetch_failure(cache, file_key, None, e, now_epoch())
-                        .map(|_| Value::Null)
-                }
-            };
-            write_fetched(cfg, cache, file_key, None, &file, now_epoch()).await?;
-            Ok(file)
+    let meta = cache.read_meta(file_key).ok().flatten();
+    let file = match fetch_validated(cfg, file_key).await {
+        Ok(f) => f,
+        Err(e) if meta.is_none() => {
+            return record_fetch_failure(cache, file_key, None, e, now_epoch()).map(|_| Value::Null)
         }
+        Err(e) => return Err(e),
+    };
+    let file_ref = meta.as_ref().map(file_ref_of);
+    if let Err(e) = write_fetched(cfg, cache, file_key, file_ref.as_ref(), &file, now_epoch()).await
+    {
+        eprintln!("cache: couldn't write refetched {file_key} to the cache: {e:#}");
     }
+    Ok(file)
 }
 
 /// Whether the `.full.json.gz` sidecar described by `meta` was written from
@@ -1391,6 +1407,12 @@ fn name_list<'a>(names: impl ExactSizeIterator<Item = &'a str>, max: usize) -> S
         s.push_str(&format!(", … +{more} more"));
     }
     s
+}
+
+/// Does this probe error mean "no access" rather than "try again"? Matches
+/// `figma_common::get_text`'s `figma API error (403 Forbidden): …` shape.
+fn is_access_error(msg: &str) -> bool {
+    msg.contains("(403 ") || msg.contains("(404 ")
 }
 
 fn count_files(n: usize) -> String {
@@ -2245,70 +2267,7 @@ mod tests {
     /// Minimal one-shot HTTP/1.1 server on a std thread: serves the queued
     /// `(status, body)` responses in order and records each request path.
     /// Avoids a mock-server dev-dependency and any tokio `net` feature.
-    mod mock_http {
-        use std::io::{Read, Write};
-        use std::net::TcpListener;
-        use std::sync::{Arc, Mutex};
-
-        pub struct Server {
-            pub base_url: String,
-            pub paths: Arc<Mutex<Vec<String>>>,
-            handle: Option<std::thread::JoinHandle<()>>,
-        }
-
-        pub fn serve(responses: Vec<(u16, String)>) -> Server {
-            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-            let base_url = format!("http://{}", listener.local_addr().unwrap());
-            let paths = Arc::new(Mutex::new(Vec::new()));
-            let paths_t = Arc::clone(&paths);
-            let handle = std::thread::spawn(move || {
-                for (status, body) in responses {
-                    let (mut stream, _) = listener.accept().unwrap();
-                    let mut buf = Vec::new();
-                    let mut chunk = [0u8; 1024];
-                    loop {
-                        let n = stream.read(&mut chunk).unwrap();
-                        buf.extend_from_slice(&chunk[..n]);
-                        if n == 0 || buf.windows(4).any(|w| w == b"\r\n\r\n") {
-                            break;
-                        }
-                    }
-                    let head = String::from_utf8_lossy(&buf);
-                    let path = head
-                        .lines()
-                        .next()
-                        .and_then(|l| l.split_whitespace().nth(1))
-                        .unwrap_or("")
-                        .to_owned();
-                    paths_t.lock().unwrap().push(path);
-                    let reason = match status {
-                        200 => "OK",
-                        403 => "Forbidden",
-                        _ => "Other",
-                    };
-                    let resp = format!(
-                        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\n\
-                         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                        body.len()
-                    );
-                    stream.write_all(resp.as_bytes()).unwrap();
-                    stream.flush().unwrap();
-                }
-            });
-            Server {
-                base_url,
-                paths,
-                handle: Some(handle),
-            }
-        }
-
-        impl Server {
-            pub fn paths(mut self) -> Vec<String> {
-                self.handle.take().unwrap().join().unwrap();
-                self.paths.lock().unwrap().clone()
-            }
-        }
-    }
+    use crate::test_http::{self as mock_http, cfg_for};
 
     /// Recorded 2026-09-05 from `GET /v2/folders/{id}/files` (values
     /// anonymised, shape verbatim). Identical to the v1 project-files shape
@@ -2323,12 +2282,6 @@ mod tests {
 
     /// Verbatim 403 body a post-2026-08-03 token gets from the v1 endpoint.
     const V1_SCOPE_403: &str = r#"{"error":true,"status":403,"message":"Invalid scope: [\"folders:read\"]. This endpoint requires the file_read or files:read or projects:read scope."}"#;
-
-    fn cfg_for(server: &mock_http::Server) -> Configuration {
-        let mut cfg = Configuration::new();
-        cfg.base_path = server.base_url.clone();
-        cfg
-    }
 
     /// The listing must go to `/v2/folders/{id}/files` (the only endpoint a
     /// post-rename token can call) and map the response onto `FileRef`
@@ -2597,6 +2550,69 @@ mod tests {
         assert!(full_sidecar_current(&m));
         m.full_schema_version = Some(FULL_SCHEMA_VERSION + 1);
         assert!(!full_sidecar_current(&m), "other schema");
+    }
+
+    /// A 403/404 won't heal by retrying, so it restamps the check time and
+    /// backs off a full window — unlike the 500 case above, which retries.
+    #[tokio::test]
+    async fn ensure_fresh_access_error_backs_off() {
+        let (_td, cache) = seed_fresh(Some("v1"), Some(0));
+        let server = mock_http::serve(vec![(403, r#"{"status":403,"err":"Forbidden"}"#.into())]);
+        let before = now_epoch();
+        let report = ensure_fresh(&cfg_for(&server), &cache, &keys()).await;
+
+        assert_eq!(server.paths(), vec!["/v1/files/K/meta"]);
+        assert_eq!(report.unverified, keys());
+        let meta = cache.read_meta(FRESH_KEY).unwrap().unwrap();
+        assert!(
+            meta.version_checked_at_epoch.unwrap() >= before,
+            "backed off"
+        );
+        assert_eq!(
+            meta.version.as_deref(),
+            Some("v1"),
+            "still the cached version"
+        );
+    }
+
+    #[test]
+    fn is_access_error_matches_403_and_404_only() {
+        assert!(is_access_error("figma API error (403 Forbidden): {}"));
+        assert!(is_access_error("figma API error (404 Not Found): {}"));
+        assert!(!is_access_error(
+            "figma API error (500 Internal Server Error): {}"
+        ));
+        assert!(!is_access_error("HTTP request failed: operation timed out"));
+    }
+
+    /// `node-info` wants the body, not the cache update: a write failure
+    /// (here: the payload path is a directory) must not lose the fetched body.
+    #[tokio::test]
+    async fn refetch_file_returns_body_when_cache_write_fails() {
+        let td = TempDir::new().unwrap();
+        let cache = CacheDir::new(td.path());
+        cache.ensure().unwrap();
+        let file_ref = FileRef {
+            file_key: FRESH_KEY.into(),
+            name: "F".into(),
+            last_modified: "t1".into(),
+            project_id: "10".into(),
+            project_name: "P".into(),
+        };
+        let doc = json!({"id": "0:0", "name": "Document", "type": "DOCUMENT", "children": []});
+        let payload = build_cached_file(&file_ref, &doc, 1);
+        cache
+            .write_meta(&FileMeta::from_success(&file_ref, &payload, 0, 1))
+            .unwrap();
+        fs::create_dir_all(cache.file_path(FRESH_KEY)).unwrap();
+
+        let server = mock_http::serve(vec![(200, FILE_V2.into())]);
+        let body = refetch_file(&cfg_for(&server), &cache, FRESH_KEY)
+            .await
+            .unwrap();
+
+        assert_eq!(server.paths(), vec!["/v1/files/K"]);
+        assert_eq!(body["version"], "v2");
     }
 
     #[test]

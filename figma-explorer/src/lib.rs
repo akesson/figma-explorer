@@ -24,6 +24,8 @@ pub mod screenshot;
 pub mod search_query;
 pub mod synth;
 pub mod team_catalog;
+#[cfg(test)]
+mod test_http;
 pub mod tree;
 pub mod url;
 pub mod util;
