@@ -129,6 +129,20 @@ impl Resolver {
         self.cache_only
     }
 
+    /// Version-check `metas` before a multi-file sweep that reads payloads
+    /// straight from the cache (`find` without `--in`, `ls` on root/project)
+    /// rather than through [`Self::resolve`]. Same policy as single-file
+    /// resolution: [`cache::ensure_fresh`] normally, a stderr staleness note
+    /// under `--cache-only`.
+    pub async fn freshen(&self, cfg: &Configuration, metas: &[FileMeta]) {
+        if self.cache_only {
+            cache::note_unverified_cache_only(metas);
+        } else {
+            let keys: Vec<String> = metas.iter().map(|m| m.file_key.clone()).collect();
+            cache::ensure_fresh(cfg, &self.cache, &keys).await;
+        }
+    }
+
     /// Build the node index on first call, cache it for the rest of the
     /// invocation. Errors from index construction surface as [`ResolveError::Internal`].
     pub fn node_index(&self) -> Result<&NodeIndex, ResolveError> {
@@ -477,22 +491,34 @@ impl Resolver {
         })
     }
 
-    /// [`Self::read_file`] with a cold-fetch fallback. Tagged synth paths
-    /// behave like the URL lane: on a cache miss, refetch via
-    /// [`cache::load_file`] when allowed (its `decide_action` throttles
+    /// [`Self::read_file`] with a version check and a cold-fetch fallback.
+    ///
+    /// A cached file is first run through [`cache::ensure_fresh`], so a file a
+    /// designer has edited since it was cached is refetched before it is
+    /// served (at most one `/meta` probe per file per
+    /// [`cache::VERSION_CHECK_SECS`]). Under `--cache-only` nothing is probed;
+    /// a stderr note flags data past that window instead.
+    ///
+    /// Tagged synth paths behave like the URL lane: on a cache miss, refetch
+    /// via [`cache::load_file`] when allowed (its `decide_action` throttles
     /// NotExportable markers by TTL, so a 403'd file is not re-hammered), or
     /// fail with [`ResolveError::CacheOnlyMiss`] under `--cache-only`.
-    /// Deliberately does NOT pre-warm node-info's `.full.json.gz` sidecar —
-    /// that would tax every refresh to save one API call on a fully-cold
-    /// `node-info`; its own `load_full` self-heals on the next call.
     async fn read_file_or_fetch(
         &self,
         cfg: &Configuration,
         display_id: &str,
         file_key: &str,
     ) -> Result<(FileMeta, CachedFile), ResolveError> {
+        if !self.cache_only {
+            cache::ensure_fresh(cfg, &self.cache, &[file_key.to_owned()]).await;
+        }
         match self.read_file(file_key) {
-            Ok(pair) => Ok(pair),
+            Ok(pair) => {
+                if self.cache_only {
+                    cache::note_unverified_cache_only([&pair.0]);
+                }
+                Ok(pair)
+            }
             Err(ResolveError::NotCached(_)) if self.cache_only => {
                 Err(ResolveError::CacheOnlyMiss(display_id.to_owned()))
             }

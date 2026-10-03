@@ -51,6 +51,13 @@ use crate::node::Bounds;
 
 pub const DEFAULT_TTL_SECS: u64 = 3600;
 
+/// How long a confirmed `version` stays trusted. Within this window
+/// [`ensure_fresh`] serves the cache without a network call; past it, one
+/// cheap `/v1/files/{key}/meta` probe decides between "unchanged" and
+/// "refetch". Designers edit files live, so this is the staleness bound for
+/// every command that reads cached file data.
+pub const VERSION_CHECK_SECS: u64 = 300;
+
 /// Sidecar format version. Bumped when the on-disk shape of
 /// `{file_key}.comments.json` changes. Sidecars older than the current
 /// version are treated as stale → refetched on next access. Stored on
@@ -438,6 +445,16 @@ pub struct FileMeta {
     /// Variables sidecar schema version. See [`VARIABLES_SCHEMA_VERSION`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub variables_schema_version: Option<u32>,
+    /// Figma's `version` for the document the payload was built from (the
+    /// `version` field of `/v1/files/{key}`, which `/v1/files/{key}/meta`
+    /// also reports). `None` on metas written before freshness checks
+    /// existed — [`ensure_fresh`] treats that as "changed" and refetches once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// Last time [`ensure_fresh`] confirmed `version` against Figma (or a
+    /// fetch wrote it). Probes are skipped within [`VERSION_CHECK_SECS`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version_checked_at_epoch: Option<u64>,
 }
 
 impl FileMeta {
@@ -465,6 +482,8 @@ impl FileMeta {
             variables_bytes: None,
             variables_error: None,
             variables_schema_version: None,
+            version: None,
+            version_checked_at_epoch: None,
         }
     }
 
@@ -507,6 +526,8 @@ impl FileMeta {
             variables_bytes: None,
             variables_error: None,
             variables_schema_version: None,
+            version: None,
+            version_checked_at_epoch: None,
         }
     }
 }
@@ -1042,6 +1063,10 @@ async fn try_refresh_single(
 /// Live fetch + write to cache. `file_ref` carries project context when we
 /// have a listing in hand; without it we record `project_id=""` (direct-URL
 /// access outside any configured project).
+///
+/// A failed fetch records a `Failed`/`NotExportable` marker (dropping any
+/// cached payload) so cold loads don't hammer a broken file. Freshness
+/// refetches deliberately do *not* go through here — see [`ensure_fresh`].
 async fn fetch_and_cache(
     cfg: &Configuration,
     cache: &CacheDir,
@@ -1049,69 +1074,330 @@ async fn fetch_and_cache(
     file_ref: Option<&FileRef>,
     now: u64,
 ) -> Result<CachedFile> {
-    match crate::cmd::fetch_file_json(cfg, file_key, None).await {
-        Ok(file) => {
-            // A 200 response with no `document` (auth quirk, partial body,
-            // schema drift) must not be cached as an empty file — treat it
-            // exactly like a fetch failure so a marker blocks the refetch loop.
-            let doc = match crate::cmd::require_document(&file, file_key) {
-                Ok(d) => d,
-                Err(e) => return record_fetch_failure(cache, file_key, file_ref, e, now),
-            };
-            let last_modified = file
-                .get("lastModified")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_owned();
-            let name = file
-                .get("name")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_owned();
-            let (project_id, project_name) = file_ref
-                .map(|fr| (fr.project_id.clone(), fr.project_name.clone()))
-                .unwrap_or_default();
-            let synthetic_ref = FileRef {
-                file_key: file_key.to_owned(),
-                name: name.clone(),
-                last_modified: last_modified.clone(),
-                project_id,
-                project_name,
-            };
-            let payload = build_cached_file(&synthetic_ref, doc, now);
-            let bytes = cache.write_file(file_key, &payload)?;
-            let mut meta = FileMeta::from_success(&synthetic_ref, &payload, bytes, now);
-            // Fetch comments alongside the structural payload — same cadence,
-            // best-effort. A failure flips `meta.comments_error` but does not
-            // poison the tree refresh. Comments are pre-associated against
-            // the just-written tree at line 805 above.
-            fetch_comments_into_meta(cfg, cache, file_key, now, &mut meta).await;
-            cache.write_meta(&meta)?;
-            // Intern synth IDs so downstream commands (`ls`, etc.) can render
-            // qualified `file:N:x:y` / `file:N:comm:M` lines. File synth is
-            // assigned (or retrieved) here; comment synths are interned
-            // immediately after using that synth as their scope.
-            // Best-effort: a synth save failure logs and continues.
-            let file_synth = match crate::synth::with_lock(cache, |s| {
-                if !meta.project_id.is_empty() {
-                    s.intern_project(&meta.project_id);
-                }
-                s.intern_file(&meta.file_key)
-            }) {
-                Ok(synth) => Some(synth),
-                Err(e) => {
-                    eprintln!("cache: synth intern failed for {file_key}: {e:#}");
-                    None
-                }
-            };
-            if let Some(synth) = file_synth {
-                if let Ok(Some(comments)) = cache.read_comments(file_key) {
-                    intern_comment_synths(cache, synth, &comments);
+    match fetch_validated(cfg, file_key).await {
+        Ok(file) => write_fetched(cfg, cache, file_key, file_ref, &file, now).await,
+        Err(e) => record_fetch_failure(cache, file_key, file_ref, e, now),
+    }
+}
+
+/// `GET /v1/files/{key}`, rejecting a 200 with no `document` (auth quirk,
+/// partial body, schema drift) so it is never cached as an empty file.
+async fn fetch_validated(cfg: &Configuration, file_key: &str) -> Result<Value> {
+    let file = crate::cmd::fetch_file_json(cfg, file_key, None).await?;
+    crate::cmd::require_document(&file, file_key)?;
+    Ok(file)
+}
+
+/// Write everything derived from one validated `/v1/files/{key}` response:
+/// the structural payload, the `.full.json.gz` sidecar, comments, and a meta
+/// stamped with Figma's `version`. Interns the file (and comment) synths.
+async fn write_fetched(
+    cfg: &Configuration,
+    cache: &CacheDir,
+    file_key: &str,
+    file_ref: Option<&FileRef>,
+    file: &Value,
+    now: u64,
+) -> Result<CachedFile> {
+    let doc = crate::cmd::require_document(file, file_key)?;
+    let last_modified = file
+        .get("lastModified")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    let name = file
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    let (project_id, project_name) = file_ref
+        .map(|fr| (fr.project_id.clone(), fr.project_name.clone()))
+        .unwrap_or_default();
+    let synthetic_ref = FileRef {
+        file_key: file_key.to_owned(),
+        name: name.clone(),
+        last_modified: last_modified.clone(),
+        project_id,
+        project_name,
+    };
+    let payload = build_cached_file(&synthetic_ref, doc, now);
+    let bytes = cache.write_file(file_key, &payload)?;
+    let mut meta = FileMeta::from_success(&synthetic_ref, &payload, bytes, now);
+    meta.version = crate::cmd::file_version(file);
+    meta.version_checked_at_epoch = Some(now);
+    // Write `node-info`'s full-JSON sidecar from this same response so it can
+    // never describe a different version than the payload. On a failed write
+    // the `full_*` stamps stay unset (`from_success`), and `node-info`'s
+    // `load_full` treats an unstamped sidecar as stale.
+    match crate::full_cache::write_full(cache, file_key, file) {
+        Ok(n) => {
+            meta.full_fetched_at_epoch = Some(now);
+            meta.full_bytes = Some(n);
+            meta.full_schema_version = Some(FULL_SCHEMA_VERSION);
+        }
+        Err(e) => eprintln!("cache: write_full failed for {file_key}: {e:#}"),
+    }
+    // Fetch comments alongside the structural payload — same cadence,
+    // best-effort. A failure flips `meta.comments_error` but does not poison
+    // the tree refresh. Comments are pre-associated against the just-written
+    // tree.
+    fetch_comments_into_meta(cfg, cache, file_key, now, &mut meta).await;
+    cache.write_meta(&meta)?;
+    // Intern synth IDs so downstream commands (`ls`, etc.) can render
+    // qualified `file:N:x:y` / `file:N:comm:M` lines. File synth is assigned
+    // (or retrieved) here; comment synths are interned immediately after
+    // using that synth as their scope. Best-effort: a synth save failure logs
+    // and continues.
+    let file_synth = match crate::synth::with_lock(cache, |s| {
+        if !meta.project_id.is_empty() {
+            s.intern_project(&meta.project_id);
+        }
+        s.intern_file(&meta.file_key)
+    }) {
+        Ok(synth) => Some(synth),
+        Err(e) => {
+            eprintln!("cache: synth intern failed for {file_key}: {e:#}");
+            None
+        }
+    };
+    if let Some(synth) = file_synth {
+        if let Ok(Some(comments)) = cache.read_comments(file_key) {
+            intern_comment_synths(cache, synth, &comments);
+        }
+    }
+    Ok(payload)
+}
+
+/// Concurrent `/meta` probes in one [`ensure_fresh`] sweep. Each is ~1 KB.
+const PROBE_CONCURRENCY: usize = 8;
+
+/// Concurrent full-file refetches in one [`ensure_fresh`] sweep. Matches
+/// `cache prefetch`'s default: `GET /v1/files/{key}` is the expensive,
+/// tightly rate-limited endpoint.
+const REFETCH_CONCURRENCY: usize = 3;
+
+/// What [`ensure_fresh`] did. Files it skipped (checked within
+/// [`VERSION_CHECK_SECS`], or not `Ok`) appear in neither list.
+#[derive(Debug, Default)]
+pub struct FreshReport {
+    /// Files whose Figma `version` changed (or was never recorded) and were
+    /// refetched successfully.
+    pub refetched: Vec<String>,
+    /// Files that could not be verified — the probe or the refetch failed —
+    /// and are served from the existing cache.
+    pub unverified: Vec<String>,
+}
+
+/// Whether `meta`'s cached content is due a version probe: `Ok` entries
+/// whose last confirmation is missing or older than [`VERSION_CHECK_SECS`].
+pub fn version_check_due(meta: &FileMeta, now: u64) -> bool {
+    meta.status == EntryStatus::Ok
+        && meta
+            .version_checked_at_epoch
+            .is_none_or(|t| now.saturating_sub(t) >= VERSION_CHECK_SECS)
+}
+
+/// Make sure the cached copies of `file_keys` match Figma's current version
+/// before a command reads them. Designers edit files live, so this — not
+/// `cache prefetch` — is what keeps day-to-day reads current.
+///
+/// 1. Skip files confirmed within [`VERSION_CHECK_SECS`] (the common case:
+///    no network at all) and files without an `Ok` entry.
+/// 2. Probe the rest via `/v1/files/{key}/meta` (~1 KB each, concurrently).
+///    An unchanged version just restamps `version_checked_at_epoch`.
+/// 3. Refetch files whose version changed — or was never recorded — through
+///    [`write_fetched`], so payload, full sidecar, and meta stay in lockstep.
+///
+/// Never makes things worse than serving stale: a failed probe or refetch
+/// leaves the existing entry untouched (unlike [`fetch_and_cache`], which
+/// records a failure marker) and is reported on stderr and in
+/// [`FreshReport::unverified`]. The next command past the window retries.
+pub async fn ensure_fresh(
+    cfg: &Configuration,
+    cache: &CacheDir,
+    file_keys: &[String],
+) -> FreshReport {
+    use futures::stream::{self, StreamExt};
+
+    let mut report = FreshReport::default();
+    let now = now_epoch();
+    let due: Vec<FileMeta> = file_keys
+        .iter()
+        .filter_map(|k| cache.read_meta(k).ok().flatten())
+        .filter(|m| version_check_due(m, now))
+        .collect();
+    if due.is_empty() {
+        return report;
+    }
+
+    let probes: Vec<(FileMeta, Result<String>)> = stream::iter(due.into_iter().map(|m| async {
+        let r = crate::cmd::fetch_file_version(cfg, &m.file_key).await;
+        (m, r)
+    }))
+    .buffer_unordered(PROBE_CONCURRENCY)
+    .collect()
+    .await;
+
+    let mut changed = Vec::new();
+    let mut probe_errors = Vec::new();
+    for (mut m, r) in probes {
+        match r {
+            Ok(v) if m.version.as_deref() == Some(v.as_str()) => {
+                m.version_checked_at_epoch = Some(now);
+                if let Err(e) = cache.write_meta(&m) {
+                    eprintln!("cache: write_meta failed for {}: {e:#}", m.file_key);
                 }
             }
-            Ok(payload)
+            Ok(_) => changed.push(m),
+            Err(e) => probe_errors.push((m, e)),
         }
-        Err(e) => record_fetch_failure(cache, file_key, file_ref, e, now),
+    }
+    if let Some((m, e)) = probe_errors.first() {
+        eprintln!(
+            "cache: couldn't check {} against Figma ({}: {e:#}) — serving cached copies, which may be stale",
+            count_files(probe_errors.len()),
+            m.name,
+        );
+    }
+    report
+        .unverified
+        .extend(probe_errors.into_iter().map(|(m, _)| m.file_key));
+
+    if changed.is_empty() {
+        return report;
+    }
+    eprintln!(
+        "cache: {} changed on Figma ({}) — refetching…",
+        count_files(changed.len()),
+        name_list(changed.iter().map(|m| m.name.as_str()), 5)
+    );
+    let refetches: Vec<(FileMeta, Result<()>)> = stream::iter(changed.into_iter().map(|m| async {
+        let r = refetch_known(cfg, cache, &m).await.map(|_| ());
+        (m, r)
+    }))
+    .buffer_unordered(REFETCH_CONCURRENCY)
+    .collect()
+    .await;
+
+    for (m, r) in refetches {
+        match r {
+            Ok(()) => report.refetched.push(m.file_key),
+            Err(e) => {
+                eprintln!(
+                    "cache: refetch of {} failed ({e:#}) — serving the cached copy, which is out of date",
+                    m.name
+                );
+                report.unverified.push(m.file_key);
+            }
+        }
+    }
+    report
+}
+
+/// `--cache-only` counterpart of [`ensure_fresh`]: no probe, but tell the
+/// user when data being served hasn't been checked against Figma within
+/// [`VERSION_CHECK_SECS`]. One stderr line however many files are involved.
+pub fn note_unverified_cache_only<'a>(metas: impl IntoIterator<Item = &'a FileMeta>) {
+    let now = now_epoch();
+    let last_checked = |m: &FileMeta| m.version_checked_at_epoch.unwrap_or(m.cached_at_epoch);
+    let due: Vec<&FileMeta> = metas
+        .into_iter()
+        .filter(|m| version_check_due(m, now))
+        .collect();
+    let Some(oldest) = due.iter().min_by_key(|m| last_checked(m)) else {
+        return;
+    };
+    let ago = crate::cmd::cache::age(now, last_checked(oldest));
+    if due.len() == 1 {
+        eprintln!(
+            "cache: {} last checked against Figma {ago} ago (--cache-only) — may be stale",
+            oldest.name
+        );
+    } else {
+        eprintln!(
+            "cache: {} not checked against Figma in the last {}m (oldest: {}, {ago} ago; --cache-only) — may be stale",
+            count_files(due.len()),
+            VERSION_CHECK_SECS / 60,
+            oldest.name
+        );
+    }
+}
+
+/// Refetch a file that already has a meta, keeping its project context.
+/// Unlike [`fetch_and_cache`], a failure leaves the existing entry untouched.
+/// Returns the raw `/v1/files/{key}` body (the caller may want fields the
+/// payload drops — `node-info` does).
+async fn refetch_known(cfg: &Configuration, cache: &CacheDir, meta: &FileMeta) -> Result<Value> {
+    let file_ref = FileRef {
+        file_key: meta.file_key.clone(),
+        name: meta.name.clone(),
+        last_modified: meta.last_modified.clone(),
+        project_id: meta.project_id.clone(),
+        project_name: meta.project_name.clone(),
+    };
+    let file = fetch_validated(cfg, &meta.file_key).await?;
+    write_fetched(
+        cfg,
+        cache,
+        &meta.file_key,
+        Some(&file_ref),
+        &file,
+        now_epoch(),
+    )
+    .await?;
+    Ok(file)
+}
+
+/// Refetch `file_key` and rewrite its payload, full sidecar, and meta from one
+/// response, returning the raw body. With no meta on disk this is a cold
+/// fetch (failure marker on error, like [`load_file`]); otherwise a failure
+/// leaves the cached entry as it was.
+pub async fn refetch_file(cfg: &Configuration, cache: &CacheDir, file_key: &str) -> Result<Value> {
+    match cache.read_meta(file_key).ok().flatten() {
+        Some(meta) => refetch_known(cfg, cache, &meta).await,
+        None => {
+            let file = match fetch_validated(cfg, file_key).await {
+                Ok(f) => f,
+                Err(e) => {
+                    return record_fetch_failure(cache, file_key, None, e, now_epoch())
+                        .map(|_| Value::Null)
+                }
+            };
+            write_fetched(cfg, cache, file_key, None, &file, now_epoch()).await?;
+            Ok(file)
+        }
+    }
+}
+
+/// Whether the `.full.json.gz` sidecar described by `meta` was written from
+/// the same (or a newer) response as the structural payload, in the current
+/// format. Every fetch path writes both together; an unstamped or older
+/// sidecar is one a refetch failed to replace.
+pub fn full_sidecar_current(meta: &FileMeta) -> bool {
+    meta.full_schema_version == Some(FULL_SCHEMA_VERSION)
+        && meta
+            .full_fetched_at_epoch
+            .is_some_and(|t| t >= meta.cached_at_epoch)
+}
+
+/// `a, b, c` — or `a, b, … +N more` past `max`, so the one-time migration
+/// refetch of a whole cache doesn't print every file name.
+fn name_list<'a>(names: impl ExactSizeIterator<Item = &'a str>, max: usize) -> String {
+    let total = names.len();
+    let shown: Vec<&str> = names.take(max).collect();
+    let more = total - shown.len();
+    let mut s = shown.join(", ");
+    if more > 0 {
+        s.push_str(&format!(", … +{more} more"));
+    }
+    s
+}
+
+fn count_files(n: usize) -> String {
+    if n == 1 {
+        "1 file".to_owned()
+    } else {
+        format!("{n} files")
     }
 }
 
@@ -1639,6 +1925,8 @@ mod tests {
             variables_bytes: None,
             variables_error: None,
             variables_schema_version: None,
+            version: None,
+            version_checked_at_epoch: None,
         }
     }
 
@@ -1829,6 +2117,8 @@ mod tests {
             variables_bytes: None,
             variables_error: None,
             variables_schema_version: None,
+            version: None,
+            version_checked_at_epoch: None,
         }
     }
 
@@ -2130,5 +2420,202 @@ mod tests {
 
         assert_eq!(server.paths(), vec!["/v2/folders/77195660/files"]);
         assert!(format!("{err:#}").contains("500"), "{err:#}");
+    }
+
+    // ── ensure_fresh ────────────────────────────────────────────────────
+
+    const FRESH_KEY: &str = "K";
+
+    /// `GET /v1/files/K` body at Figma version `v2`.
+    const FILE_V2: &str = r#"{"name":"F2","lastModified":"t2","version":"v2",
+        "document":{"id":"0:0","name":"Document","type":"DOCUMENT","children":[
+            {"id":"0:1","name":"Page","type":"CANVAS","children":[]}]}}"#;
+
+    fn meta_body(version: &str) -> String {
+        format!(r#"{{"file":{{"name":"F","last_touched_at":"t","version":"{version}"}}}}"#)
+    }
+
+    /// Cache with one `Ok` entry for [`FRESH_KEY`] at `version`, last
+    /// confirmed at `checked_at`, claimed by project `10`.
+    fn seed_fresh(version: Option<&str>, checked_at: Option<u64>) -> (TempDir, CacheDir) {
+        let td = TempDir::new().unwrap();
+        let cache = CacheDir::new(td.path());
+        cache.ensure().unwrap();
+        let file_ref = FileRef {
+            file_key: FRESH_KEY.into(),
+            name: "F".into(),
+            last_modified: "t1".into(),
+            project_id: "10".into(),
+            project_name: "P".into(),
+        };
+        let doc = json!({"id": "0:0", "name": "Document", "type": "DOCUMENT", "children": []});
+        let payload = build_cached_file(&file_ref, &doc, 1);
+        let bytes = cache.write_file(FRESH_KEY, &payload).unwrap();
+        let mut meta = FileMeta::from_success(&file_ref, &payload, bytes, 1);
+        meta.version = version.map(str::to_owned);
+        meta.version_checked_at_epoch = checked_at;
+        cache.write_meta(&meta).unwrap();
+        (td, cache)
+    }
+
+    fn keys() -> Vec<String> {
+        vec![FRESH_KEY.to_owned()]
+    }
+
+    #[tokio::test]
+    async fn ensure_fresh_within_window_makes_no_requests() {
+        let (_td, cache) = seed_fresh(Some("v1"), Some(now_epoch()));
+        let server = mock_http::serve(vec![]);
+        let report = ensure_fresh(&cfg_for(&server), &cache, &keys()).await;
+        assert!(server.paths().is_empty());
+        assert!(report.refetched.is_empty() && report.unverified.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ensure_fresh_unchanged_version_only_restamps() {
+        let (_td, cache) = seed_fresh(Some("v1"), Some(0));
+        let server = mock_http::serve(vec![(200, meta_body("v1"))]);
+        let before = now_epoch();
+        let report = ensure_fresh(&cfg_for(&server), &cache, &keys()).await;
+
+        assert_eq!(server.paths(), vec!["/v1/files/K/meta"]);
+        assert!(report.refetched.is_empty() && report.unverified.is_empty());
+        let meta = cache.read_meta(FRESH_KEY).unwrap().unwrap();
+        assert!(meta.version_checked_at_epoch.unwrap() >= before);
+        assert_eq!(meta.version.as_deref(), Some("v1"));
+        assert_eq!(meta.last_modified, "t1", "payload untouched");
+    }
+
+    #[tokio::test]
+    async fn ensure_fresh_changed_version_refetches_payload_and_sidecar() {
+        let (_td, cache) = seed_fresh(Some("v1"), Some(0));
+        let server = mock_http::serve(vec![
+            (200, meta_body("v2")),
+            (200, FILE_V2.into()),
+            (200, r#"{"comments":[]}"#.into()),
+        ]);
+        let report = ensure_fresh(&cfg_for(&server), &cache, &keys()).await;
+
+        assert_eq!(
+            server.paths(),
+            vec!["/v1/files/K/meta", "/v1/files/K", "/v1/files/K/comments"]
+        );
+        assert_eq!(report.refetched, keys());
+        let meta = cache.read_meta(FRESH_KEY).unwrap().unwrap();
+        assert_eq!(meta.version.as_deref(), Some("v2"));
+        assert_eq!(meta.last_modified, "t2");
+        assert_eq!(meta.project_id, "10", "project context preserved");
+        assert!(meta.version_checked_at_epoch.is_some());
+        assert!(
+            full_sidecar_current(&meta),
+            "full sidecar written in lockstep"
+        );
+        let full = crate::full_cache::read_full(&cache, FRESH_KEY)
+            .unwrap()
+            .unwrap();
+        assert_eq!(full["version"], "v2");
+        let payload = cache.read_file(FRESH_KEY).unwrap().unwrap();
+        assert_eq!(payload.node_count, 2, "new document projected");
+    }
+
+    /// Metas written before freshness checks have no `version`: the first
+    /// probe can't prove them current, so they refetch once.
+    #[tokio::test]
+    async fn ensure_fresh_unversioned_meta_refetches() {
+        let (_td, cache) = seed_fresh(None, None);
+        let server = mock_http::serve(vec![
+            (200, meta_body("v2")),
+            (200, FILE_V2.into()),
+            (200, r#"{"comments":[]}"#.into()),
+        ]);
+        let report = ensure_fresh(&cfg_for(&server), &cache, &keys()).await;
+        assert_eq!(server.paths().len(), 3);
+        assert_eq!(report.refetched, keys());
+        let meta = cache.read_meta(FRESH_KEY).unwrap().unwrap();
+        assert_eq!(meta.version.as_deref(), Some("v2"));
+    }
+
+    #[tokio::test]
+    async fn ensure_fresh_probe_failure_serves_cache_untouched() {
+        let (_td, cache) = seed_fresh(Some("v1"), Some(0));
+        let server = mock_http::serve(vec![(500, "{}".into())]);
+        let report = ensure_fresh(&cfg_for(&server), &cache, &keys()).await;
+
+        assert_eq!(server.paths(), vec!["/v1/files/K/meta"]);
+        assert_eq!(report.unverified, keys());
+        let meta = cache.read_meta(FRESH_KEY).unwrap().unwrap();
+        assert_eq!(meta.version_checked_at_epoch, Some(0), "not restamped");
+        assert!(cache.read_file(FRESH_KEY).unwrap().is_some());
+    }
+
+    /// The regression this guards: `fetch_and_cache` turns a failed fetch
+    /// into a failure marker that deletes the payload. A failed *freshness*
+    /// refetch must instead keep serving the (stale) cached copy.
+    #[tokio::test]
+    async fn ensure_fresh_refetch_failure_keeps_cached_entry() {
+        let (_td, cache) = seed_fresh(Some("v1"), Some(0));
+        let server = mock_http::serve(vec![(200, meta_body("v2")), (500, "{}".into())]);
+        let report = ensure_fresh(&cfg_for(&server), &cache, &keys()).await;
+
+        assert_eq!(server.paths(), vec!["/v1/files/K/meta", "/v1/files/K"]);
+        assert_eq!(report.unverified, keys());
+        let meta = cache.read_meta(FRESH_KEY).unwrap().unwrap();
+        assert_eq!(meta.status, EntryStatus::Ok);
+        assert_eq!(meta.version.as_deref(), Some("v1"));
+        assert!(cache.read_file(FRESH_KEY).unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn ensure_fresh_skips_non_ok_entries() {
+        let td = TempDir::new().unwrap();
+        let cache = CacheDir::new(td.path());
+        cache.ensure().unwrap();
+        let marker = FileMeta::failure_marker(
+            FRESH_KEY.into(),
+            "F".into(),
+            "10".into(),
+            "P".into(),
+            "t1".into(),
+            EntryStatus::Failed,
+            "boom".into(),
+            0,
+        );
+        cache.write_meta(&marker).unwrap();
+        let server = mock_http::serve(vec![]);
+        ensure_fresh(&cfg_for(&server), &cache, &keys()).await;
+        assert!(server.paths().is_empty());
+    }
+
+    #[test]
+    fn full_sidecar_current_requires_stamp_at_or_after_payload() {
+        let mut m = ok_meta(100, 100);
+        assert!(!full_sidecar_current(&m), "unstamped");
+        m.full_schema_version = Some(FULL_SCHEMA_VERSION);
+        m.full_fetched_at_epoch = Some(99);
+        assert!(!full_sidecar_current(&m), "older than payload");
+        m.full_fetched_at_epoch = Some(100);
+        assert!(full_sidecar_current(&m));
+        m.full_schema_version = Some(FULL_SCHEMA_VERSION + 1);
+        assert!(!full_sidecar_current(&m), "other schema");
+    }
+
+    #[test]
+    fn name_list_caps_at_max() {
+        assert_eq!(name_list(["a", "b"].into_iter(), 5), "a, b");
+        assert_eq!(
+            name_list(["a", "b", "c", "d"].into_iter(), 2),
+            "a, b, … +2 more"
+        );
+    }
+
+    #[test]
+    fn version_check_due_respects_window() {
+        let mut m = ok_meta(0, 0);
+        assert!(version_check_due(&m, 1_000), "never checked");
+        m.version_checked_at_epoch = Some(1_000);
+        assert!(!version_check_due(&m, 1_000 + VERSION_CHECK_SECS - 1));
+        assert!(version_check_due(&m, 1_000 + VERSION_CHECK_SECS));
+        m.status = EntryStatus::NotExportable;
+        assert!(!version_check_due(&m, 10_000), "only Ok entries");
     }
 }

@@ -358,6 +358,8 @@ mod tests {
             variables_bytes: None,
             variables_error: None,
             variables_schema_version: None,
+            version: None,
+            version_checked_at_epoch: None,
         };
         cache.write_meta(&meta).unwrap();
 

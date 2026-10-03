@@ -167,16 +167,20 @@ impl Args {
         let name_filter = self.name.as_deref().map(str::to_lowercase);
         let name_filter = name_filter.as_deref();
         match self.id.as_deref() {
-            None => render_root(
-                &resolver,
-                effective_depth(explicit_depth, true),
-                explicit_depth.is_none(),
-                format,
-                show_all,
-                resolved,
-                inline_comments,
-                name_filter,
-            ),
+            None => {
+                freshen_for_listing(&resolver, cfg, effective_depth(explicit_depth, true), None)
+                    .await?;
+                render_root(
+                    &resolver,
+                    effective_depth(explicit_depth, true),
+                    explicit_depth.is_none(),
+                    format,
+                    show_all,
+                    resolved,
+                    inline_comments,
+                    name_filter,
+                )
+            }
             Some(s) => {
                 let id = parse_id(s).map_err(|e| anyhow::anyhow!("{e}"))?;
                 // Promote a bare native id to a qualified one when --in
@@ -189,27 +193,35 @@ impl Args {
                     .await
                     .map_err(|e| render_resolve_error(e, format))?;
                 match target {
-                    ResolvedTarget::Root => render_root(
-                        &resolver,
-                        effective_depth(explicit_depth, true),
-                        explicit_depth.is_none(),
-                        format,
-                        show_all,
-                        resolved,
-                        inline_comments,
-                        name_filter,
-                    ),
-                    ResolvedTarget::Project { synth, project_id } => render_project(
-                        &resolver,
-                        synth,
-                        &project_id,
-                        effective_depth(explicit_depth, false),
-                        format,
-                        show_all,
-                        resolved,
-                        inline_comments,
-                        name_filter,
-                    ),
+                    ResolvedTarget::Root => {
+                        let depth = effective_depth(explicit_depth, true);
+                        freshen_for_listing(&resolver, cfg, depth, None).await?;
+                        render_root(
+                            &resolver,
+                            depth,
+                            explicit_depth.is_none(),
+                            format,
+                            show_all,
+                            resolved,
+                            inline_comments,
+                            name_filter,
+                        )
+                    }
+                    ResolvedTarget::Project { synth, project_id } => {
+                        let depth = effective_depth(explicit_depth, false);
+                        freshen_for_listing(&resolver, cfg, depth, Some(&project_id)).await?;
+                        render_project(
+                            &resolver,
+                            synth,
+                            &project_id,
+                            depth,
+                            format,
+                            show_all,
+                            resolved,
+                            inline_comments,
+                            name_filter,
+                        )
+                    }
                     ResolvedTarget::File {
                         synth,
                         meta,
@@ -377,6 +389,30 @@ fn project_files_json(
             )
         })
         .collect()
+}
+
+/// Root/project listings read file payloads straight from the cache once
+/// they descend past the file rows (depth ≥ 2), bypassing the resolver's
+/// per-file version check — so check the listed files up front. At depth ≤ 1
+/// only names from the metas are shown, and nothing is probed.
+async fn freshen_for_listing(
+    resolver: &Resolver,
+    cfg: &Configuration,
+    depth: usize,
+    project_id: Option<&str>,
+) -> Result<()> {
+    if depth < 2 {
+        return Ok(());
+    }
+    let metas: Vec<FileMeta> = resolver
+        .cache()
+        .list_metas()?
+        .into_iter()
+        .filter(|m| m.status == EntryStatus::Ok)
+        .filter(|m| project_id.is_none_or(|p| m.project_id == p))
+        .collect();
+    resolver.freshen(cfg, &metas).await;
+    Ok(())
 }
 
 /// Root listing — projects + their files, recursing into each file's

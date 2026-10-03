@@ -620,18 +620,38 @@ fn emit_root(resolver: &Resolver) -> Result<Value> {
 // Helpers
 // ───────────────────────────────────────────────────────────────────────────
 
-/// Load the `.full.json.gz` sidecar for a file. With `cache_only=true` we
-/// refuse to fall back to a live fetch; instead we error with the standard
-/// "run `cache prefetch`" hint. Without it, a missing or stale sidecar
-/// triggers a live fetch and we write the sidecar opportunistically so the
-/// next call is offline.
+/// Load the `.full.json.gz` sidecar for a file — the raw `/v1/files/{key}`
+/// body, for the paint/text/effect fields the structural cache drops.
+///
+/// A sidecar is served only when [`cache::full_sidecar_current`] says it came
+/// from the same response as the structural payload (which the resolver has
+/// already version-checked). Otherwise the file is refetched through
+/// [`cache::refetch_file`], rewriting payload + sidecar + meta together so the
+/// two can't drift. With `cache_only=true` there is no refetch: an
+/// out-of-step sidecar is served with a stderr note, and a missing one errors
+/// with the standard "run `cache prefetch`" hint.
 async fn load_full(
     cfg: &Configuration,
     cache: &CacheDir,
     file_key: &str,
     cache_only: bool,
 ) -> Result<Value> {
-    if let Some(v) = full_cache::read_full(cache, file_key)? {
+    let current = cache
+        .read_meta(file_key)
+        .ok()
+        .flatten()
+        .is_some_and(|m| cache::full_sidecar_current(&m));
+    let sidecar = if current || cache_only {
+        full_cache::read_full(cache, file_key)?
+    } else {
+        None
+    };
+    if let Some(v) = sidecar {
+        if !current {
+            eprintln!(
+                "node-info: full-JSON sidecar for {file_key} predates the cached tree (--cache-only) — may be stale"
+            );
+        }
         return Ok(v);
     }
     if cache_only {
@@ -639,25 +659,7 @@ async fn load_full(
             "no full-JSON sidecar for {file_key} (and --cache-only is set); run `figma-explorer cache prefetch` to populate the local cache, then retry"
         );
     }
-    // Cold path: live-fetch and write the sidecar so future calls are offline.
-    let v = crate::cmd::fetch_file_json(cfg, file_key, None).await?;
-    // Write the sidecar once and reuse the returned byte count for the meta —
-    // an earlier version called write_full twice (once to write, once to learn
-    // the size), doubling the gzip + I/O on every cold fetch.
-    match full_cache::write_full(cache, file_key, &v) {
-        Err(e) => eprintln!("node-info: write_full failed for {file_key}: {e:#}"),
-        Ok(n) => {
-            if let Ok(Some(mut meta)) = cache.read_meta(file_key) {
-                meta.full_fetched_at_epoch = Some(cache::now_epoch());
-                meta.full_bytes = Some(n);
-                meta.full_schema_version = Some(cache::FULL_SCHEMA_VERSION);
-                if let Err(e) = cache.write_meta(&meta) {
-                    eprintln!("node-info: write_meta failed for {file_key}: {e:#}");
-                }
-            }
-        }
-    }
-    Ok(v)
+    cache::refetch_file(cfg, cache, file_key).await
 }
 
 /// Walk the cached structural document and return `[{id, type, name}, ...]`
