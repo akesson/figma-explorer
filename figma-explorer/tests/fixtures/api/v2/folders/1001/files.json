@@ -1,0 +1,17 @@
+{
+ "name": "Desktop",
+ "files": [
+  {
+   "key": "FxFixtureFile000000001",
+   "name": "Notifications",
+   "thumbnail_url": "https://example.invalid/placeholder.png",
+   "last_modified": "2026-05-29T12:20:28Z"
+  },
+  {
+   "key": "FxFixtureFile000000002",
+   "name": "404 / No Access",
+   "thumbnail_url": "https://example.invalid/placeholder.png",
+   "last_modified": "2026-03-25T17:07:04Z"
+  }
+ ]
+}

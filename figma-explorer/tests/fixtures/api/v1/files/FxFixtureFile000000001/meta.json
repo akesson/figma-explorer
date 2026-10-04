@@ -1,0 +1,23 @@
+{
+ "file": {
+  "name": "Notifications",
+  "folder_name": "Desktop",
+  "last_touched_at": "2026-05-29T12:28:07.155Z",
+  "creator": {
+   "id": "fixture-user-1",
+   "handle": "Fixture User 1",
+   "img_url": "https://example.invalid/placeholder.png"
+  },
+  "last_touched_by": {
+   "id": "fixture-user-1",
+   "handle": "Fixture User 1",
+   "img_url": "https://example.invalid/placeholder.png"
+  },
+  "thumbnail_url": "https://example.invalid/placeholder.png",
+  "editorType": "figma",
+  "version": "2358981853218856545",
+  "link_access": "inherit",
+  "url": "https://www.figma.com/file/FxFixtureFile000000001/Notifications",
+  "role": "viewer"
+ }
+}

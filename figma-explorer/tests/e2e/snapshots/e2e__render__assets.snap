@@ -1,0 +1,15 @@
+---
+source: figma-explorer/tests/e2e/render.rs
+expression: text
+---
+out_dir: out
+icons: 1
+images: 1
+composites: 0
+failed: 0
+manifest:
+  icons:
+    - {path: out/icons/vector.svg, original_name: Vector, node_id: I1:6630;251:29734;101:30150, kind: Icon}
+  images: [{path: out/images/image-2.png, original_name: image 2, node_id: 1:6635, kind: Image}]
+  composites: []
+  failed: []

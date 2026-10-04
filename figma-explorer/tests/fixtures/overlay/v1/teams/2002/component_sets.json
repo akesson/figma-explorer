@@ -1,0 +1,29 @@
+{
+  "error": false,
+  "status": 200,
+  "meta": {
+    "component_sets": [
+      {
+        "key": "fxcomponentset000000000000000000000000001",
+        "file_key": "FxLibraryFile000000003",
+        "node_id": "10:0",
+        "thumbnail_url": "https://example.invalid/placeholder.png",
+        "name": "Button",
+        "description": "Buttons in every intent",
+        "created_at": "2026-01-10T10:00:00.000Z",
+        "updated_at": "2026-03-01T10:00:00.000Z",
+        "user": {
+          "id": "fixture-user-1",
+          "handle": "Fixture User 1",
+          "img_url": "https://example.invalid/placeholder.png"
+        },
+        "containing_frame": {
+          "name": "Buttons",
+          "nodeId": "9:0",
+          "pageId": "0:1",
+          "pageName": "Buttons"
+        }
+      }
+    ]
+  }
+}

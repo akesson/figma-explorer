@@ -1,0 +1,100 @@
+{
+  "error": false,
+  "status": 200,
+  "meta": {
+    "components": [
+      {
+        "key": "fxcomponent0000000000000000000000000001",
+        "file_key": "FxLibraryFile000000003",
+        "node_id": "10:1",
+        "thumbnail_url": "https://example.invalid/placeholder.png",
+        "name": "Type=Primary, Size=Medium",
+        "description": "Main call to action",
+        "created_at": "2026-01-10T10:00:00.000Z",
+        "updated_at": "2026-03-01T10:00:00.000Z",
+        "user": {
+          "id": "fixture-user-1",
+          "handle": "Fixture User 1",
+          "img_url": "https://example.invalid/placeholder.png"
+        },
+        "containing_frame": {
+          "name": "Button",
+          "nodeId": "10:1",
+          "pageId": "0:1",
+          "pageName": "Buttons",
+          "containingStateGroup": {
+            "name": "Button",
+            "nodeId": "10:0"
+          }
+        }
+      },
+      {
+        "key": "fxcomponent0000000000000000000000000002",
+        "file_key": "FxLibraryFile000000003",
+        "node_id": "10:2",
+        "thumbnail_url": "https://example.invalid/placeholder.png",
+        "name": "Type=Secondary, Size=Medium",
+        "description": "",
+        "created_at": "2026-01-10T10:00:00.000Z",
+        "updated_at": "2026-03-02T10:00:00.000Z",
+        "user": {
+          "id": "fixture-user-1",
+          "handle": "Fixture User 1",
+          "img_url": "https://example.invalid/placeholder.png"
+        },
+        "containing_frame": {
+          "name": "Button",
+          "nodeId": "10:2",
+          "pageId": "0:1",
+          "pageName": "Buttons",
+          "containingStateGroup": {
+            "name": "Button",
+            "nodeId": "10:0"
+          }
+        }
+      },
+      {
+        "key": "fxcomponent0000000000000000000000000003",
+        "file_key": "FxLibraryFile000000003",
+        "node_id": "11:1",
+        "thumbnail_url": "https://example.invalid/placeholder.png",
+        "name": "Avatar",
+        "description": "User avatar with initials fallback",
+        "created_at": "2026-01-10T10:00:00.000Z",
+        "updated_at": "2026-03-03T10:00:00.000Z",
+        "user": {
+          "id": "fixture-user-1",
+          "handle": "Fixture User 1",
+          "img_url": "https://example.invalid/placeholder.png"
+        },
+        "containing_frame": {
+          "name": "Avatars",
+          "nodeId": "11:1",
+          "pageId": "0:1",
+          "pageName": "Identity"
+        }
+      },
+      {
+        "key": "fxcomponent0000000000000000000000000004",
+        "file_key": "FxFixtureFile000000001",
+        "node_id": "1:7753",
+        "thumbnail_url": "https://example.invalid/placeholder.png",
+        "name": "Notifications panel",
+        "description": "Notification list used in settings",
+        "created_at": "2026-01-10T10:00:00.000Z",
+        "updated_at": "2026-03-04T10:00:00.000Z",
+        "user": {
+          "id": "fixture-user-1",
+          "handle": "Fixture User 1",
+          "img_url": "https://example.invalid/placeholder.png"
+        },
+        "containing_frame": {
+          "name": "Notifications",
+          "nodeId": "1:7753",
+          "pageId": "0:1",
+          "pageName": "Design"
+        }
+      }
+    ]
+  }
+}

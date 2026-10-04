@@ -38,3 +38,4 @@ flate2.workspace = true
 
 [dev-dependencies]
 serde_yaml_ng.workspace = true
+insta.workspace = true

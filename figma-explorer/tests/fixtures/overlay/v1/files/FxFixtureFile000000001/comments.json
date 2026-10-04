@@ -1,0 +1,247 @@
+{
+  "comments": [
+    {
+      "id": "1000000009",
+      "uuid": "00000000-0000-4000-8000-001000000009",
+      "file_key": "FxFixtureFile000000001",
+      "parent_id": "",
+      "user": {
+        "id": "fixture-user-2",
+        "handle": "Fixture User 2",
+        "img_url": "https://example.invalid/placeholder.png"
+      },
+      "created_at": "2026-04-08T13:00:00.000Z",
+      "resolved_at": "2026-04-08T15:00:00.000Z",
+      "message": "Cover status looks right.",
+      "reactions": [
+        {
+          "emoji": ":+1:",
+          "created_at": "2026-04-08T13:00:00.000Z",
+          "user": {
+            "id": "fixture-user-1",
+            "handle": "Fixture User 1",
+            "img_url": "https://example.invalid/placeholder.png"
+          }
+        },
+        {
+          "emoji": ":+1:",
+          "created_at": "2026-04-08T13:00:00.000Z",
+          "user": {
+            "id": "fixture-user-3",
+            "handle": "Fixture User 3",
+            "img_url": "https://example.invalid/placeholder.png"
+          }
+        }
+      ],
+      "client_meta": {
+        "node_id": "1:8187",
+        "node_offset": {
+          "x": 400,
+          "y": 200
+        },
+        "stable_path": [
+          "1:8187"
+        ]
+      },
+      "order_id": "6"
+    },
+    {
+      "id": "1000000008",
+      "uuid": "00000000-0000-4000-8000-001000000008",
+      "file_key": "FxFixtureFile000000001",
+      "parent_id": "",
+      "user": {
+        "id": "fixture-user-1",
+        "handle": "Fixture User 1",
+        "img_url": "https://example.invalid/placeholder.png"
+      },
+      "created_at": "2026-04-07T08:00:00.000Z",
+      "resolved_at": null,
+      "message": "Old note on a removed frame.",
+      "reactions": [],
+      "client_meta": {
+        "node_id": "1:99999",
+        "node_offset": {
+          "x": 5,
+          "y": 5
+        }
+      },
+      "order_id": "5"
+    },
+    {
+      "id": "1000000007",
+      "uuid": "00000000-0000-4000-8000-001000000007",
+      "file_key": "FxFixtureFile000000001",
+      "parent_id": "",
+      "user": {
+        "id": "fixture-user-3",
+        "handle": "Fixture User 3",
+        "img_url": "https://example.invalid/placeholder.png"
+      },
+      "created_at": "2026-04-06T16:00:00.000Z",
+      "resolved_at": null,
+      "message": "Is this hidden menu still needed?",
+      "reactions": [],
+      "client_meta": {
+        "node_id": "1:7835",
+        "node_offset": {
+          "x": 20,
+          "y": 10
+        },
+        "stable_path": [
+          "1:7835"
+        ]
+      },
+      "order_id": "4"
+    },
+    {
+      "id": "1000000006",
+      "uuid": "00000000-0000-4000-8000-001000000006",
+      "file_key": "FxFixtureFile000000001",
+      "parent_id": "",
+      "user": {
+        "id": "fixture-user-2",
+        "handle": "Fixture User 2",
+        "img_url": "https://example.invalid/placeholder.png"
+      },
+      "created_at": "2026-04-05T14:00:00.000Z",
+      "resolved_at": null,
+      "message": "This whole field group needs 8px more padding.",
+      "reactions": [],
+      "client_meta": {
+        "node_id": "1:7761",
+        "node_offset": {
+          "x": 0,
+          "y": 0
+        },
+        "stable_path": [
+          "1:7761"
+        ],
+        "region_width": 367,
+        "region_height": 40,
+        "comment_pin_corner": "bottom-right"
+      },
+      "order_id": "3"
+    },
+    {
+      "id": "1000000005",
+      "uuid": "00000000-0000-4000-8000-001000000005",
+      "file_key": "FxFixtureFile000000001",
+      "parent_id": "1000000004",
+      "user": {
+        "id": "fixture-user-1",
+        "handle": "Fixture User 1",
+        "img_url": "https://example.invalid/placeholder.png"
+      },
+      "created_at": "2026-04-03T12:00:00.000Z",
+      "resolved_at": null,
+      "message": "Done.",
+      "reactions": [],
+      "client_meta": null,
+      "order_id": null
+    },
+    {
+      "id": "1000000004",
+      "uuid": "00000000-0000-4000-8000-001000000004",
+      "file_key": "FxFixtureFile000000001",
+      "parent_id": "",
+      "user": {
+        "id": "fixture-user-3",
+        "handle": "Fixture User 3",
+        "img_url": "https://example.invalid/placeholder.png"
+      },
+      "created_at": "2026-04-03T11:00:00.000Z",
+      "resolved_at": "2026-04-04T09:00:00.000Z",
+      "message": "Copy: use sentence case here.",
+      "reactions": [
+        {
+          "emoji": ":fire:",
+          "created_at": "2026-04-03T11:00:00.000Z",
+          "user": {
+            "id": "fixture-user-2",
+            "handle": "Fixture User 2",
+            "img_url": "https://example.invalid/placeholder.png"
+          }
+        }
+      ],
+      "client_meta": {
+        "node_id": "1:7786",
+        "node_offset": {
+          "x": 10,
+          "y": 8
+        }
+      },
+      "order_id": "2"
+    },
+    {
+      "id": "1000000003",
+      "uuid": "00000000-0000-4000-8000-001000000003",
+      "file_key": "FxFixtureFile000000001",
+      "parent_id": "1000000001",
+      "user": {
+        "id": "fixture-user-1",
+        "handle": "Fixture User 1",
+        "img_url": "https://example.invalid/placeholder.png"
+      },
+      "created_at": "2026-04-02T08:15:00.000Z",
+      "resolved_at": null,
+      "message": "Thanks, updating the spec.",
+      "reactions": [],
+      "client_meta": null,
+      "order_id": null
+    },
+    {
+      "id": "1000000002",
+      "uuid": "00000000-0000-4000-8000-001000000002",
+      "file_key": "FxFixtureFile000000001",
+      "parent_id": "1000000001",
+      "user": {
+        "id": "fixture-user-2",
+        "handle": "Fixture User 2",
+        "img_url": "https://example.invalid/placeholder.png"
+      },
+      "created_at": "2026-04-01T10:30:00.000Z",
+      "resolved_at": null,
+      "message": "Yes, wrap below 480px.",
+      "reactions": [
+        {
+          "emoji": ":+1:",
+          "created_at": "2026-04-01T10:30:00.000Z",
+          "user": {
+            "id": "fixture-user-1",
+            "handle": "Fixture User 1",
+            "img_url": "https://example.invalid/placeholder.png"
+          }
+        }
+      ],
+      "client_meta": null,
+      "order_id": null
+    },
+    {
+      "id": "1000000001",
+      "uuid": "00000000-0000-4000-8000-001000000001",
+      "file_key": "FxFixtureFile000000001",
+      "parent_id": "",
+      "user": {
+        "id": "fixture-user-1",
+        "handle": "Fixture User 1",
+        "img_url": "https://example.invalid/placeholder.png"
+      },
+      "created_at": "2026-04-01T09:00:00.000Z",
+      "resolved_at": null,
+      "message": "@Fixture User 2 should the settings row wrap on narrow widths?",
+      "reactions": [],
+      "client_meta": {
+        "node_id": "1:7753",
+        "node_offset": {
+          "x": 120,
+          "y": 40
+        },
+        "stable_path": [
+          "1:7753"
+        ]
+      },
+      "order_id": "1"
+    }
+  ]
+}
