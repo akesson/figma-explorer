@@ -725,7 +725,9 @@ impl CacheDir {
 
     /// List every meta currently on disk. Used by `cache prefetch` (to
     /// invalidate stale entries against a fresh listing) and `cache clear`
-    /// (to sweep orphans).
+    /// (to sweep orphans). Sorted by `(project_id, name, file_key)` —
+    /// `read_dir` order is filesystem-dependent, and prefetch interns
+    /// `file:N` synths in this order, so it must be deterministic.
     pub fn list_metas(&self) -> Result<Vec<FileMeta>> {
         let dir = self.files_dir();
         if !dir.exists() {
@@ -756,6 +758,9 @@ impl CacheDir {
                 }
             }
         }
+        out.sort_by(|a, b| {
+            (&a.project_id, &a.name, &a.file_key).cmp(&(&b.project_id, &b.name, &b.file_key))
+        });
         Ok(out)
     }
 
@@ -2520,6 +2525,30 @@ mod tests {
             version_checked_at_epoch: None,
             refetch_failed_at_epoch: None,
         }
+    }
+
+    #[test]
+    fn list_metas_is_sorted_by_project_name_key() {
+        let td = TempDir::new().unwrap();
+        let cache = CacheDir::new(td.path());
+        cache.ensure().unwrap();
+        let mut b = meta_for("zz", "10", "ts", 1);
+        b.name = "Alpha".into();
+        let mut a = meta_for("yy", "10", "ts", 1);
+        a.name = "Alpha".into();
+        let mut c = meta_for("aa", "10", "ts", 1);
+        c.name = "Beta".into();
+        let d = meta_for("bb", "09", "ts", 1);
+        for m in [&c, &b, &d, &a] {
+            cache.write_meta(m).unwrap();
+        }
+        let keys: Vec<String> = cache
+            .list_metas()
+            .unwrap()
+            .into_iter()
+            .map(|m| m.file_key)
+            .collect();
+        assert_eq!(keys, ["bb", "yy", "zz", "aa"]);
     }
 
     #[test]
