@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Post-process openapi-generator output to fix known Rust compile / runtime issues.
 
-Currently handles three issues:
+Currently handles four issues:
 
 1. Duplicate `Array` enum variants. When a Figma `oneOf` is a union of
    multiple inline `type: array` schemas, openapi-generator names every
@@ -25,6 +25,17 @@ Currently handles three issues:
    We add `#[serde(skip)]` so the field is excluded from (de)serialization
    and falls back to its `Default` value — losing the sentinel from the
    output, which is the right answer since it carries no information.
+
+4. Shadowed untagged-enum variants. `#[serde(untagged)]` takes the *first*
+   variant that deserializes, and serde ignores unknown fields — so when a
+   later variant's struct is an earlier one's plus extra required fields
+   (`Region` = `Vector` + `region_width`/`region_height`; `Rgba` = `Rgb` +
+   `a`), input meant for the later variant matches the earlier one and the
+   extra fields are silently dropped. We move such a variant ahead of the
+   one shadowing it. Inputs lacking the extra required fields fail it and
+   fall through, so the earlier variant still gets its own input. Pairs
+   already told apart by a shared field (e.g. `type` enums with disjoint
+   values) are left alone.
 
 Run from anywhere; the script locates the crate via its own path.
 """
@@ -103,7 +114,7 @@ def skip_sentinel_enums(text: str) -> str:
     return text
 
 
-# Issue 4 (considered, NOT applied): Figma's beta spec drifts from the live
+# Considered, NOT applied: Figma's beta spec drifts from the live
 # API in multiple ways — some fields marked required come back null
 # (`version` on `GET /v1/files/{key}`), and some endpoint responses are
 # wrapped in an envelope the spec doesn't describe (`GET .../meta` returns
@@ -115,12 +126,86 @@ def skip_sentinel_enums(text: str) -> str:
 # openapi/patches/ when they come up.
 
 
+UNTAGGED_ENUM = re.compile(r"(#\[serde\(untagged\)\]\s*pub enum \w+\s*\{\n)(.*?)(\n\})", re.S)
+STRUCT_VARIANT = re.compile(r"^\s*(\w+)\((?:Box<)?models::(\w+)>?\),?\s*$")
+FIELD = re.compile(r"#\[serde\((.*?)\)\]\s*pub (?:r#)?\w+: ([^,\n]+),", re.S)
+
+
+def model_file(type_name: str) -> Path:
+    return MODELS_DIR / (re.sub(r"(?<!^)(?=[A-Z])", "_", type_name).lower() + ".rs")
+
+
+def struct_fields(type_name: str):
+    """`{wire_name: (rust_type, required, enum_values_or_None)}` for a model
+    struct, or None when it isn't a plain struct in its own file."""
+    path = model_file(type_name)
+    if not path.exists():
+        return None
+    src = path.read_text()
+    body = re.search(r"pub struct " + type_name + r"\s*\{(.*?)\n\}", src, re.S)
+    if not body:
+        return None
+    out = {}
+    for attr, ty in FIELD.findall(body.group(1)):
+        rename = re.search(r'rename = "([^"]+)"', attr)
+        if not rename:
+            continue
+        required = not ty.startswith("Option<") and "default" not in attr
+        base = ty.replace("Option<", "").rstrip(">").strip()
+        local = re.search(r"pub enum " + re.escape(base) + r"\s*\{(.*?)\n\}", src, re.S)
+        values = set(re.findall(r'rename = "([^"]+)"', local.group(1))) if local else None
+        out[rename.group(1)] = (base, required, values)
+    return out
+
+
+def shadows(a, b) -> bool:
+    """Whether variant struct `a` (listed first) captures input meant for
+    `b`: everything `a` requires is present in `b`, `b` requires something
+    `a` lacks, and no shared required field tells them apart."""
+    if a is None or b is None:
+        return False
+    req_a = {k for k, (_, r, _) in a.items() if r}
+    if not req_a <= set(b) or not {k for k, (_, r, _) in b.items() if r} - set(a):
+        return False
+    for k in set(a) & set(b):
+        (ta, ra, va), (tb, _, vb) = a[k], b[k]
+        if va is not None and vb is not None and not (va & vb):
+            return False  # e.g. `type`/`blurType` enums with disjoint values
+        if ra and ((va is None) != (vb is None) or (va is None and ta != tb)):
+            return False  # different Rust types; let serde decide
+    return True
+
+
+def reorder_shadowed_variants(text: str) -> str:
+    def fix(m: re.Match) -> str:
+        lines = m.group(2).split("\n")
+        # Non-struct variants (`Boolean(bool)`, …) get no fields and never
+        # shadow or get shadowed; they only move if a struct jumps them.
+        parsed = [STRUCT_VARIANT.match(l) for l in lines]
+        fields = [struct_fields(p.group(2)) if p else None for p in parsed]
+        order = list(range(len(lines)))
+        moved = True
+        while moved:
+            moved = False
+            for i in range(len(order)):
+                for j in range(i + 1, len(order)):
+                    if shadows(fields[order[i]], fields[order[j]]):
+                        order.insert(i, order.pop(j))
+                        moved = True
+                        break
+                if moved:
+                    break
+        return m.group(1) + "\n".join(lines[k] for k in order) + m.group(3)
+
+    return UNTAGGED_ENUM.sub(fix, text)
+
+
 def main() -> int:
     changed = 0
     if MODELS_DIR.is_dir():
         for path in sorted(MODELS_DIR.glob("*.rs")):
             original = path.read_text()
-            fixed = skip_sentinel_enums(dedupe_enum_variants(original))
+            fixed = reorder_shadowed_variants(skip_sentinel_enums(dedupe_enum_variants(original)))
             if fixed != original:
                 path.write_text(fixed)
                 changed += 1
