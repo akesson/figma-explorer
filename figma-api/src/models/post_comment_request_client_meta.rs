@@ -16,10 +16,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum PostCommentRequestClientMeta {
-    Vector(Box<models::Vector>),
-    FrameOffset(Box<models::FrameOffset>),
     Region(Box<models::Region>),
+    Vector(Box<models::Vector>),
     FrameOffsetRegion(Box<models::FrameOffsetRegion>),
+    FrameOffset(Box<models::FrameOffset>),
 }
 
 impl Default for PostCommentRequestClientMeta {
