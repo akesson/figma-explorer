@@ -1,0 +1,7 @@
+---
+source: figma-explorer/tests/e2e/browse.rs
+expression: text
+---
+# searched 2 cached files
+file:2:1:7762  607x480@12,528  | FRAME  93.0  "Notification"  (Design > Notifications)  [+3 hits]
+file:2:1:7753  631x680@0,384   | FRAME  89.3  "Notifications"  (Design)  [+12 hits]

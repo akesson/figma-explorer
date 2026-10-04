@@ -12,6 +12,8 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # A missing or changed e2e snapshot fails the run instead of being written.
+  INSTA_UPDATE: no
 
 jobs:
   check:

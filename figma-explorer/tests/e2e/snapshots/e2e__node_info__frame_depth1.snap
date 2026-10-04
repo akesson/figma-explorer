@@ -1,0 +1,213 @@
+---
+source: figma-explorer/tests/e2e/node_info.rs
+expression: text
+---
+target:
+  kind: node
+  id: file:2:1:7753
+  url: https://www.figma.com/design/FxFixtureFile000000001/?node-id=1-7753
+  path: [{id: "0:1", type: CANVAS, name: Design}]
+file:
+  key: FxFixtureFile000000001
+  name: Notifications
+  url: https://www.figma.com/design/FxFixtureFile000000001/
+  project_id: "1001"
+  project_name: Desktop
+  synth: 2
+  last_modified: "2026-05-29T12:20:28Z"
+node:
+  id: 1:7753
+  type: FRAME
+  name: Notifications
+  bounds: {x: 0, y: 384, width: 631, height: 680}
+  corner: {radius: 8}
+  clips_content: true
+  fills: [{type: SOLID, hex: "#ffffff"}]
+  effects:
+    - {type: DROP_SHADOW, offset: {x: 0, y: 8}, radius: 16, blend_mode: NORMAL, show_shadow_behind_node: true, hex: "#1b242c14"}
+    - {type: DROP_SHADOW, offset: {x: 0, y: 0}, radius: 0, spread: 1, blend_mode: NORMAL, show_shadow_behind_node: true, hex: "#1b242c14"}
+  layout:
+    mode: VERTICAL
+    primary_axis: {align: CENTER}
+    counter_axis: {sizing: FIXED}
+    item_spacing: 16
+    padding: [16, 12, 16, 12]
+  layout_child: {sizing: FIXED/HUG}
+  styles: {fills: 1:4064, fill: 1:4064, effect: 1:4065}
+  bound_variables:
+    itemSpacing: v1
+    paddingLeft: v2
+    paddingTop: v1
+    paddingRight: v2
+    paddingBottom: v1
+    rectangleCornerRadii: v3
+  children:
+    - id: 1:7754
+      type: FRAME
+      name: Notification settings
+      bounds: {width: 607, height: 24}
+      layout: {mode: HORIZONTAL, primary_axis: {sizing: FIXED, align: SPACE_BETWEEN}, item_spacing: 10}
+      layout_child: {align: STRETCH, sizing: FILL/HUG}
+    - id: 1:7757
+      type: FRAME
+      name: Filters
+      bounds: {width: 607, height: 72}
+      corner: {radius: 8}
+      clips_content: true
+      fills: [{type: SOLID, hex: "#e9e1f9", bound_variable: v4}]
+      strokes: [{type: SOLID, hex: "#ded2f6", bound_variable: v5}]
+      stroke: {weight: 2, align: INSIDE}
+      layout:
+        mode: HORIZONTAL
+        primary_axis: {sizing: FIXED}
+        counter_axis: {align: CENTER}
+        item_spacing: 24
+        padding: 16
+      layout_child: {align: STRETCH, sizing: FILL/HUG}
+      bound_variables:
+        itemSpacing: v6
+        paddingLeft: v1
+        paddingTop: v1
+        paddingRight: v1
+        paddingBottom: v1
+        rectangleCornerRadii: v3
+    - id: 1:7762
+      type: FRAME
+      name: Notification
+      bounds: {width: 607, height: 480}
+      layout: {mode: VERTICAL, counter_axis: {sizing: FIXED}, item_spacing: 8}
+      layout_child: {align: STRETCH, sizing: FILL/HUG}
+  hidden_children: [{id: 1:7835, name: Container, type: FRAME}]
+  comments:
+    - comment_id: "1000000007"
+      message: Is this hidden menu still needed?
+      author: Fixture User 3
+      created_at: "2026-04-06T16:00:00.000Z"
+      order_id: "4"
+      reactions: 0
+      anchor: {kind: frame_offset, explicit_node_id: 1:7835}
+      node:
+        node_id: 1:7835
+        type: FRAME
+        name: Container
+        path: [Document, Design, Notifications]
+        id: file:2:1:7835
+      method: {kind: explicit}
+      comm_id: file:2:comm:3
+      anchor_rendered: false
+    - comment_id: "1000000006"
+      message: This whole field group needs 8px more padding.
+      author: Fixture User 2
+      created_at: "2026-04-05T14:00:00.000Z"
+      order_id: "3"
+      reactions: 0
+      anchor: {kind: frame_offset_region, explicit_node_id: 1:7761, canvas_rect: [0, 0, 367, 40]}
+      node:
+        node_id: 1:7761
+        type: INSTANCE
+        name: Field
+        path: [Document, Design, Notifications, Filters, Filters container]
+        id: file:2:1:7761
+      method: {kind: explicit}
+      comm_id: file:2:comm:4
+      anchor_rendered: false
+    - comment_id: "1000000005"
+      message: Done.
+      author: Fixture User 1
+      created_at: "2026-04-03T12:00:00.000Z"
+      parent_id: "1000000004"
+      reactions: 0
+      anchor: {kind: vector, canvas_point: [0, 0]}
+      node:
+        node_id: 1:7786
+        type: TEXT
+        name: Text
+        path:
+          - Document
+          - Design
+          - Notifications
+          - Notification
+          - Notification
+          - Notification Content
+          - Text Container
+          - Title Container
+        id: file:2:1:7786
+      method: {kind: explicit}
+      comm_id: file:2:comm:5
+      anchor_rendered: false
+    - comment_id: "1000000004"
+      message: "Copy: use sentence case here."
+      author: Fixture User 3
+      created_at: "2026-04-03T11:00:00.000Z"
+      resolved_at: "2026-04-04T09:00:00.000Z"
+      order_id: "2"
+      reactions: 1
+      anchor: {kind: frame_offset, explicit_node_id: 1:7786}
+      node:
+        node_id: 1:7786
+        type: TEXT
+        name: Text
+        path:
+          - Document
+          - Design
+          - Notifications
+          - Notification
+          - Notification
+          - Notification Content
+          - Text Container
+          - Title Container
+        id: file:2:1:7786
+      method: {kind: explicit}
+      comm_id: file:2:comm:6
+      anchor_rendered: false
+    - comment_id: "1000000003"
+      message: Thanks, updating the spec.
+      author: Fixture User 1
+      created_at: "2026-04-02T08:15:00.000Z"
+      parent_id: "1000000001"
+      reactions: 0
+      anchor: {kind: vector, canvas_point: [0, 0]}
+      node: {node_id: 1:7753, type: FRAME, name: Notifications, path: [Document, Design], id: file:2:1:7753}
+      method: {kind: explicit}
+      comm_id: file:2:comm:7
+    - comment_id: "1000000002"
+      message: Yes, wrap below 480px.
+      author: Fixture User 2
+      created_at: "2026-04-01T10:30:00.000Z"
+      parent_id: "1000000001"
+      reactions: 1
+      anchor: {kind: vector, canvas_point: [0, 0]}
+      node: {node_id: 1:7753, type: FRAME, name: Notifications, path: [Document, Design], id: file:2:1:7753}
+      method: {kind: explicit}
+      comm_id: file:2:comm:8
+    - comment_id: "1000000001"
+      message: "@Fixture User 2 should the settings row wrap on narrow widths?"
+      author: Fixture User 1
+      created_at: "2026-04-01T09:00:00.000Z"
+      order_id: "1"
+      reactions: 0
+      anchor: {kind: frame_offset, explicit_node_id: 1:7753}
+      node: {node_id: 1:7753, type: FRAME, name: Notifications, path: [Document, Design], id: file:2:1:7753}
+      method: {kind: explicit}
+      comm_id: file:2:comm:9
+variables:
+  v1: {id: VariableID:286ecbf708ad75bd518b98776fd018ac84c1bd4b/1107:1351}
+  v2: {id: VariableID:2d393464bd64c8159bb50e79bc155dd9b82be40a/1107:1357}
+  v3: {id: VariableID:2b51a94b7ab8b1872e5862f472df7fb0f97740ee/1107:1328}
+  v4: {id: VariableID:0a5d542e26c8d52864ceb2e718f2a0a55ba684dd/6275:999}
+  v5: {id: VariableID:ad3a7e30979946ff29121c8a47e34afa17faccd6/6275:989}
+  v6: {id: VariableID:3244630270033b11cb51ae84a8dc4cfd451b73ac/1107:1358}
+variables_note: "variables sidecar unavailable: account does not have Variables REST API access"
+styles_index:
+  1:4064:
+    key: 8c79ecd8ccc04288ea7e6c60f77071d7c588cc5b
+    name: .⚠️ DEPRECATED/Interaction/Background/Modeless
+    description: ""
+    remote: true
+    type: FILL
+  1:4065:
+    key: 2017bae77137a35e4bde9d2afef597d66d0d2854
+    name: Elevations/Stroked/Depth+3
+    description: ""
+    remote: true
+    type: EFFECT

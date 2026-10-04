@@ -1,0 +1,18 @@
+---
+source: figma-explorer/tests/e2e/browse.rs
+expression: text
+---
+# hidden canvas: Cover — use --no-ignore to show
+# 6 comment threads (4 unresolved) — use: comments file:2 [--grep <word>]
+file:2         -                 | FILE  "Notifications"
+file:2:0:1     -                 |   CANVAS  "Design"
+file:2:1:7753  631x680@0,384     |     FRAME  "Notifications"  [1 comment]
+file:2:1:7754  607x24@12,400     |       FRAME  "Notification settings"  [+1 children]
+file:2:1:7757  607x72@12,440     |       FRAME  "Filters"  [+1 children]
+file:2:1:7762  607x480@12,528    |       FRAME  "Notification"  [+3 children]
+file:2:3:417   -                 |     WIDGET  "Notes"
+file:2:3:418   342x211@734,1229  |       FRAME  "Note"  [+1 children]
+file:2:1:7840  -                 |     WIDGET  "Notes"
+file:2:1:7841  342x231@145,0     |       FRAME  "Note"  [+2 children]
+file:2:3:443   115x747@634,587   |     GROUP  "Group 1"
+file:2:5:491   62x0@640,477      |     VECTOR  "Arrow 2"
