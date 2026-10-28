@@ -1,0 +1,8 @@
+---
+source: figma-explorer/tests/e2e/browse.rs
+expression: text
+---
+# searched 2 cached files
+file:2:1:7760  84x24@136,464  | INSTANCE  77.1  "Checkbox"  (Design > Notifications > Filters > Filters container)  [+2 hits]
+file:2:6:3476  40x40@24,712   | INSTANCE  67.8  "Avatar"  (Design > Notifications > Notification > Notification > Notification Content)  [+2 hits]
+file:2:1:7827  40x40@24,956   | INSTANCE  67.8  "Avatar"  (Design > Notifications > Notification > Notification > Notification Content > Icon Container)  [+1 hits]

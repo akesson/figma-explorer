@@ -1,0 +1,5 @@
+{
+ "status": 403,
+ "error": true,
+ "message": "Invalid scope(s): current_user:read, file_comments:read, file_content:read, file_metadata:read, file_versions:read, library_assets:read, library_content:read, team_library_content:read, file_dev_resources:read, folders:read. This endpoint requires the file_variables:read scope"
+}

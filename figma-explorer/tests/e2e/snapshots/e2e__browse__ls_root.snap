@@ -1,0 +1,8 @@
+---
+source: figma-explorer/tests/e2e/browse.rs
+expression: text
+---
+# depth 1 (projects + files) — use `ls file:N` / `ls proj:N` or --depth 2 to descend
+proj:1  -  | PROJECT  "Desktop"
+file:1  -  |   FILE  "404 / No Access"
+file:2  -  |   FILE  "Notifications"

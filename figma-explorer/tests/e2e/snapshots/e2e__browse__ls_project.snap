@@ -1,0 +1,19 @@
+---
+source: figma-explorer/tests/e2e/browse.rs
+expression: text
+---
+# hidden canvas: Cover — use --no-ignore to show
+proj:1         -                | PROJECT  "Desktop"
+file:1         -                |   FILE  "404 / No Access"
+file:1:1:7396  -                |     CANVAS  "---"
+file:1:1:2     -                |     CANVAS  "Design"
+file:1:1:6629  1440x990@0,0     |       FRAME  "Billing"  [+3 children]
+file:1:1:6639  -                |       WIDGET  "Notes"  [+1 children]
+file:1:1:6663  1440x990@1674,0  |       FRAME  "Billing"  [+1 children]
+file:2         -                |   FILE  "Notifications"
+file:2:0:1     -                |     CANVAS  "Design"
+file:2:1:7753  631x680@0,384    |       FRAME  "Notifications"  [+3 children]  [1 comment]
+file:2:3:417   -                |       WIDGET  "Notes"  [+1 children]
+file:2:1:7840  -                |       WIDGET  "Notes"  [+1 children]
+file:2:3:443   115x747@634,587  |       GROUP  "Group 1"
+file:2:5:491   62x0@640,477     |       VECTOR  "Arrow 2"

@@ -1,0 +1,12 @@
+---
+source: figma-explorer/tests/e2e/browse.rs
+expression: text
+---
+# hidden canvas: Cover — use --no-ignore to show
+# name filter "filters": 2 matches
+# 6 comment threads (4 unresolved) — use: comments file:2 [--grep <word>]
+file:2         -               | FILE  "Notifications"
+file:2:0:1     -               |   CANVAS  "Design"
+file:2:1:7753  631x680@0,384   |     FRAME  "Notifications"  [1 comment]
+file:2:1:7757  607x72@12,440   |       FRAME  "Filters"
+file:2:5:510   467x40@136,456  |         FRAME  "Filters container"  [+2 children]

@@ -1,0 +1,23 @@
+{
+ "file": {
+  "name": "404 / No Access",
+  "folder_name": "Desktop",
+  "last_touched_at": "2026-03-25T17:15:03.062Z",
+  "creator": {
+   "id": "fixture-user-1",
+   "handle": "Fixture User 1",
+   "img_url": "https://example.invalid/placeholder.png"
+  },
+  "last_touched_by": {
+   "id": "fixture-user-1",
+   "handle": "Fixture User 1",
+   "img_url": "https://example.invalid/placeholder.png"
+  },
+  "thumbnail_url": "https://example.invalid/placeholder.png",
+  "editorType": "figma",
+  "version": "2334943981071165165",
+  "link_access": "inherit",
+  "url": "https://www.figma.com/file/FxFixtureFile000000002/404-No-Access",
+  "role": "viewer"
+ }
+}

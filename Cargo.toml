@@ -63,6 +63,7 @@ fs2 = "0.4"
 flate2 = "1"
 twox-hash = { version = "2", features = ["xxhash64"] }
 libc = "0.2"
+insta = { version = "1", features = ["filters"] }
 
 # The profile that 'dist' will build with
 [profile.dist]

@@ -1,0 +1,19 @@
+---
+source: figma-explorer/tests/e2e/library.rs
+expression: text
+---
+$ library search button
+# catalog: 4 components · 1 sets · 3 styles · fetched [AGE]
+—  | COMPONENT_SET    166  "Button"  key=fxcomponentset000000000000000000000000001  page="Buttons"  file=FxLibraryFile000000003:10:0
+
+$ library search notifications
+# catalog: 4 components · 1 sets · 3 styles · fetched [AGE]
+file:2:1:7753  | COMPONENT        348  "Notifications panel"  key=fxcomponent0000000000000000000000000004  page="Design"
+
+$ library search body
+# catalog: 4 components · 1 sets · 3 styles · fetched [AGE]
+—  | STYLE:TEXT       114  "Body default"  key=fxstyle00000000000000000000000000000001  file=FxLibraryFile000000003:20:1
+
+$ library search avatar
+# catalog: 4 components · 1 sets · 3 styles · fetched [AGE]
+—  | COMPONENT        166  "Avatar"  key=fxcomponent0000000000000000000000000003  page="Identity"  file=FxLibraryFile000000003:11:1

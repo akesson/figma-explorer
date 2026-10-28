@@ -79,6 +79,11 @@ pub fn build_config(token: Option<&str>) -> anyhow::Result<Configuration> {
         })?,
     };
     let mut cfg = Configuration::new();
+    // Test seam: the e2e suite (`tests/e2e`) points the binary at a local
+    // fake Figma server. Not a user-facing setting.
+    if let Ok(base) = std::env::var("FIGMA_EXPLORER_API_BASE") {
+        cfg.base_path = base;
+    }
     cfg.client = figma_common::http_client().context("building HTTP client")?;
     cfg.api_key = Some(ApiKey { prefix: None, key });
     Ok(cfg)

@@ -1,0 +1,24 @@
+---
+source: figma-explorer/tests/e2e/cache.rs
+expression: text
+---
+cache_dir: [TMP]/cache
+elapsed_seconds: [ELAPSED]
+fetched: 2
+skipped_up_to_date: 0
+pruned_stale: 0
+upgraded_project_id: 0
+total_in_projects: 2
+ok: 2
+not_exportable: 0
+failed: 0
+cache_bytes: 10552
+full_bytes: 14296
+variables_bytes: 0
+full_written: 2
+variables_ok: 0
+variables_403: 2
+variables_disabled: false
+total_nodes: 92
+comments_refreshed: 0
+team_catalog: {components: 4, component_sets: 1, styles: 3, bytes: [BYTES]}

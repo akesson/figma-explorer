@@ -1,0 +1,100 @@
+---
+source: figma-explorer/tests/e2e/node_info.rs
+expression: text
+---
+target:
+  kind: node
+  id: file:2:1:7786
+  url: https://www.figma.com/design/FxFixtureFile000000001/?node-id=1-7786
+  path:
+    - {id: "0:1", type: CANVAS, name: Design}
+    - {id: 1:7753, type: FRAME, name: Notifications}
+    - {id: 1:7762, type: FRAME, name: Notification}
+    - {id: 1:7779, type: FRAME, name: Notification}
+    - {id: 1:7780, type: FRAME, name: Notification Content}
+    - {id: 1:7784, type: FRAME, name: Text Container}
+    - {id: 1:7785, type: FRAME, name: Title Container}
+file:
+  key: FxFixtureFile000000001
+  name: Notifications
+  url: https://www.figma.com/design/FxFixtureFile000000001/
+  project_id: "1001"
+  project_name: Desktop
+  synth: 2
+  last_modified: "2026-05-29T12:20:28Z"
+node:
+  id: 1:7786
+  type: TEXT
+  name: Text
+  bounds: {x: 80, y: 636, width: 442, height: 24}
+  fills: [{type: SOLID, hex: "#1d1e1b", bound_variable: v1}]
+  layout_child: {grow: 1, sizing: FILL/HUG}
+  text:
+    characters: Tom Becker has declined Omar Haddad’s leave
+    style:
+      font_family: Poppins
+      font_style: Regular
+      font_weight: 400
+      font_size: 16
+      letter_spacing: 0.2
+      line_height_px: 24
+      text_auto_resize: HEIGHT
+  styles: {text: 1:4199}
+  bound_variables: {"textRangeFills[0]": v1}
+  comments:
+    - comment_id: "1000000005"
+      message: Done.
+      author: Fixture User 1
+      created_at: "2026-04-03T12:00:00.000Z"
+      parent_id: "1000000004"
+      reactions: 0
+      anchor: {kind: vector, canvas_point: [0, 0]}
+      node:
+        node_id: 1:7786
+        type: TEXT
+        name: Text
+        path:
+          - Document
+          - Design
+          - Notifications
+          - Notification
+          - Notification
+          - Notification Content
+          - Text Container
+          - Title Container
+        id: file:2:1:7786
+      method: {kind: explicit}
+      comm_id: file:2:comm:5
+    - comment_id: "1000000004"
+      message: "Copy: use sentence case here."
+      author: Fixture User 3
+      created_at: "2026-04-03T11:00:00.000Z"
+      resolved_at: "2026-04-04T09:00:00.000Z"
+      order_id: "2"
+      reactions: 1
+      anchor: {kind: frame_offset, explicit_node_id: 1:7786}
+      node:
+        node_id: 1:7786
+        type: TEXT
+        name: Text
+        path:
+          - Document
+          - Design
+          - Notifications
+          - Notification
+          - Notification
+          - Notification Content
+          - Text Container
+          - Title Container
+        id: file:2:1:7786
+      method: {kind: explicit}
+      comm_id: file:2:comm:6
+variables: {v1: {id: VariableID:242e0a01ca790a62f03df76b8463401471d14f4e/6275:727}}
+variables_note: "variables sidecar unavailable: account does not have Variables REST API access"
+styles_index:
+  1:4199:
+    key: f9a1c9e2f40705f39ce193eed9bf812c57e69b0b
+    name: Body default
+    description: When you need something a little smaller than large, or to compliment large body.
+    remote: true
+    type: TEXT

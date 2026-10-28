@@ -1,0 +1,144 @@
+---
+source: figma-explorer/tests/e2e/node_info.rs
+expression: text
+---
+target:
+  kind: node
+  id: file:2:1:7761
+  url: https://www.figma.com/design/FxFixtureFile000000001/?node-id=1-7761
+  path:
+    - {id: "0:1", type: CANVAS, name: Design}
+    - {id: 1:7753, type: FRAME, name: Notifications}
+    - {id: 1:7757, type: FRAME, name: Filters}
+    - {id: 5:510, type: FRAME, name: Filters container}
+file:
+  key: FxFixtureFile000000001
+  name: Notifications
+  url: https://www.figma.com/design/FxFixtureFile000000001/
+  project_id: "1001"
+  project_name: Desktop
+  synth: 2
+  last_modified: "2026-05-29T12:20:28Z"
+node:
+  id: 1:7761
+  type: INSTANCE
+  name: Field
+  bounds: {x: 236, y: 456, width: 367, height: 40}
+  corner: {radius: 8}
+  clips_content: true
+  fills: [{type: SOLID, hex: "#ffffff", bound_variable: v1}]
+  strokes: [{type: SOLID, hex: "#d7dee4", bound_variable: v2}]
+  stroke: {weight: 2, align: INSIDE}
+  layout:
+    mode: HORIZONTAL
+    primary_axis: {sizing: FIXED}
+    counter_axis: {align: CENTER}
+    item_spacing: 8
+    padding: [8, 12, 8, 16]
+  layout_child: {grow: 1, sizing: FILL/HUG}
+  component:
+    component_id: 1:6402
+    variants: {Filled: "Yes", Before Component: None, State: Normal, Tag Input: "No"}
+    properties:
+      ✏️ Description: Description
+      💠 Icon: {instance: 1:4423}
+      ✏️ Placeholder: All notifications
+      Clear Button: false
+  bound_variables:
+    paddingLeft: v3
+    paddingTop: v4
+    paddingRight: v5
+    paddingBottom: v4
+    size.y: v6
+    rectangleCornerRadii: v7
+  children:
+    - id: I1:7761;2816:37069
+      type: TEXT
+      name: Select Placeholder
+      bounds: {width: 311, height: 24}
+      fills: [{type: SOLID, hex: "#1d1e1b", bound_variable: v8}]
+      layout_child: {grow: 1, sizing: FILL/FIXED}
+      text:
+        characters: All notifications
+        style:
+          font_family: Poppins
+          font_style: Regular
+          font_weight: 400
+          font_size: 16
+          letter_spacing: 0.2
+          line_height_px: 24
+          text_auto_resize: TRUNCATE
+          text_truncation: ENDING
+      styles: {text: 1:4199}
+    - id: I1:7761;2816:37347
+      type: INSTANCE
+      name: Arrow Icon
+      bounds: {width: 20, height: 20}
+      corner: {radius: 9999}
+      clips_content: true
+      layout:
+        mode: HORIZONTAL
+        primary_axis: {align: CENTER}
+        counter_axis: {sizing: FIXED, align: CENTER}
+        item_spacing: 4
+      layout_child: {sizing: HUG/FIXED}
+      component:
+        component_id: 1:5484
+        variants:
+          Type: Bare
+          Appearance: Default
+          Intent: Default
+          Size: Medium (Default)
+          Dropdown Indicator: "No"
+          State: Normal
+        properties: {💠 Main Icon: {instance: 1:5974}}
+      bound_variables: {rectangleCornerRadii: v9}
+      children:
+        - id: I1:7761;2816:37347;2715:36443
+          type: INSTANCE
+          name: Main Icon
+          bounds: {width: 20, height: 20}
+          fills: [{type: SOLID, visible: false, hex: "#ffffff"}]
+          layout_child: {sizing: FIXED/FIXED}
+          component: {component_id: 1:5974, is_exposed_instance: true}
+          styles: {grid: 1:4070}
+  comments:
+    - comment_id: "1000000006"
+      message: This whole field group needs 8px more padding.
+      author: Fixture User 2
+      created_at: "2026-04-05T14:00:00.000Z"
+      order_id: "3"
+      reactions: 0
+      anchor: {kind: frame_offset_region, explicit_node_id: 1:7761, canvas_rect: [0, 0, 367, 40]}
+      node:
+        node_id: 1:7761
+        type: INSTANCE
+        name: Field
+        path: [Document, Design, Notifications, Filters, Filters container]
+        id: file:2:1:7761
+      method: {kind: explicit}
+      comm_id: file:2:comm:4
+variables:
+  v1: {id: VariableID:efdf5e4123e10b321dceef7f9fb122898e1135da/6275:820}
+  v2: {id: VariableID:f7f1295b33873019b3b2c241f041789893b5fbf5/6275:745}
+  v3: {id: VariableID:286ecbf708ad75bd518b98776fd018ac84c1bd4b/1107:1351}
+  v4: {id: VariableID:0cfad59afa3b1adb9292411d4fe3d7b20f4f8d7e/1107:1350}
+  v5: {id: VariableID:2d393464bd64c8159bb50e79bc155dd9b82be40a/1107:1357}
+  v6: {id: VariableID:a133a72e64481776b23a2226899fe985cf0c7b40/1235:547}
+  v7: {id: VariableID:2b51a94b7ab8b1872e5862f472df7fb0f97740ee/1107:1328}
+  v8: {id: VariableID:242e0a01ca790a62f03df76b8463401471d14f4e/6275:727}
+  v9: {id: VariableID:29fc17424cd7b82c3a7a04b67374d523681abeb0/1374:1}
+variables_note: "variables sidecar unavailable: account does not have Variables REST API access"
+styles_index:
+  1:4070:
+    key: 22c62fdcdbe7f1359130980f3188b523d2d93647
+    name: Icon grid
+    description: ""
+    remote: true
+    type: GRID
+  1:4199:
+    key: f9a1c9e2f40705f39ce193eed9bf812c57e69b0b
+    name: Body default
+    description: When you need something a little smaller than large, or to compliment large body.
+    remote: true
+    type: TEXT

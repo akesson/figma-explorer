@@ -1,0 +1,35 @@
+---
+source: figma-explorer/tests/e2e/cache.rs
+expression: text
+---
+cache_dir: [TMP]/cache
+totals:
+  files: 2
+  ok: 2
+  failed: 0
+  not_exportable: 0
+  with_full: 2
+  with_comments: 2
+  with_variables: 0
+  disk_mb: 0
+files:
+  - id: file:1
+    name: 404 / No Access
+    key: FxFixtureFile000000002
+    project: Desktop
+    status: ok
+    fetched: [AGE]
+    nodes: 30
+    sidecars: {full: [AGE], comments: [AGE], variables: null}
+    variables_error: no Variables REST API access (403)
+  - id: file:2
+    name: Notifications
+    key: FxFixtureFile000000001
+    project: Desktop
+    status: ok
+    fetched: [AGE]
+    nodes: 62
+    sidecars: {full: [AGE], comments: [AGE], variables: null}
+    variables_error: no Variables REST API access (403)
+team_catalogs: [{team_id: "2002", components: 4, component_sets: 1, styles: 3, fetched: [AGE], stale: false}]
+marks: 0

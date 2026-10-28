@@ -1,0 +1,50 @@
+{
+  "/v1/files/FxFixtureFile000000001": {
+    "status": 200,
+    "body": "v1/files/FxFixtureFile000000001.json"
+  },
+  "/v1/files/FxFixtureFile000000001/comments": {
+    "status": 200,
+    "body": "v1/files/FxFixtureFile000000001/comments.json"
+  },
+  "/v1/files/FxFixtureFile000000001/meta": {
+    "status": 200,
+    "body": "v1/files/FxFixtureFile000000001/meta.json"
+  },
+  "/v1/files/FxFixtureFile000000001/variables/local": {
+    "status": 403,
+    "body": "v1/files/FxFixtureFile000000001/variables/local.json"
+  },
+  "/v1/files/FxFixtureFile000000002": {
+    "status": 200,
+    "body": "v1/files/FxFixtureFile000000002.json"
+  },
+  "/v1/files/FxFixtureFile000000002/comments": {
+    "status": 200,
+    "body": "v1/files/FxFixtureFile000000002/comments.json"
+  },
+  "/v1/files/FxFixtureFile000000002/meta": {
+    "status": 200,
+    "body": "v1/files/FxFixtureFile000000002/meta.json"
+  },
+  "/v1/files/FxFixtureFile000000002/variables/local": {
+    "status": 403,
+    "body": "v1/files/FxFixtureFile000000002/variables/local.json"
+  },
+  "/v1/teams/2002/component_sets": {
+    "status": 200,
+    "body": "v1/teams/2002/component_sets.json"
+  },
+  "/v1/teams/2002/components": {
+    "status": 200,
+    "body": "v1/teams/2002/components.json"
+  },
+  "/v1/teams/2002/styles": {
+    "status": 200,
+    "body": "v1/teams/2002/styles.json"
+  },
+  "/v2/folders/1001/files": {
+    "status": 200,
+    "body": "v2/folders/1001/files.json"
+  }
+}

@@ -1,0 +1,102 @@
+---
+source: figma-explorer/tests/e2e/node_info.rs
+expression: text
+---
+target: {kind: file, id: file:1, path: []}
+file:
+  key: FxFixtureFile000000002
+  name: 404 / No Access
+  url: https://www.figma.com/design/FxFixtureFile000000002/
+  project_id: "1001"
+  project_name: Desktop
+  synth: 1
+  last_modified: "2026-03-25T17:07:04Z"
+  node_count: 30
+file_summary:
+  counts: {nodes: 30, pages: 3, components: 5, component_sets: 4, styles: 5, variables: 0, comments: 0}
+  pages:
+    - {id: "0:1", name: Cover, child_count: 0}
+    - {id: 1:7396, name: ---, child_count: 0}
+    - {id: "1:2", name: Design, child_count: 3}
+  components:
+    - id: 1:13098
+      key: 90f0700c9d4d665ca0ac756ff0b6638594bc9115
+      name: User=Admin
+      description: ""
+      component_set_id: 1:13096
+      remote: true
+    - id: "1:56"
+      key: 7c1d6431837e469d616cb035d8633a452513d20f
+      name: Type=Leave Dates Logos RGB_Primary, State=Default, Logo mark=False
+      description: ""
+      component_set_id: "1:21"
+      remote: true
+    - id: 1:11753
+      key: e8efe3d145ed918db582bdede21c486ca3a45875
+      name: Current plan=Yes
+      description: ""
+      component_set_id: 1:11751
+      remote: true
+    - id: 1:8534
+      key: 343bb63c278e8b98fe330b5ae765f214903476a0
+      name: Type=Default, Appearance=Default, Intent=Default, Size=Small, Before Icon=Yes, After Icon=No, Dropdown Indicator=No, State=Normal
+      description: ""
+      component_set_id: 1:7419
+      remote: true
+    - id: 1:2540
+      key: b6ed234ca6ea60da668153c4b3a3acc6a1fa95e2
+      name: 20-log-out
+      description: logout, sign out
+      component_set_id: null
+      remote: true
+  component_sets:
+    - {id: 1:13096, key: 46cd642b4804c7f2d944c03f82e328bdeee8d0b4, name: Top navigation, description: ""}
+    - {id: "1:21", key: 10c541595197a7d1215c436aeb1abeeeb9952701, name: Logo, description: ""}
+    - {id: 1:11751, key: 1d9ee4e14c04eb8bc2994617d79e0c1da69bd52b, name: Settings Navigation, description: ""}
+    - {id: 1:7419, key: bcaf480042f8664596e1fb07fafe28964738a0fb, name: Button, description: ""}
+  styles:
+    - id: "1:16"
+      key: 4fb4333f3299225a7539603e5ad0c8bba466e2ae
+      name: .Logo/Black
+      type: FILL
+      remote: true
+      value: "#1d1e1b"
+    - id: 1:138
+      key: f6f0e65e211a161b739156c15d19419be07eb605
+      name: Body medium
+      type: TEXT
+      remote: true
+      value:
+        font_family: Poppins
+        font_style: Medium
+        font_weight: 500
+        font_size: 16
+        letter_spacing: 0.2
+        line_height_px: 24
+    - id: 1:2545
+      key: 5885c53c909e35219939687d7240282cbb8d2e2c
+      name: Button label
+      type: TEXT
+      remote: true
+      value:
+        font_family: Poppins
+        font_style: SemiBold
+        font_weight: 600
+        font_size: 16
+        letter_spacing: 0.2
+        line_height_px: 14
+    - id: 1:1174
+      key: c775cf786a0b4fd79f266a0cab0d050d35494dbb
+      name: Elevations/Unstroked/Depth+1
+      type: EFFECT
+      remote: true
+      value:
+        - {type: DROP_SHADOW, offset: {x: 0, y: 1}, radius: 2, hex: "#1b242c1f", show_shadow_behind_node: false}
+    - id: "1:3"
+      key: de3e7c68cdb90c32522c069b2294ef2a946b290a
+      name: Background/Default
+      type: FILL
+      remote: true
+      value: "#ffffff"
+  variable_collections: []
+  recent_comments: []
