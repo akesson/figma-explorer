@@ -19,8 +19,8 @@ pub enum VariableValue {
     Boolean(bool),
     Number(f64),
     String(String),
-    Rgb(Box<models::Rgb>),
     Rgba(Box<models::Rgba>),
+    Rgb(Box<models::Rgb>),
     VariableAlias(Box<models::VariableAlias>),
 }
 
