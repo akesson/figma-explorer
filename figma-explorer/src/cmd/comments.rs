@@ -1,7 +1,7 @@
 //! `comments` — list comment threads in a file or under a node, or dump one
 //! thread.
 //!
-//! Lane (per CLAUDE.md): *resolve, then read sidecar (with live fetch as
+//! Lane (per AGENTS.md): *resolve, then read sidecar (with live fetch as
 //! fallback/refresh)* — the same lane `node-info` uses. The listing reads the
 //! `.comments.json` sidecar; `--refresh` (or a missing sidecar without
 //! `--cache-only`) re-fetches just this file's comments via
