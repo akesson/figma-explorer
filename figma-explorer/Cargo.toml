@@ -1,6 +1,6 @@
 [package]
 name = "figma-explorer"
-version = "0.2.3"
+version = "0.3.0"
 description = "High-level CLI on top of the Figma REST API: name-based navigation, implementation-ready node views, comments, screenshots, and asset export."
 edition.workspace = true
 license.workspace = true

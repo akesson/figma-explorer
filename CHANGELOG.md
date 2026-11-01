@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-28
+
 ### Added
 
 - **Cached files are checked against Figma before they're served.** Designers
@@ -85,6 +87,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   signed with a Developer ID certificate under the hardened runtime and
   notarized with Apple. Homebrew, npm, and the shell installer were never
   affected (none of them set the quarantine attribute).
+- **Region comments keep their region.** A comment pinned to a region of a
+  frame (rather than a point) lost its region size and pin corner, because
+  the generated client matched it to the point shape first. Cached comments
+  correct themselves on their next refresh.
+- **`file:N` ids are assigned in the same order on every machine.** A fresh
+  `cache prefetch` numbered files in filesystem order, so `file:1` could name
+  different files on different machines. Files are now numbered by folder,
+  then name. Ids already assigned don't change.
 
 ## [0.2.3] - 2026-09-23
 
