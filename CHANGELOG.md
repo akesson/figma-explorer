@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A newly configured folder shows up in `ls` before it's prefetched.** Root
+  `ls` used to list only folders with cached files, so after adding a folder
+  id to `FIGMA_PROJECTS_IDS` it looked as if the config hadn't been read. A
+  configured folder with nothing cached now gets its own row, named and
+  counted from the folder listing `ls` already makes:
+  `proj:3 "Mobile"  (23 files on Figma, none cached — run `figma-explorer cache prefetch`)`.
+  If Figma refuses to list the folder, the row shows the error instead.
+  `ls` still doesn't fetch the files, and `--cache-only` shows the row from
+  the last listing without making requests.
+
 ## [0.3.0] - 2026-10-28
 
 ### Added

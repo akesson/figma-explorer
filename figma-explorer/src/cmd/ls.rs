@@ -20,7 +20,7 @@ use figma_api::apis::configuration::Configuration;
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 
-use crate::cache::{CacheNode, EntryStatus, FileMeta};
+use crate::cache::{CacheDir, CacheNode, EntryStatus, FileMeta};
 use crate::comment_assoc::AssociatedComment;
 use crate::id::Id;
 use crate::resolver::{parse_id, render_resolve_error, ResolvedTarget, Resolver};
@@ -450,6 +450,12 @@ fn render_root(
     let metas = resolver.cache().list_metas()?;
 
     let groups = root_groups(synth, &metas);
+    let uncached = uncached_folders(
+        resolver.cache(),
+        synth,
+        &groups,
+        &crate::cache::configured_folder_ids(),
+    );
 
     // A cache with no OK file metas (fresh, or just cleared) has nothing to
     // list — the depth hint is pointless and a "run prefetch" nudge is what the
@@ -487,6 +493,11 @@ fn render_root(
                     &mut matches,
                 ));
             }
+            for f in &uncached {
+                if f.keep(name_filter, &mut matches) {
+                    rows.push(f.row());
+                }
+            }
             print_hidden_comment(&hidden);
             if let Some(pattern) = name_filter {
                 print_name_filter_comment(pattern, matches);
@@ -495,7 +506,7 @@ fn render_root(
             Ok(())
         }
         Output::Json => {
-            let projects: Vec<Value> = groups
+            let mut projects: Vec<Value> = groups
                 .iter()
                 .filter_map(|(ps, pid, pname, files)| {
                     let file_jsons = project_files_json(
@@ -525,6 +536,11 @@ fn render_root(
                     }))
                 })
                 .collect();
+            for f in &uncached {
+                if f.keep(name_filter, &mut matches) {
+                    projects.push(f.json());
+                }
+            }
             let mut payload = serde_json::Map::new();
             payload.insert("ignored".into(), ignored_json(&hidden));
             if let Some(pattern) = name_filter {
@@ -970,6 +986,113 @@ fn derive_project_name(metas: &[FileMeta], project_id: &str) -> String {
         .unwrap_or_else(|| project_id.to_owned())
 }
 
+/// A configured folder (`FIGMA_PROJECTS_IDS`) with no cached file to list:
+/// never prefetched, every fetch failed, or empty on Figma. Root `ls` shows
+/// it with a note instead of hiding it, so a newly configured folder doesn't
+/// look like the config never took. Name and count come from the folder
+/// stamp `sync_folders`/`cache prefetch` write; nothing here hits the network.
+#[derive(Debug, PartialEq)]
+struct UncachedFolder {
+    synth: u32,
+    folder_id: String,
+    name: String,
+    file_count: Option<usize>,
+    error: Option<String>,
+}
+
+/// Longest listing error quoted in a folder note; the full text is on
+/// stderr when the listing fails.
+const FOLDER_ERROR_DISPLAY_MAX: usize = 160;
+
+impl UncachedFolder {
+    fn load(cache: &CacheDir, synth: u32, folder_id: &str) -> Self {
+        let stamp = cache.folder_stamp(folder_id).unwrap_or_default();
+        Self {
+            synth,
+            folder_id: folder_id.to_owned(),
+            name: stamp
+                .name
+                .filter(|n| !n.is_empty())
+                .unwrap_or_else(|| folder_id.to_owned()),
+            file_count: stamp.file_count,
+            error: stamp.error,
+        }
+    }
+
+    fn note(&self) -> String {
+        if let Some(e) = &self.error {
+            let e = e.split_whitespace().collect::<Vec<_>>().join(" ");
+            let e = match e.char_indices().nth(FOLDER_ERROR_DISPLAY_MAX) {
+                Some((i, _)) => format!("{}…", &e[..i]),
+                None => e,
+            };
+            return format!(
+                "couldn't list this folder on Figma — check the folder id and that FIGMA_TOKEN can read it: {e}"
+            );
+        }
+        match self.file_count {
+            Some(0) => "empty folder on Figma".to_owned(),
+            Some(n) => format!(
+                "{} on Figma, none cached — run `figma-explorer cache prefetch`",
+                crate::cache::count_files(n)
+            ),
+            None => "not listed yet — run `figma-explorer cache prefetch`".to_owned(),
+        }
+    }
+
+    /// Whether `--name` keeps this row; counts it as a match when it does.
+    fn keep(&self, name_filter: Option<&str>, matches: &mut usize) -> bool {
+        match name_filter {
+            None => true,
+            Some(needle) if self.name.to_lowercase().contains(needle) => {
+                *matches += 1;
+                true
+            }
+            Some(_) => false,
+        }
+    }
+
+    fn row(&self) -> Row {
+        let mut row = Row::header(format!("proj:{}", self.synth), 0, "PROJECT", String::new());
+        row.raw_payload = Some(format!("\"{}\"  ({})", self.name, self.note()));
+        row
+    }
+
+    fn json(&self) -> Value {
+        json!({
+            "id": format!("proj:{}", self.synth),
+            "project_id": self.folder_id,
+            "name": self.name,
+            "files": [],
+            "cached": false,
+            "file_count": self.file_count,
+            "listing_error": self.error,
+            "note": self.note(),
+        })
+    }
+}
+
+/// Configured folders that [`root_groups`] left out for having no cached
+/// file, in `proj:N` order. Folders without a `proj:N` yet (only possible
+/// before the first non-`--cache-only` listing) are skipped — there is no id
+/// to show. Folders *not* configured stay hidden: those are the ones dropped
+/// from `FIGMA_PROJECTS_IDS`.
+fn uncached_folders(
+    cache: &CacheDir,
+    synth: &SynthState,
+    groups: &[ProjectGroup],
+    configured: &[String],
+) -> Vec<UncachedFolder> {
+    let mut out: Vec<UncachedFolder> = configured
+        .iter()
+        .filter(|id| !groups.iter().any(|(_, pid, _, _)| pid == *id))
+        .filter_map(|id| Some(UncachedFolder::load(cache, synth.project_synth(id)?, id)))
+        .collect();
+    out.sort_by_key(|f| f.synth);
+    out.dedup_by_key(|f| f.synth);
+    out
+}
+
 /// Project listing — header + files in that project, recursing into each
 /// file's structural tree when `depth >= 2`. Reads from cache state.
 #[allow(clippy::too_many_arguments)]
@@ -993,12 +1116,31 @@ fn render_project(
         .filter_map(|m| synth.file_synth(&m.file_key).map(|s| (s, m.clone())))
         .collect();
     files.sort_by_key(|(_, m)| m.name.to_lowercase());
+    // Nothing cached for a configured folder: say why, as root `ls` does.
+    let uncached = (files.is_empty()
+        && crate::cache::configured_folder_ids()
+            .iter()
+            .any(|id| id == project_id))
+    .then(|| UncachedFolder::load(resolver.cache(), project_synth, project_id));
+    let project_name = match &uncached {
+        Some(f) => f.name.clone(),
+        None => project_name,
+    };
 
     let mut hidden: BTreeSet<&'static str> = BTreeSet::new();
     let mut matches = 0usize;
 
     match format {
         Output::Yaml => {
+            if let Some(f) = &uncached {
+                if f.keep(name_filter, &mut matches) {
+                    if let Some(pattern) = name_filter {
+                        print_name_filter_comment(pattern, matches);
+                    }
+                    print!("{}", format_rows(&[f.row()]));
+                    return Ok(());
+                }
+            }
             let rows = project_rows(
                 resolver,
                 project_synth,
@@ -1039,6 +1181,12 @@ fn render_project(
                 payload.insert("name_filter".into(), name_filter_json(pattern, matches));
             }
             payload.insert("files".into(), Value::Array(file_jsons));
+            if let Some(f) = &uncached {
+                payload.insert("cached".into(), json!(false));
+                payload.insert("file_count".into(), json!(f.file_count));
+                payload.insert("listing_error".into(), json!(f.error));
+                payload.insert("note".into(), json!(f.note()));
+            }
             print(&Value::Object(payload), format)
         }
     }
@@ -1332,6 +1480,54 @@ mod tests {
     use crate::cache::{build_cached_file, CacheDir, FileRef};
     use crate::tree::render_flat;
     use serde_json::json;
+
+    /// The other half of the regression above: a folder that is still
+    /// configured but has no cached file *is* shown (named from its stamp),
+    /// so a newly added folder doesn't look like the config never took.
+    #[test]
+    fn uncached_folders_shows_only_configured_folders() {
+        let td = tempfile::TempDir::new().unwrap();
+        let cache = CacheDir::new(td.path());
+        cache.ensure().unwrap();
+        let mut synth = SynthState::default();
+        synth.intern_project("77195660"); // configured, has files
+        synth.intern_project("571382610"); // configured, nothing cached
+        synth.intern_project("999"); // dropped from the config
+        cache
+            .stamp_folder_listing("571382610", 1, Ok(("Mobile", 23)))
+            .unwrap();
+        let groups: Vec<ProjectGroup> = vec![(1, "77195660".into(), "Desktop".into(), Vec::new())];
+        let configured = ["77195660".to_owned(), "571382610".to_owned()];
+
+        let shown = uncached_folders(&cache, &synth, &groups, &configured);
+        assert_eq!(
+            shown,
+            [UncachedFolder {
+                synth: 2,
+                folder_id: "571382610".into(),
+                name: "Mobile".into(),
+                file_count: Some(23),
+                error: None,
+            }]
+        );
+        assert_eq!(
+            shown[0].note(),
+            "23 files on Figma, none cached — run `figma-explorer cache prefetch`"
+        );
+    }
+
+    /// No stamp (never listed): the bare folder id, with the prefetch hint.
+    #[test]
+    fn uncached_folder_without_stamp_falls_back_to_id() {
+        let td = tempfile::TempDir::new().unwrap();
+        let cache = CacheDir::new(td.path());
+        let f = UncachedFolder::load(&cache, 3, "571382610");
+        assert_eq!(f.name, "571382610");
+        assert_eq!(
+            f.note(),
+            "not listed yet — run `figma-explorer cache prefetch`"
+        );
+    }
 
     #[test]
     fn root_groups_skip_projects_without_cached_files() {

@@ -129,14 +129,21 @@ impl PrefetchArgs {
         let started = Instant::now();
 
         // (1) Pull the listing for every configured project.
-        let listing: Vec<FileRef> = cache::list_project_files(cfg, &self.project_ids).await?;
-        // This listing is as fresh as `sync_folders`' own — stamp it so the
-        // next `ls`/`find` doesn't re-list every folder straight away.
-        let listed_at = cache::now_epoch();
+        // Each listing is as fresh as `sync_folders`' own — stamp it so the
+        // next `ls`/`find` doesn't re-list every folder straight away. A
+        // failed listing is stamped too (root `ls` shows the error), then
+        // aborts the prefetch as before.
+        let mut listing: Vec<FileRef> = Vec::new();
         for pid in &self.project_ids {
-            if let Err(e) = cache_dir.stamp_folder_listed(pid, listed_at) {
+            let listed = cache::list_folder(cfg, pid).await;
+            let outcome = match &listed {
+                Ok((name, refs)) => Ok((name.as_str(), refs.len())),
+                Err(e) => Err(e),
+            };
+            if let Err(e) = cache_dir.stamp_folder_listing(pid, cache::now_epoch(), outcome) {
                 eprintln!("cache: stamping folder {pid} failed: {e:#}");
             }
+            listing.extend(listed?.1);
         }
         let listing_keys: HashSet<String> = listing.iter().map(|f| f.file_key.clone()).collect();
         let listing_by_key: std::collections::HashMap<String, &FileRef> =
@@ -977,7 +984,9 @@ mod tests {
         std::fs::write(cache.meta_path("abc"), b"{}").unwrap();
         std::fs::write(cache.file_path("abc"), b"payload").unwrap();
         std::fs::write(cache.catalog_path("99"), b"catalog").unwrap();
-        cache.stamp_folder_listed("10", 1).unwrap();
+        cache
+            .stamp_folder_listing("10", 1, Ok(("Desktop", 0)))
+            .unwrap();
 
         let (deleted, errors) = clear_all_sidecars(&cache).unwrap();
         assert_eq!(errors, 0);
