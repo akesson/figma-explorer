@@ -84,6 +84,58 @@ pub async fn fetch_file_json(
     get_json(cfg, &url).await
 }
 
+/// Backoff before each retry in [`fetch_file_json_retrying`], unless the
+/// server sent `Retry-After`. `FIGMA_EXPLORER_RETRY_DELAY_MS` overrides the
+/// unit (the e2e suite sets it to 0; not a user setting).
+fn retry_delays() -> [std::time::Duration; 2] {
+    let unit_ms = std::env::var("FIGMA_EXPLORER_RETRY_DELAY_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(2000);
+    [1, 4].map(|n| std::time::Duration::from_millis(unit_ms * n))
+}
+
+/// Longest `Retry-After` honored; past it the retry is given up on.
+const MAX_RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// [`fetch_file_json`] (whole file, no depth limit) with up to two retries
+/// on a transient failure — timeout, connection error, 429, 5xx — for
+/// `cache prefetch`, where one hiccup otherwise costs a whole rerun. Each
+/// retry is logged with how long the failed attempt took, which is what
+/// tells a slow server (attempt ran into the read timeout) from a dead one.
+/// Interactive paths keep the single attempt: their failures fall back to
+/// the cached copy and back off for a window instead.
+pub async fn fetch_file_json_retrying(
+    cfg: &Configuration,
+    file_key: &str,
+    name: &str,
+) -> Result<serde_json::Value> {
+    let delays = retry_delays();
+    let mut attempt = 0;
+    loop {
+        let started = std::time::Instant::now();
+        let err = match fetch_file_json(cfg, file_key, None).await {
+            Ok(v) => return Ok(v),
+            Err(e) => e,
+        };
+        if attempt == delays.len() || !figma_common::is_transient(&err) {
+            return Err(err);
+        }
+        let wait = figma_common::retry_after(&err).unwrap_or(delays[attempt]);
+        if wait > MAX_RETRY_AFTER {
+            return Err(err);
+        }
+        attempt += 1;
+        eprintln!(
+            "  retry {file_key:<25}  {name:<35}  failed after {:.1}s ({err:#}); retry {attempt}/{} in {}s",
+            started.elapsed().as_secs_f64(),
+            delays.len(),
+            wait.as_secs()
+        );
+        tokio::time::sleep(wait).await;
+    }
+}
+
 /// Borrow the `document` node from a fetched file response, erroring clearly if
 /// it is absent or null. `serde_json`'s `Index` (`file["document"]`) returns
 /// `Value::Null` on a missing key, so callers that index directly silently walk

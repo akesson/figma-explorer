@@ -5,7 +5,7 @@
 
 use std::time::Duration;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use figma_api::apis::configuration::Configuration;
 
 /// Max time to establish a TCP/TLS connection before giving up. Kills the
@@ -122,16 +122,117 @@ pub async fn get_text(cfg: &Configuration, url: &str) -> Result<String> {
     }
     let resp = req.send().await.context("HTTP request failed")?;
     let status = resp.status();
+    let retry_after = resp
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map(Duration::from_secs);
     let body = resp.text().await.context("reading response body")?;
     if !status.is_success() {
-        return Err(anyhow!("figma API error ({status}): {body}"));
+        return Err(HttpStatusError {
+            status,
+            retry_after,
+            body,
+        }
+        .into());
     }
     Ok(body)
+}
+
+/// A non-success response from [`get_text`]. Displays as
+/// `figma API error ({status}): {body}` — callers string-match that shape —
+/// but keeps the status and `Retry-After` for callers that retry.
+#[derive(Debug)]
+pub struct HttpStatusError {
+    pub status: reqwest::StatusCode,
+    /// `Retry-After` in seconds, when the response carried one.
+    pub retry_after: Option<Duration>,
+    pub body: String,
+}
+
+impl std::fmt::Display for HttpStatusError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "figma API error ({}): {}", self.status, self.body)
+    }
+}
+
+impl std::error::Error for HttpStatusError {}
+
+/// Whether `err` (from [`get_text`]) is worth retrying: a timeout or
+/// connection/transport failure, a 429, or a 5xx. A 4xx other than 429 is
+/// an answer, not a hiccup.
+pub fn is_transient(err: &anyhow::Error) -> bool {
+    err.chain().any(|c| {
+        if let Some(h) = c.downcast_ref::<HttpStatusError>() {
+            return h.status.as_u16() == 429 || h.status.is_server_error();
+        }
+        c.downcast_ref::<reqwest::Error>()
+            .is_some_and(|r| r.is_timeout() || r.is_connect() || r.is_request() || r.is_body())
+    })
+}
+
+/// The server's `Retry-After`, when `err` carries one.
+pub fn retry_after(err: &anyhow::Error) -> Option<Duration> {
+    err.chain()
+        .find_map(|c| c.downcast_ref::<HttpStatusError>())
+        .and_then(|h| h.retry_after)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::anyhow;
+
+    fn status_error(code: u16) -> anyhow::Error {
+        HttpStatusError {
+            status: reqwest::StatusCode::from_u16(code).unwrap(),
+            retry_after: Some(Duration::from_secs(7)),
+            body: "{}".into(),
+        }
+        .into()
+    }
+
+    #[test]
+    fn transient_errors_are_429_and_5xx() {
+        assert!(is_transient(&status_error(429)));
+        assert!(is_transient(&status_error(503)));
+        assert!(!is_transient(&status_error(403)));
+        assert!(!is_transient(&status_error(404)));
+        assert!(is_transient(&status_error(500).context("fetching file")));
+        assert!(!is_transient(&anyhow!("parsing response")));
+        assert_eq!(
+            retry_after(&status_error(429)),
+            Some(Duration::from_secs(7))
+        );
+        assert_eq!(
+            status_error(403).to_string(),
+            "figma API error (403 Forbidden): {}",
+            "callers string-match this shape"
+        );
+    }
+
+    /// The reported failure: Figma accepts the connection but sends nothing
+    /// until the read timeout fires. That error must classify as transient.
+    #[tokio::test]
+    async fn read_timeout_is_transient() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _hold = std::thread::spawn(move || {
+            let (_stream, _) = listener.accept().unwrap();
+            std::thread::sleep(Duration::from_secs(2));
+        });
+        let mut cfg = Configuration::new();
+        cfg.client = reqwest::Client::builder()
+            .read_timeout(Duration::from_millis(100))
+            .build()
+            .unwrap();
+        let err = get_text(&cfg, &format!("http://{addr}/v1/files/k"))
+            .await
+            .unwrap_err();
+        assert!(is_transient(&err), "{err:#}");
+        assert_eq!(retry_after(&err), None);
+    }
 
     #[test]
     fn http_client_builds_with_timeouts() {

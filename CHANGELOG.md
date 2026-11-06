@@ -19,6 +19,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ls` still doesn't fetch the files, and `--cache-only` shows the row from
   the last listing without making requests.
 
+- **`cache prefetch` retries transient failures.** A file whose fetch timed
+  out, hit a 429, or got a 5xx used to fail for the run, so finishing a large
+  folder took several reruns. Each file is now retried up to twice with
+  backoff (honoring `Retry-After`), and each retry is logged with how long
+  the failed attempt took. A 403/404 is not retried.
+
+- **Reruns of `cache prefetch` are fast.** A rerun polled the comments of
+  every unchanged file, one request each — about a minute for 50 files even
+  with nothing to do. Comments checked in the last 5 minutes are now
+  skipped, the same window `comments` uses.
+
+- **`ls` no longer calls retried files "added".** When a folder sync
+  re-fetched files whose earlier fetch had failed, stderr said they were
+  "added to Figma folders". It now says
+  `cache: retrying N files that failed to fetch earlier (…)`.
+
 ## [0.3.0] - 2026-10-28
 
 ### Added
