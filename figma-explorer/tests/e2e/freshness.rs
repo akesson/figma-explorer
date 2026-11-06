@@ -419,8 +419,13 @@ fn configured_folder_without_cached_files_is_listed() {
     assert_eq!(mobile["id"], "proj:2");
     assert_eq!(mobile["name"], "Mobile");
     assert_eq!(mobile["cached"], false);
-    assert_eq!(mobile["file_count"], 2);
+    assert_eq!(
+        mobile["note"],
+        "2 files on Figma, none cached — run `figma-explorer cache prefetch`"
+    );
     assert_eq!(mobile["files"], serde_json::json!([]));
+    assert_eq!(v["projects"][0]["cached"], true);
+    assert!(v["projects"][0].get("note").is_none());
 
     // Once prefetched it is an ordinary folder row.
     h.figma

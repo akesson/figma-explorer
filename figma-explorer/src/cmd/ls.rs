@@ -20,7 +20,7 @@ use figma_api::apis::configuration::Configuration;
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 
-use crate::cache::{CacheDir, CacheNode, EntryStatus, FileMeta};
+use crate::cache::{count_files, CacheDir, CacheNode, EntryStatus, FileMeta, FolderStamp};
 use crate::comment_assoc::AssociatedComment;
 use crate::id::Id;
 use crate::resolver::{parse_id, render_resolve_error, ResolvedTarget, Resolver};
@@ -274,10 +274,17 @@ impl Args {
     }
 }
 
-/// One project's listing data: synth, project id, display name, and its files
-/// paired with their file synths. Named to keep the `render_root` grouping
-/// vector readable (and clippy happy about nested generics).
-type ProjectGroup = (u32, String, String, Vec<(u32, FileMeta)>);
+/// One project's listing data: its files paired with their file synths, plus
+/// a `note` explaining an empty listing for a configured folder (see
+/// [`project_group`]).
+#[derive(Debug)]
+struct ProjectGroup {
+    synth: u32,
+    project_id: String,
+    name: String,
+    files: Vec<(u32, FileMeta)>,
+    note: Option<String>,
+}
 
 /// Build the YAML rows for one project group: a PROJECT header, then a FILE
 /// header per file, descending into each file's tree when `depth >= 2`.
@@ -290,9 +297,7 @@ type ProjectGroup = (u32, String, String, Vec<(u32, FileMeta)>);
 #[allow(clippy::too_many_arguments)]
 fn project_rows(
     resolver: &Resolver,
-    project_synth: u32,
-    project_name: &str,
-    files: &[(u32, FileMeta)],
+    group: &ProjectGroup,
     depth: usize,
     show_all: bool,
     hidden: &mut BTreeSet<&'static str>,
@@ -303,20 +308,24 @@ fn project_rows(
 ) -> Vec<Row> {
     let mut rows = Vec::new();
     let project_name_matches = name_filter
-        .map(|needle| project_name.to_lowercase().contains(needle))
+        .map(|needle| group.name.to_lowercase().contains(needle))
         .unwrap_or(false);
     if project_name_matches {
         *match_count += 1;
     }
-    rows.push(Row::header(
-        format!("proj:{project_synth}"),
+    let mut header = Row::header(
+        format!("proj:{}", group.synth),
         0,
         "PROJECT",
-        project_name.to_owned(),
-    ));
+        group.name.clone(),
+    );
+    if let Some(note) = &group.note {
+        header.raw_payload = Some(format!("\"{}\"  ({note})", group.name));
+    }
+    rows.push(header);
     let mut any_file_kept = false;
     if depth >= 1 {
-        for (fs, fm) in files {
+        for (fs, fm) in &group.files {
             let file_name_matches = name_filter
                 .map(|needle| fm.name.to_lowercase().contains(needle))
                 .unwrap_or(false);
@@ -418,9 +427,10 @@ async fn freshen_for_listing(
 /// project) — which the root listing never shows — aren't probed for it.
 fn listed_metas(synth: &SynthState, metas: &[FileMeta], project_id: Option<&str>) -> Vec<FileMeta> {
     match project_id {
-        None => root_groups(synth, metas)
+        // No cache/config needed: notes only attach to groups with no files.
+        None => root_groups(synth, metas, None, &[])
             .into_iter()
-            .flat_map(|(_, _, _, files)| files.into_iter().map(|(_, m)| m))
+            .flat_map(|g| g.files.into_iter().map(|(_, m)| m))
             .collect(),
         Some(p) => metas
             .iter()
@@ -449,11 +459,10 @@ fn render_root(
     let synth = resolver.synth();
     let metas = resolver.cache().list_metas()?;
 
-    let groups = root_groups(synth, &metas);
-    let uncached = uncached_folders(
-        resolver.cache(),
+    let groups = root_groups(
         synth,
-        &groups,
+        &metas,
+        Some(resolver.cache()),
         &crate::cache::configured_folder_ids(),
     );
 
@@ -478,12 +487,10 @@ fn render_root(
                 );
             }
             let mut rows: Vec<Row> = Vec::new();
-            for (psynth, _pid, pname, files) in &groups {
+            for group in &groups {
                 rows.extend(project_rows(
                     resolver,
-                    *psynth,
-                    pname,
-                    files,
+                    group,
                     depth,
                     show_all,
                     &mut hidden,
@@ -493,11 +500,6 @@ fn render_root(
                     &mut matches,
                 ));
             }
-            for f in &uncached {
-                if f.keep(name_filter, &mut matches) {
-                    rows.push(f.row());
-                }
-            }
             print_hidden_comment(&hidden);
             if let Some(pattern) = name_filter {
                 print_name_filter_comment(pattern, matches);
@@ -506,12 +508,12 @@ fn render_root(
             Ok(())
         }
         Output::Json => {
-            let mut projects: Vec<Value> = groups
+            let projects: Vec<Value> = groups
                 .iter()
-                .filter_map(|(ps, pid, pname, files)| {
+                .filter_map(|group| {
                     let file_jsons = project_files_json(
                         resolver,
-                        files,
+                        &group.files,
                         depth,
                         show_all,
                         &mut hidden,
@@ -520,7 +522,7 @@ fn render_root(
                         &mut matches,
                     );
                     if let Some(needle) = name_filter {
-                        let pname_matches = pname.to_lowercase().contains(needle);
+                        let pname_matches = group.name.to_lowercase().contains(needle);
                         if file_jsons.is_empty() && !pname_matches {
                             return None;
                         }
@@ -528,19 +530,19 @@ fn render_root(
                             matches += 1;
                         }
                     }
-                    Some(json!({
-                        "id": format!("proj:{ps}"),
-                        "project_id": pid,
-                        "name": pname,
+                    let mut project = json!({
+                        "id": format!("proj:{}", group.synth),
+                        "project_id": group.project_id,
+                        "name": group.name,
+                        "cached": !group.files.is_empty(),
                         "files": file_jsons,
-                    }))
+                    });
+                    if let Some(note) = &group.note {
+                        project["note"] = json!(note);
+                    }
+                    Some(project)
                 })
                 .collect();
-            for f in &uncached {
-                if f.keep(name_filter, &mut matches) {
-                    projects.push(f.json());
-                }
-            }
             let mut payload = serde_json::Map::new();
             payload.insert("ignored".into(), ignored_json(&hidden));
             if let Some(pattern) = name_filter {
@@ -952,26 +954,69 @@ fn build_file_json(
 /// Group OK files by project synth, pre-resolving each file's synth so the
 /// render helpers don't have to re-look-it-up (and so synth-less files are
 /// simply skipped rather than panicking). Sorted by project synth.
-fn root_groups(synth: &SynthState, metas: &[FileMeta]) -> Vec<ProjectGroup> {
-    let mut groups: Vec<ProjectGroup> = Vec::new();
-    for (project_id, &project_synth) in &synth.projects {
-        let mut files: Vec<(u32, FileMeta)> = metas
-            .iter()
-            .filter(|m| m.status == EntryStatus::Ok && m.project_id == *project_id)
-            .filter_map(|m| synth.file_synth(&m.file_key).map(|s| (s, m.clone())))
-            .collect();
-        // Project synths outlive their files (dropped from FIGMA_PROJECTS_IDS,
-        // or `cache clear`). With no cached file there is nothing to descend
-        // into and no meta to name it — it would render as a bare folder id.
-        if files.is_empty() {
-            continue;
-        }
-        files.sort_by_key(|(_, m)| m.name.to_lowercase());
-        let project_name = derive_project_name(metas, project_id);
-        groups.push((project_synth, project_id.clone(), project_name, files));
-    }
-    groups.sort_by_key(|(s, _, _, _)| *s);
+///
+/// Project synths outlive their files (dropped from `FIGMA_PROJECTS_IDS`, or
+/// `cache clear`), so a project with no cached file is skipped — unless it is
+/// still `configured`: then it is kept, with a [`folder_note`] saying why it
+/// is empty, so a newly configured folder doesn't look like the config never
+/// took. Notes need the folder stamps in `cache`; without one, empty
+/// projects are always skipped.
+fn root_groups(
+    synth: &SynthState,
+    metas: &[FileMeta],
+    cache: Option<&CacheDir>,
+    configured: &[String],
+) -> Vec<ProjectGroup> {
+    let mut groups: Vec<ProjectGroup> = synth
+        .projects
+        .iter()
+        .filter_map(|(project_id, &project_synth)| {
+            let group = project_group(synth, metas, cache, configured, project_synth, project_id);
+            (!group.files.is_empty() || group.note.is_some()).then_some(group)
+        })
+        .collect();
+    groups.sort_by_key(|g| g.synth);
     groups
+}
+
+/// One project's group (see [`root_groups`]). `note` is set only for a
+/// configured folder with no cached file, when `cache` is given.
+fn project_group(
+    synth: &SynthState,
+    metas: &[FileMeta],
+    cache: Option<&CacheDir>,
+    configured: &[String],
+    project_synth: u32,
+    project_id: &str,
+) -> ProjectGroup {
+    let mut files: Vec<(u32, FileMeta)> = metas
+        .iter()
+        .filter(|m| m.status == EntryStatus::Ok && m.project_id == project_id)
+        .filter_map(|m| synth.file_synth(&m.file_key).map(|s| (s, m.clone())))
+        .collect();
+    files.sort_by_key(|(_, m)| m.name.to_lowercase());
+    let stamp = cache
+        .filter(|_| files.is_empty() && configured.iter().any(|c| c == project_id))
+        .map(|c| c.folder_stamp(project_id).unwrap_or_default());
+    let name = stamp
+        .as_ref()
+        .and_then(|s| s.name.clone())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| derive_project_name(metas, project_id));
+    let note = stamp.map(|s| {
+        let in_folder: Vec<&FileMeta> = metas
+            .iter()
+            .filter(|m| m.project_id == project_id)
+            .collect();
+        folder_note(&s, &in_folder)
+    });
+    ProjectGroup {
+        synth: project_synth,
+        project_id: project_id.to_owned(),
+        name,
+        files,
+        note,
+    }
 }
 
 /// Best-effort lookup of the human-readable project name for `project_id` by
@@ -986,111 +1031,67 @@ fn derive_project_name(metas: &[FileMeta], project_id: &str) -> String {
         .unwrap_or_else(|| project_id.to_owned())
 }
 
-/// A configured folder (`FIGMA_PROJECTS_IDS`) with no cached file to list:
-/// never prefetched, every fetch failed, or empty on Figma. Root `ls` shows
-/// it with a note instead of hiding it, so a newly configured folder doesn't
-/// look like the config never took. Name and count come from the folder
-/// stamp `sync_folders`/`cache prefetch` write; nothing here hits the network.
-#[derive(Debug, PartialEq)]
-struct UncachedFolder {
-    synth: u32,
-    folder_id: String,
-    name: String,
-    file_count: Option<usize>,
-    error: Option<String>,
-}
-
 /// Longest listing error quoted in a folder note; the full text is on
 /// stderr when the listing fails.
 const FOLDER_ERROR_DISPLAY_MAX: usize = 160;
 
-impl UncachedFolder {
-    fn load(cache: &CacheDir, synth: u32, folder_id: &str) -> Self {
-        let stamp = cache.folder_stamp(folder_id).unwrap_or_default();
-        Self {
-            synth,
-            folder_id: folder_id.to_owned(),
-            name: stamp
-                .name
-                .filter(|n| !n.is_empty())
-                .unwrap_or_else(|| folder_id.to_owned()),
-            file_count: stamp.file_count,
-            error: stamp.error,
-        }
+/// Why a configured folder lists no cached file, from its folder stamp (what
+/// the last listing said) and the metas filed under it (fetches that were
+/// tried and didn't produce a cached file). Offline: nothing here hits the
+/// network.
+fn folder_note(stamp: &FolderStamp, in_folder: &[&FileMeta]) -> String {
+    const PREFETCH: &str = "run `figma-explorer cache prefetch`";
+    if let Some(e) = &stamp.error {
+        let e = e.split_whitespace().collect::<Vec<_>>().join(" ");
+        // `into_anyhow` renders an HTTP error as `figma API error (403 Forbidden)`.
+        let denied = e.contains("(403 ") || e.contains("(404 ");
+        let e = match e.char_indices().nth(FOLDER_ERROR_DISPLAY_MAX) {
+            Some((i, _)) => format!("{}…", &e[..i]),
+            None => e,
+        };
+        return if denied {
+            format!("couldn't list this folder on Figma — check the folder id and that FIGMA_TOKEN can read it: {e}")
+        } else {
+            format!(
+                "couldn't list this folder on Figma (retrying within {}m): {e}",
+                crate::cache::VERSION_CHECK_SECS / 60
+            )
+        };
     }
-
-    fn note(&self) -> String {
-        if let Some(e) = &self.error {
-            let e = e.split_whitespace().collect::<Vec<_>>().join(" ");
-            let e = match e.char_indices().nth(FOLDER_ERROR_DISPLAY_MAX) {
-                Some((i, _)) => format!("{}…", &e[..i]),
-                None => e,
-            };
-            return format!(
-                "couldn't list this folder on Figma — check the folder id and that FIGMA_TOKEN can read it: {e}"
-            );
-        }
-        match self.file_count {
+    let count = |st: EntryStatus| in_folder.iter().filter(|m| m.status == st).count();
+    let (not_exportable, failed) = (
+        count(EntryStatus::NotExportable),
+        count(EntryStatus::Failed),
+    );
+    let total = stamp.file_count;
+    if not_exportable == 0 && failed == 0 {
+        return match total {
             Some(0) => "empty folder on Figma".to_owned(),
-            Some(n) => format!(
-                "{} on Figma, none cached — run `figma-explorer cache prefetch`",
-                crate::cache::count_files(n)
-            ),
-            None => "not listed yet — run `figma-explorer cache prefetch`".to_owned(),
-        }
+            Some(n) => format!("{} on Figma, none cached — {PREFETCH}", count_files(n)),
+            None => format!("not listed yet — {PREFETCH}"),
+        };
     }
-
-    /// Whether `--name` keeps this row; counts it as a match when it does.
-    fn keep(&self, name_filter: Option<&str>, matches: &mut usize) -> bool {
-        match name_filter {
-            None => true,
-            Some(needle) if self.name.to_lowercase().contains(needle) => {
-                *matches += 1;
-                true
-            }
-            Some(_) => false,
-        }
+    let not_fetched = total.map_or(0, |t| t.saturating_sub(not_exportable + failed));
+    let mut parts = Vec::new();
+    if not_exportable > 0 {
+        parts.push(format!("{not_exportable} not exportable via the API"));
     }
-
-    fn row(&self) -> Row {
-        let mut row = Row::header(format!("proj:{}", self.synth), 0, "PROJECT", String::new());
-        row.raw_payload = Some(format!("\"{}\"  ({})", self.name, self.note()));
-        row
+    if failed > 0 {
+        parts.push(format!("{failed} failed to fetch"));
     }
-
-    fn json(&self) -> Value {
-        json!({
-            "id": format!("proj:{}", self.synth),
-            "project_id": self.folder_id,
-            "name": self.name,
-            "files": [],
-            "cached": false,
-            "file_count": self.file_count,
-            "listing_error": self.error,
-            "note": self.note(),
-        })
+    if not_fetched > 0 {
+        parts.push(format!("{not_fetched} not fetched yet"));
     }
-}
-
-/// Configured folders that [`root_groups`] left out for having no cached
-/// file, in `proj:N` order. Folders without a `proj:N` yet (only possible
-/// before the first non-`--cache-only` listing) are skipped — there is no id
-/// to show. Folders *not* configured stay hidden: those are the ones dropped
-/// from `FIGMA_PROJECTS_IDS`.
-fn uncached_folders(
-    cache: &CacheDir,
-    synth: &SynthState,
-    groups: &[ProjectGroup],
-    configured: &[String],
-) -> Vec<UncachedFolder> {
-    let mut out: Vec<UncachedFolder> = configured
-        .iter()
-        .filter(|id| !groups.iter().any(|(_, pid, _, _)| pid == *id))
-        .filter_map(|id| Some(UncachedFolder::load(cache, synth.project_synth(id)?, id)))
-        .collect();
-    out.sort_by_key(|f| f.synth);
-    out.dedup_by_key(|f| f.synth);
-    out
+    let head = match total {
+        Some(n) => format!("{} on Figma, none cached: ", count_files(n)),
+        None => "none cached: ".to_owned(),
+    };
+    let tail = if failed > 0 || not_fetched > 0 {
+        format!(" — {PREFETCH}")
+    } else {
+        String::new()
+    };
+    format!("{head}{}{tail}", parts.join(", "))
 }
 
 /// Project listing — header + files in that project, recursing into each
@@ -1107,45 +1108,24 @@ fn render_project(
     inline_comments: bool,
     name_filter: Option<&str>,
 ) -> Result<()> {
-    let synth = resolver.synth();
     let metas = resolver.cache().list_metas()?;
-    let project_name = derive_project_name(&metas, project_id);
-    let mut files: Vec<(u32, FileMeta)> = metas
-        .iter()
-        .filter(|m| m.status == EntryStatus::Ok && m.project_id == project_id)
-        .filter_map(|m| synth.file_synth(&m.file_key).map(|s| (s, m.clone())))
-        .collect();
-    files.sort_by_key(|(_, m)| m.name.to_lowercase());
-    // Nothing cached for a configured folder: say why, as root `ls` does.
-    let uncached = (files.is_empty()
-        && crate::cache::configured_folder_ids()
-            .iter()
-            .any(|id| id == project_id))
-    .then(|| UncachedFolder::load(resolver.cache(), project_synth, project_id));
-    let project_name = match &uncached {
-        Some(f) => f.name.clone(),
-        None => project_name,
-    };
+    let group = project_group(
+        resolver.synth(),
+        &metas,
+        Some(resolver.cache()),
+        &crate::cache::configured_folder_ids(),
+        project_synth,
+        project_id,
+    );
 
     let mut hidden: BTreeSet<&'static str> = BTreeSet::new();
     let mut matches = 0usize;
 
     match format {
         Output::Yaml => {
-            if let Some(f) = &uncached {
-                if f.keep(name_filter, &mut matches) {
-                    if let Some(pattern) = name_filter {
-                        print_name_filter_comment(pattern, matches);
-                    }
-                    print!("{}", format_rows(&[f.row()]));
-                    return Ok(());
-                }
-            }
             let rows = project_rows(
                 resolver,
-                project_synth,
-                &project_name,
-                &files,
+                &group,
                 depth,
                 show_all,
                 &mut hidden,
@@ -1164,7 +1144,7 @@ fn render_project(
         Output::Json => {
             let file_jsons = project_files_json(
                 resolver,
-                &files,
+                &group.files,
                 depth,
                 show_all,
                 &mut hidden,
@@ -1175,18 +1155,16 @@ fn render_project(
             let mut payload = serde_json::Map::new();
             payload.insert("id".into(), json!(format!("proj:{project_synth}")));
             payload.insert("project_id".into(), json!(project_id));
-            payload.insert("name".into(), json!(project_name));
+            payload.insert("name".into(), json!(group.name));
+            payload.insert("cached".into(), json!(!group.files.is_empty()));
+            if let Some(note) = &group.note {
+                payload.insert("note".into(), json!(note));
+            }
             payload.insert("ignored".into(), ignored_json(&hidden));
             if let Some(pattern) = name_filter {
                 payload.insert("name_filter".into(), name_filter_json(pattern, matches));
             }
             payload.insert("files".into(), Value::Array(file_jsons));
-            if let Some(f) = &uncached {
-                payload.insert("cached".into(), json!(false));
-                payload.insert("file_count".into(), json!(f.file_count));
-                payload.insert("listing_error".into(), json!(f.error));
-                payload.insert("note".into(), json!(f.note()));
-            }
             print(&Value::Object(payload), format)
         }
     }
@@ -1481,51 +1459,136 @@ mod tests {
     use crate::tree::render_flat;
     use serde_json::json;
 
-    /// The other half of the regression above: a folder that is still
-    /// configured but has no cached file *is* shown (named from its stamp),
-    /// so a newly added folder doesn't look like the config never took.
+    /// The other half of the regression below: a folder that is still
+    /// configured but has no cached file *is* kept (named from its stamp,
+    /// with a note), in `proj:N` order among the cached ones; a folder
+    /// dropped from the config stays hidden.
     #[test]
-    fn uncached_folders_shows_only_configured_folders() {
+    fn root_groups_keep_configured_folders_without_cached_files() {
         let td = tempfile::TempDir::new().unwrap();
         let cache = CacheDir::new(td.path());
         cache.ensure().unwrap();
         let mut synth = SynthState::default();
-        synth.intern_project("77195660"); // configured, has files
-        synth.intern_project("571382610"); // configured, nothing cached
-        synth.intern_project("999"); // dropped from the config
+        synth.intern_project("77195660"); // proj:1, has files
+        synth.intern_project("571382610"); // proj:2, configured, nothing cached
+        synth.intern_project("999"); // proj:3, dropped from the config
+        synth.intern_project("888"); // proj:4, has files
+        synth.intern_file("abc");
+        synth.intern_file("def");
+        let file = |key: &str, pid: &str| {
+            let r = FileRef {
+                file_key: key.into(),
+                name: key.into(),
+                last_modified: "t".into(),
+                project_id: pid.into(),
+                project_name: "Desktop".into(),
+            };
+            let payload = build_cached_file(&r, &json!({"id": "0:0", "type": "DOCUMENT"}), 0);
+            FileMeta::from_success(&r, &payload, 0, 0)
+        };
+        let metas = vec![file("abc", "77195660"), file("def", "888")];
         cache
             .stamp_folder_listing("571382610", 1, Ok(("Mobile", 23)))
             .unwrap();
-        let groups: Vec<ProjectGroup> = vec![(1, "77195660".into(), "Desktop".into(), Vec::new())];
-        let configured = ["77195660".to_owned(), "571382610".to_owned()];
+        let configured = [
+            "77195660".to_owned(),
+            "571382610".to_owned(),
+            "888".to_owned(),
+        ];
 
-        let shown = uncached_folders(&cache, &synth, &groups, &configured);
+        let groups = root_groups(&synth, &metas, Some(&cache), &configured);
+        let shown: Vec<(u32, &str, Option<&str>)> = groups
+            .iter()
+            .map(|g| (g.synth, g.name.as_str(), g.note.as_deref()))
+            .collect();
         assert_eq!(
             shown,
-            [UncachedFolder {
-                synth: 2,
-                folder_id: "571382610".into(),
-                name: "Mobile".into(),
-                file_count: Some(23),
-                error: None,
-            }]
-        );
-        assert_eq!(
-            shown[0].note(),
-            "23 files on Figma, none cached — run `figma-explorer cache prefetch`"
+            [
+                (1, "Desktop", None),
+                (
+                    2,
+                    "Mobile",
+                    Some("23 files on Figma, none cached — run `figma-explorer cache prefetch`")
+                ),
+                (4, "Desktop", None),
+            ]
         );
     }
 
-    /// No stamp (never listed): the bare folder id, with the prefetch hint.
+    fn stamp(file_count: Option<usize>, error: Option<&str>) -> FolderStamp {
+        FolderStamp {
+            listed_at_epoch: 1,
+            name: Some("Mobile".into()),
+            file_count,
+            error: error.map(str::to_owned),
+        }
+    }
+
     #[test]
-    fn uncached_folder_without_stamp_falls_back_to_id() {
-        let td = tempfile::TempDir::new().unwrap();
-        let cache = CacheDir::new(td.path());
-        let f = UncachedFolder::load(&cache, 3, "571382610");
-        assert_eq!(f.name, "571382610");
+    fn folder_note_by_listing_outcome() {
+        let prefetch = "run `figma-explorer cache prefetch`";
         assert_eq!(
-            f.note(),
-            "not listed yet — run `figma-explorer cache prefetch`"
+            folder_note(&FolderStamp::default(), &[]),
+            format!("not listed yet — {prefetch}")
+        );
+        assert_eq!(
+            folder_note(&stamp(Some(0), None), &[]),
+            "empty folder on Figma"
+        );
+        // Only 403/404 point at the config; anything else is transient.
+        let denied = folder_note(
+            &stamp(
+                Some(3),
+                Some("v2 folders endpoint: figma API error (403 Forbidden): {}"),
+            ),
+            &[],
+        );
+        assert!(
+            denied.starts_with("couldn't list this folder on Figma — check the folder id"),
+            "{denied}"
+        );
+        let transient = folder_note(
+            &stamp(
+                Some(3),
+                Some("figma API error (429 Too Many Requests): slow down"),
+            ),
+            &[],
+        );
+        assert_eq!(
+            transient,
+            "couldn't list this folder on Figma (retrying within 5m): figma API error (429 Too Many Requests): slow down"
+        );
+        let long = folder_note(&stamp(None, Some(&"x".repeat(500))), &[]);
+        assert!(long.ends_with('…') && long.len() < 300, "{long}");
+    }
+
+    /// A folder whose files were tried but didn't cache must not just say
+    /// "run prefetch" — that can't fix files Figma won't export.
+    #[test]
+    fn folder_note_reports_files_that_did_not_cache() {
+        let meta = |status| {
+            let r = FileRef {
+                file_key: "k".into(),
+                name: "n".into(),
+                last_modified: "t".into(),
+                project_id: "571382610".into(),
+                project_name: "Mobile".into(),
+            };
+            let payload = build_cached_file(&r, &json!({"id": "0:0", "type": "DOCUMENT"}), 0);
+            FileMeta {
+                status,
+                ..FileMeta::from_success(&r, &payload, 0, 0)
+            }
+        };
+        let (ne, failed) = (meta(EntryStatus::NotExportable), meta(EntryStatus::Failed));
+        assert_eq!(
+            folder_note(&stamp(Some(2), None), &[&ne, &ne]),
+            "2 files on Figma, none cached: 2 not exportable via the API"
+        );
+        assert_eq!(
+            folder_note(&stamp(Some(5), None), &[&ne, &failed]),
+            "5 files on Figma, none cached: 1 not exportable via the API, 1 failed to fetch, \
+             3 not fetched yet — run `figma-explorer cache prefetch`"
         );
     }
 
@@ -1548,9 +1611,9 @@ mod tests {
         let payload = build_cached_file(&file_ref, &json!({"id": "0:0", "type": "DOCUMENT"}), 0);
         let metas = vec![FileMeta::from_success(&file_ref, &payload, 0, 0)];
 
-        let groups = root_groups(&synth, &metas);
+        let groups = root_groups(&synth, &metas, None, &[]);
         assert_eq!(groups.len(), 1, "empty folder omitted: {groups:?}");
-        assert_eq!((groups[0].0, groups[0].2.as_str()), (1, "Desktop"));
+        assert_eq!((groups[0].synth, groups[0].name.as_str()), (1, "Desktop"));
     }
 
     /// Root listings only render files grouped under a project, so only
@@ -2179,11 +2242,16 @@ mod tests {
         let mut hidden = BTreeSet::new();
         let mut matches = 0usize;
         // depth 3: projects(0) -> files(1) -> canvases(2) -> frames(3).
+        let group = ProjectGroup {
+            synth: psynth,
+            project_id: "p1".into(),
+            name: "Proj".into(),
+            files: vec![(fsynth, meta)],
+            note: None,
+        };
         let rows = project_rows(
             &resolver,
-            psynth,
-            "Proj",
-            &[(fsynth, meta)],
+            &group,
             3,
             false,
             &mut hidden,
@@ -2271,11 +2339,16 @@ mod tests {
 
         let mut hidden = BTreeSet::new();
         let mut matches = 0usize;
+        let group = ProjectGroup {
+            synth: psynth,
+            project_id: "p1".into(),
+            name: "Proj".into(),
+            files: vec![(fsynth, meta)],
+            note: None,
+        };
         let rows = project_rows(
             &resolver,
-            psynth,
-            "Proj",
-            &[(fsynth, meta)],
+            &group,
             3,
             false,
             &mut hidden,
