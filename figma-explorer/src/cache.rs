@@ -617,17 +617,57 @@ impl CacheDir {
     /// When `folder_id`'s file list was last checked. Lenient: a missing or
     /// unreadable stamp reads as never, which only costs one listing request.
     pub fn folder_listed_at(&self, folder_id: &str) -> Option<u64> {
-        let bytes = fs::read(self.folder_stamp_path(folder_id)).ok()?;
-        serde_json::from_slice::<FolderStamp>(&bytes)
-            .ok()
-            .map(|s| s.listed_at_epoch)
+        self.folder_stamp(folder_id).map(|s| s.listed_at_epoch)
     }
 
-    pub fn stamp_folder_listed(&self, folder_id: &str, now: u64) -> Result<()> {
-        let bytes = serde_json::to_vec(&FolderStamp {
-            listed_at_epoch: now,
-        })?;
+    /// The last listing outcome recorded for `folder_id`. Lenient like
+    /// [`Self::folder_listed_at`]; stamps written before the name/count
+    /// fields existed read back with them empty.
+    pub fn folder_stamp(&self, folder_id: &str) -> Option<FolderStamp> {
+        let bytes = fs::read(self.folder_stamp_path(folder_id)).ok()?;
+        serde_json::from_slice::<FolderStamp>(&bytes).ok()
+    }
+
+    pub fn write_folder_stamp(&self, folder_id: &str, stamp: &FolderStamp) -> Result<()> {
+        let bytes = serde_json::to_vec(stamp)?;
         atomic_write(&self.folder_stamp_path(folder_id), &bytes)
+    }
+
+    /// Stamp `folder_id` with the outcome of listing it at `now`: its name
+    /// and file count on success, the error on failure. A failure keeps the
+    /// name and count of the last successful listing, so `ls` can still name
+    /// the folder it couldn't list.
+    pub fn stamp_folder_listing(
+        &self,
+        folder_id: &str,
+        now: u64,
+        outcome: Result<(&str, usize), &anyhow::Error>,
+    ) -> Result<()> {
+        let stamp = match outcome {
+            Ok((name, file_count)) => FolderStamp {
+                listed_at_epoch: now,
+                name: Some(name.to_owned()),
+                file_count: Some(file_count),
+                error: None,
+            },
+            Err(e) => {
+                let prev = self.folder_stamp(folder_id).unwrap_or_default();
+                // Drop the outer "listing files for … {folder_id}" context:
+                // the stamp is already per folder.
+                let causes: Vec<String> = e.chain().skip(1).map(|c| c.to_string()).collect();
+                let error = if causes.is_empty() {
+                    format!("{e:#}")
+                } else {
+                    causes.join(": ")
+                };
+                FolderStamp {
+                    listed_at_epoch: now,
+                    error: Some(error),
+                    ..prev
+                }
+            }
+        };
+        self.write_folder_stamp(folder_id, &stamp)
     }
 
     /// Path of the gzipped team-library catalog sidecar — the published
@@ -886,20 +926,28 @@ pub async fn list_project_files(
 ) -> Result<Vec<FileRef>> {
     let mut out = Vec::new();
     for pid in project_ids {
-        let (project_name, files) = list_folder_files(cfg, pid)
-            .await
-            .with_context(|| format!("listing files for project (folder) {pid}"))?;
-        for (file_key, name, last_modified) in files {
-            out.push(FileRef {
-                file_key,
-                name,
-                last_modified,
-                project_id: pid.clone(),
-                project_name: project_name.clone(),
-            });
-        }
+        out.extend(list_folder(cfg, pid).await?.1);
     }
     Ok(out)
+}
+
+/// One folder's name and files. Unlike [`list_project_files`] this keeps the
+/// name even when the folder holds no files, for the folder stamp.
+pub async fn list_folder(cfg: &Configuration, folder_id: &str) -> Result<(String, Vec<FileRef>)> {
+    let (project_name, files) = list_folder_files(cfg, folder_id)
+        .await
+        .with_context(|| format!("listing files for project (folder) {folder_id}"))?;
+    let refs = files
+        .into_iter()
+        .map(|(file_key, name, last_modified)| FileRef {
+            file_key,
+            name,
+            last_modified,
+            project_id: folder_id.to_owned(),
+            project_name: project_name.clone(),
+        })
+        .collect();
+    Ok((project_name, refs))
 }
 
 /// `(folder_name, [(key, name, last_modified)])` for one folder — v2 first,
@@ -1429,9 +1477,20 @@ pub fn note_unverified_cache_only<'a>(metas: impl IntoIterator<Item = &'a FileMe
     }
 }
 
-#[derive(Serialize, Deserialize)]
-struct FolderStamp {
-    listed_at_epoch: u64,
+/// `folders/{folder_id}.json`: when a configured folder was last listed, and
+/// what that listing said. The name and count let root `ls` show a configured
+/// folder that has no cached files yet (see `cmd::ls`); `error` is set when
+/// the last listing failed. All but the epoch are optional so older stamps
+/// still parse.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct FolderStamp {
+    pub listed_at_epoch: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// The folders this process may list and prune: `FIGMA_PROJECTS_IDS`.
@@ -1448,6 +1507,8 @@ pub struct FolderSyncReport {
     pub removed: Vec<String>,
     /// Files whose name or folder changed (meta updated in place).
     pub updated: Vec<String>,
+    /// Configured folders that got their first `proj:N` this sync.
+    pub interned_folders: Vec<String>,
 }
 
 /// Keep the cached file *list* of `folder_ids` in step with Figma.
@@ -1495,16 +1556,21 @@ pub async fn sync_folders(
     let mut listed: Vec<FileRef> = Vec::new();
     // Sequential: a handful of configured folders, ~1 small request each.
     for id in folder_ids {
-        match list_project_files(cfg, std::slice::from_ref(id)).await {
-            Ok(refs) => {
+        let stamped = match list_folder(cfg, id).await {
+            Ok((name, refs)) => {
+                let stamped = cache.stamp_folder_listing(id, now, Ok((&name, refs.len())));
                 synced.insert(id.clone());
                 listed.extend(refs);
+                stamped
             }
-            Err(e) => eprintln!(
-                "cache: couldn't list folder {id} ({e:#}) — showing its cached files, which may be out of date"
-            ),
-        }
-        if let Err(e) = cache.stamp_folder_listed(id, now) {
+            Err(e) => {
+                eprintln!(
+                    "cache: couldn't list folder {id} ({e:#}) — showing its cached files, which may be out of date"
+                );
+                cache.stamp_folder_listing(id, now, Err(&e))
+            }
+        };
+        if let Err(e) = stamped {
             eprintln!("cache: stamping folder {id} failed: {e:#}");
         }
     }
@@ -1554,14 +1620,30 @@ pub async fn sync_folders(
 
     // Root `ls` groups files under interned projects; a file moved into a
     // folder with no `proj:N` yet would otherwise drop out of every listing.
-    if !moved_to.is_empty() {
-        if let Err(e) = crate::synth::with_lock(cache, |s| {
-            for p in &moved_to {
-                s.intern_project(p);
+    // Every configured folder gets one too — listed or not — so root `ls` can
+    // show a folder with nothing cached under a paste-ready id.
+    // Config order first, then moves (sorted), so new ids are deterministic.
+    let mut moved: Vec<String> = moved_to
+        .into_iter()
+        .filter(|p| !folder_ids.contains(p))
+        .collect();
+    moved.sort();
+    let to_intern: Vec<&String> = folder_ids.iter().chain(&moved).collect();
+    match crate::synth::SynthState::load(cache) {
+        Ok(s) if to_intern.iter().all(|p| s.project_synth(p).is_some()) => {}
+        _ => match crate::synth::with_lock(cache, |s| {
+            let mut new = Vec::new();
+            for p in &to_intern {
+                if s.project_synth(p).is_none() {
+                    s.intern_project(p);
+                    new.push((*p).clone());
+                }
             }
+            new
         }) {
-            eprintln!("cache: synth intern failed: {e:#}");
-        }
+            Ok(new) => report.interned_folders = new,
+            Err(e) => eprintln!("cache: synth intern failed: {e:#}"),
+        },
     }
 
     // Only folders the cache already holds files for: syncing keeps a
@@ -1695,7 +1777,7 @@ fn is_access_error(msg: &str) -> bool {
     msg.contains("(403 ") || msg.contains("(404 ")
 }
 
-fn count_files(n: usize) -> String {
+pub(crate) fn count_files(n: usize) -> String {
     if n == 1 {
         "1 file".to_owned()
     } else {
@@ -3302,7 +3384,9 @@ mod tests {
     #[tokio::test]
     async fn sync_folders_within_window_makes_no_requests() {
         let (_td, cache) = seed_fresh(Some("v1"), Some(now_epoch()));
-        cache.stamp_folder_listed("10", now_epoch()).unwrap();
+        cache
+            .stamp_folder_listing("10", now_epoch(), Ok(("Desktop", 1)))
+            .unwrap();
         let server = mock_http::serve(vec![]);
         let report = sync_folders(&cfg_for(&server), &cache, &folders()).await;
         assert!(server.paths().is_empty());
@@ -3420,6 +3504,50 @@ mod tests {
         v.to_string()
     }
 
+    /// Stamps from before the name/count fields still parse; a failed
+    /// listing keeps the last good name and count and records the error
+    /// without the redundant per-folder context.
+    #[test]
+    fn folder_stamp_compat_and_failure_keeps_name() {
+        let td = TempDir::new().unwrap();
+        let cache = CacheDir::new(td.path());
+        cache.ensure().unwrap();
+        std::fs::create_dir_all(cache.folders_dir()).unwrap();
+        std::fs::write(cache.folder_stamp_path("10"), r#"{"listed_at_epoch":5}"#).unwrap();
+        assert_eq!(
+            cache.folder_stamp("10"),
+            Some(FolderStamp {
+                listed_at_epoch: 5,
+                ..Default::default()
+            })
+        );
+
+        cache
+            .stamp_folder_listing("10", 6, Ok(("Mobile", 2)))
+            .unwrap();
+        let err = anyhow::anyhow!("figma API error (403 Forbidden)")
+            .context("listing files for project (folder) 10");
+        cache.stamp_folder_listing("10", 7, Err(&err)).unwrap();
+        assert_eq!(
+            cache.folder_stamp("10"),
+            Some(FolderStamp {
+                listed_at_epoch: 7,
+                name: Some("Mobile".into()),
+                file_count: Some(2),
+                error: Some("figma API error (403 Forbidden)".into()),
+            })
+        );
+
+        cache
+            .stamp_folder_listing("10", 8, Ok(("Mobile", 3)))
+            .unwrap();
+        assert_eq!(
+            cache.folder_stamp("10").unwrap().error,
+            None,
+            "success clears it"
+        );
+    }
+
     /// Review finding: a `Failed` marker from a transient error on the first
     /// fetch must not hide the file for good.
     #[tokio::test]
@@ -3449,7 +3577,9 @@ mod tests {
     async fn sync_folders_moves_file_between_folders() {
         let (_td, cache) = seed_fresh(Some("v1"), Some(now_epoch()));
         // Folder 20 is within its window; 10 being due still lists both.
-        cache.stamp_folder_listed("20", now_epoch()).unwrap();
+        cache
+            .stamp_folder_listing("20", now_epoch(), Ok(("Other", 1)))
+            .unwrap();
         let server = mock_http::serve(vec![
             (200, folder_body(&[])),
             (200, named_folder_body("Q", &[("K", "F")])),

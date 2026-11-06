@@ -363,3 +363,105 @@ fn variables_sidecar_follows_refetches() {
         info.stdout
     );
 }
+
+/// A second configured folder, for the "configured but nothing cached" rows.
+const MOBILE: &str = "/v2/folders/1002/files";
+
+/// Point `FIGMA_PROJECTS_IDS` at the fixture folder plus folder 1002, and
+/// age the fixture folder's stamp so the next listing command syncs.
+fn with_second_folder(h: &mut Harness) {
+    h.set("FIGMA_PROJECTS_IDS", "1001,1002");
+    std::fs::write(
+        h.cache_dir().join("folders/1001.json"),
+        r#"{"listed_at_epoch":0}"#,
+    )
+    .unwrap();
+}
+
+/// A folder added to `FIGMA_PROJECTS_IDS` shows up in root `ls` — named,
+/// with its file count and a prefetch hint — before anything in it is
+/// cached. `ls` only lists it; fetching its files stays `cache prefetch`'s job.
+#[test]
+fn configured_folder_without_cached_files_is_listed() {
+    let mut h = prefetched();
+    with_second_folder(&mut h);
+    h.figma.set_route(
+        MOBILE,
+        200,
+        r#"{"name":"Mobile","files":[
+            {"key":"FxFixtureFile000000010","name":"Login","thumbnail_url":"https://example.invalid/a.png","last_modified":"2026-06-01T10:00:00Z"},
+            {"key":"FxFixtureFile000000011","name":"Employees","thumbnail_url":"https://example.invalid/b.png","last_modified":"2026-06-01T10:00:00Z"}
+        ]}"#,
+    );
+
+    let run = h.run(&["ls"]).ok();
+    assert_eq!(run.paths(), ["/v2/folders/1001/files", MOBILE]);
+    let row = r#"proj:2  -  | PROJECT  "Mobile"  (2 files on Figma, none cached — run `figma-explorer cache prefetch`)"#;
+    assert!(run.stdout.contains(row), "{}", run.stdout);
+    assert!(
+        run.stdout.contains(r#"PROJECT  "Desktop""#),
+        "{}",
+        run.stdout
+    );
+
+    let proj = h.run(&["ls", "proj:2"]).ok();
+    assert!(proj.requests.is_empty(), "{:?}", proj.paths());
+    assert_eq!(proj.stdout.trim_end(), row);
+
+    // Offline: the name and count come from the folder stamp.
+    let offline = h.run(&["--cache-only", "ls"]).ok();
+    assert!(offline.requests.is_empty(), "{:?}", offline.paths());
+    assert!(offline.stdout.contains(row), "{}", offline.stdout);
+
+    let json = h.run(&["--json", "ls"]).ok();
+    let v: serde_json::Value = serde_json::from_str(&json.stdout).unwrap();
+    let mobile = &v["projects"][1];
+    assert_eq!(mobile["id"], "proj:2");
+    assert_eq!(mobile["name"], "Mobile");
+    assert_eq!(mobile["cached"], false);
+    assert_eq!(
+        mobile["note"],
+        "2 files on Figma, none cached — run `figma-explorer cache prefetch`"
+    );
+    assert_eq!(mobile["files"], serde_json::json!([]));
+    assert_eq!(v["projects"][0]["cached"], true);
+    assert!(v["projects"][0].get("note").is_none());
+
+    // Once prefetched it is an ordinary folder row.
+    h.figma
+        .set_route(MOBILE, 200, r#"{"name":"Mobile","files":[]}"#);
+    h.run(&["cache", "prefetch"]).ok();
+    let empty = h.run(&["ls", "proj:2"]).ok();
+    assert_eq!(
+        empty.stdout.trim_end(),
+        r#"proj:2  -  | PROJECT  "Mobile"  (empty folder on Figma)"#
+    );
+}
+
+/// A configured folder Figma refuses to list says so in root `ls`, instead
+/// of being silently absent.
+#[test]
+fn configured_folder_that_fails_to_list_shows_the_error() {
+    let mut h = prefetched();
+    with_second_folder(&mut h);
+    let denied = r#"{"status":403,"err":"Invalid scope"}"#;
+    h.figma.set_route(MOBILE, 403, denied);
+    h.figma.set_route("/v1/projects/1002/files", 403, denied);
+
+    let run = h.run(&["ls"]).ok();
+    let row = run
+        .stdout
+        .lines()
+        .find(|l| l.starts_with("proj:2"))
+        .unwrap_or_else(|| panic!("no proj:2 row\n{}", run.stdout));
+    assert!(
+        row.starts_with(r#"proj:2  -  | PROJECT  "1002"  (couldn't list this folder on Figma — check the folder id and that FIGMA_TOKEN can read it: "#),
+        "{row}"
+    );
+    assert!(row.contains("403"), "{row}");
+    assert!(
+        run.stderr.contains("couldn't list folder 1002"),
+        "{}",
+        run.stderr
+    );
+}

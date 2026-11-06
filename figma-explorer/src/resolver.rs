@@ -149,15 +149,18 @@ impl Resolver {
     /// them. Always the whole configured set, even for `ls proj:N`: a file
     /// missing from one folder may have moved to another, and only listing
     /// them all tells a move from a deletion. No-op under `--cache-only`.
-    /// Reloads the synth state when files were added or moved, so their
-    /// freshly interned `file:N` / `proj:N` ids render.
+    /// Reloads the synth state when files were added or moved, or a folder
+    /// got its first `proj:N`, so the freshly interned ids render.
     pub async fn sync_folders(&mut self, cfg: &Configuration) {
         if self.cache_only {
             return;
         }
         let folders = cache::configured_folder_ids();
         let report = cache::sync_folders(cfg, &self.cache, &folders).await;
-        if !report.added.is_empty() || !report.updated.is_empty() {
+        if !report.added.is_empty()
+            || !report.updated.is_empty()
+            || !report.interned_folders.is_empty()
+        {
             match SynthState::load(&self.cache) {
                 Ok(s) => self.synth = s,
                 Err(e) => eprintln!("cache: reloading synth state failed: {e:#}"),
