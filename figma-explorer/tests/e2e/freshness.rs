@@ -465,3 +465,40 @@ fn configured_folder_that_fails_to_list_shows_the_error() {
         run.stderr
     );
 }
+
+/// A folder sync re-fetching a file whose earlier fetch failed says it is
+/// retrying — not that the file was "added" on Figma.
+#[test]
+fn folder_sync_says_retrying_for_files_that_failed_before() {
+    let h = Harness::new();
+    let notif = format!("/v1/files/{NOTIF}");
+    let body = h.figma.route_body(&notif);
+    h.figma
+        .set_route(&notif, 500, r#"{"status":500,"err":"boom"}"#);
+    h.run(&["cache", "prefetch"]).ok();
+    assert_eq!(h.meta(NOTIF)["status"], "failed");
+
+    h.figma.set_route(&notif, 200, &body);
+    std::fs::write(
+        h.cache_dir().join("folders/1001.json"),
+        r#"{"listed_at_epoch":0}"#,
+    )
+    .unwrap();
+    let run = h.run(&["ls"]).ok();
+    assert!(
+        run.stderr
+            .contains("cache: retrying 1 file that failed to fetch earlier (Notifications)"),
+        "{}",
+        run.stderr
+    );
+    assert!(
+        !run.stderr.contains("added to Figma folders"),
+        "{}",
+        run.stderr
+    );
+    assert!(
+        run.stdout.contains(r#"FILE  "Notifications""#),
+        "{}",
+        run.stdout
+    );
+}

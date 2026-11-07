@@ -50,6 +50,9 @@ struct State {
     routes: HashMap<String, Response>,
     /// Keyed by path including the query string; checked first.
     exact: HashMap<String, Response>,
+    /// One-shot responses by path (query ignored), served before any route
+    /// and consumed — for "fails, then succeeds" retry tests.
+    once: HashMap<String, std::collections::VecDeque<Response>>,
     log: Vec<Req>,
 }
 
@@ -128,6 +131,14 @@ impl FakeFigma {
             path_and_query.to_owned(),
             json(status, body.as_bytes().to_vec()),
         );
+    }
+
+    /// Answer the next `n` requests for `path` with `status`/`body`, then fall
+    /// back to its normal route.
+    pub fn fail_next(&self, path: &str, n: usize, status: u16, body: &str) {
+        let mut state = self.state.lock().unwrap();
+        let q = state.once.entry(path.to_owned()).or_default();
+        q.extend((0..n).map(|_| json(status, body.as_bytes().to_vec())));
     }
 
     /// Current body of a route, for tests that patch a recorded fixture.
@@ -209,11 +220,14 @@ fn handle(mut stream: TcpStream, state: &Mutex<State>, base_url: &str) {
             path: path.clone(),
             token,
         });
-        state
-            .exact
-            .get(&path)
-            .or_else(|| state.routes.get(route))
-            .cloned()
+        let once = state.once.get_mut(route).and_then(|q| q.pop_front());
+        once.or_else(|| {
+            state
+                .exact
+                .get(&path)
+                .or_else(|| state.routes.get(route))
+                .cloned()
+        })
     };
     let resp = resp.unwrap_or_else(|| synthesized(route, query, base_url));
 
@@ -221,7 +235,9 @@ fn handle(mut stream: TcpStream, state: &Mutex<State>, base_url: &str) {
         200 => "OK",
         403 => "Forbidden",
         404 => "Not Found",
+        429 => "Too Many Requests",
         500 => "Internal Server Error",
+        503 => "Service Unavailable",
         _ => "Status",
     };
     let header = format!(

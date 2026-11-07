@@ -42,7 +42,7 @@ install-updater = false
 figma-api = { path = "figma-api" }
 figma-common = { path = "figma-common" }
 clap = { version = "4", features = ["derive", "env"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 anyhow = "1"
 dotenvy = "0.15"
 serde = { version = "1", features = ["derive"] }

@@ -1671,11 +1671,30 @@ pub async fn sync_folders(
     if new.is_empty() {
         return report;
     }
-    eprintln!(
-        "cache: {} added to Figma folders ({}) — fetching…",
-        count_files(new.len()),
-        name_list(new.iter().map(|r| r.name.as_str()), 5)
-    );
+    // `new` also holds files whose earlier fetch left a `Failed` marker —
+    // not new on Figma, so don't call them "added".
+    let failed_before: HashSet<&str> = metas
+        .iter()
+        .filter(|m| m.status == EntryStatus::Failed)
+        .map(|m| m.file_key.as_str())
+        .collect();
+    let (retried, added): (Vec<&&FileRef>, Vec<&&FileRef>) = new
+        .iter()
+        .partition(|r| failed_before.contains(r.file_key.as_str()));
+    if !added.is_empty() {
+        eprintln!(
+            "cache: {} added to Figma folders ({}) — fetching…",
+            count_files(added.len()),
+            name_list(added.iter().map(|r| r.name.as_str()), 5)
+        );
+    }
+    if !retried.is_empty() {
+        eprintln!(
+            "cache: retrying {} that failed to fetch earlier ({})…",
+            count_files(retried.len()),
+            name_list(retried.iter().map(|r| r.name.as_str()), 5)
+        );
+    }
     let fetched: Vec<(&FileRef, Result<CachedFile>)> =
         stream::iter(new.into_iter().map(|r| async move {
             (
@@ -1689,7 +1708,7 @@ pub async fn sync_folders(
     for (r, res) in fetched {
         match res {
             Ok(_) => report.added.push(r.name.clone()),
-            Err(e) => eprintln!("cache: fetching new file {} failed: {e:#}", r.name),
+            Err(e) => eprintln!("cache: fetching {} failed: {e:#}", r.name),
         }
     }
     report

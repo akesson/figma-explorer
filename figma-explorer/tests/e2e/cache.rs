@@ -36,18 +36,15 @@ fn prefetch_fetches_the_folder_and_writes_every_sidecar() {
     snap!(h, "prefetch", run.stdout);
 }
 
-/// A second prefetch with nothing changed skips the file bodies but still
-/// refreshes comments and the team catalog.
+/// A second prefetch with nothing changed skips the file bodies, and the
+/// comments too while they're within their 5-minute window (a rerun used
+/// to re-poll every file's comments); past the window it polls them.
 #[test]
 fn prefetch_again_skips_unchanged_files() {
     let h = Harness::new();
     h.prefetched();
     let run = h.prefetched();
-    let mut expected = vec![
-        "/v2/folders/1001/files",
-        "/v1/files/FxFixtureFile000000001/comments",
-        "/v1/files/FxFixtureFile000000002/comments",
-    ];
+    let mut expected = vec!["/v2/folders/1001/files"];
     expected.extend(CATALOG);
     expected.sort();
     assert_eq!(run.paths(), expected);
@@ -56,6 +53,57 @@ fn prefetch_again_skips_unchanged_files() {
         "{}",
         run.stdout
     );
+
+    for key in [NOTIF, NO_ACCESS] {
+        h.patch_meta(key, &[("comments_checked_at_epoch", 0.into())]);
+    }
+    let due = h.prefetched();
+    let mut expected = vec![
+        "/v2/folders/1001/files",
+        "/v1/files/FxFixtureFile000000001/comments",
+        "/v1/files/FxFixtureFile000000002/comments",
+    ];
+    expected.extend(CATALOG);
+    expected.sort();
+    assert_eq!(due.paths(), expected);
+}
+
+/// A transient failure (5xx, 429, timeout) on a file body is retried
+/// within the run instead of costing a rerun.
+#[test]
+fn prefetch_retries_transient_file_failures() {
+    let h = Harness::new();
+    let file = format!("/v1/files/{NOTIF}");
+    h.figma
+        .fail_next(&file, 1, 503, r#"{"status":503,"err":"busy"}"#);
+    h.figma
+        .fail_next(&file, 1, 429, r#"{"status":429,"err":"slow down"}"#);
+
+    let run = h.prefetched();
+    let hits = run.paths().iter().filter(|p| **p == file).count();
+    assert_eq!(hits, 3, "{:?}", run.paths());
+    assert!(run.stdout.contains("failed: 0"), "{}", run.stdout);
+    assert_eq!(h.meta(NOTIF)["status"], "ok");
+    assert!(run.stderr.contains("retry 1/2"), "{}", run.stderr);
+    assert!(run.stderr.contains("retry 2/2"), "{}", run.stderr);
+}
+
+/// Retries are bounded, and a non-transient error (403, 404) isn't retried.
+#[test]
+fn prefetch_gives_up_after_two_retries_and_never_retries_a_404() {
+    let h = Harness::new();
+    let notif = format!("/v1/files/{NOTIF}");
+    let no_access = format!("/v1/files/{NO_ACCESS}");
+    h.figma
+        .set_route(&notif, 500, r#"{"status":500,"err":"boom"}"#);
+    h.figma
+        .set_route(&no_access, 404, r#"{"status":404,"err":"Not found"}"#);
+
+    let run = h.run(&["cache", "prefetch"]).ok();
+    let count = |p: &str| run.paths().iter().filter(|q| **q == p).count();
+    assert_eq!(count(&notif), 3, "{:?}", run.paths());
+    assert_eq!(count(&no_access), 1, "{:?}", run.paths());
+    assert!(run.stdout.contains("failed: 2"), "{}", run.stdout);
 }
 
 #[test]

@@ -82,6 +82,8 @@ impl Harness {
         env.insert("XDG_CONFIG_HOME".into(), p("home"));
         env.insert("FIGMA_PROJECTS_IDS".into(), FOLDER.into());
         env.insert("FIGMA_TEAM_ID".into(), TEAM.into());
+        // Test seam: no backoff sleeps between prefetch retries.
+        env.insert("FIGMA_EXPLORER_RETRY_DELAY_MS".into(), "0".into());
         // Windows networking needs it; harmless elsewhere.
         if let Ok(v) = std::env::var("SYSTEMROOT") {
             env.insert("SYSTEMROOT".into(), v);

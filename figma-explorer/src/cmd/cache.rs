@@ -13,7 +13,7 @@ use crate::cache::{
     self, build_cached_file, default_dir, fetch_comments_into_meta, CacheDir, EntryStatus,
     FileMeta, FileRef,
 };
-use crate::cmd::{fetch_file_json, is_variables_forbidden_error, require_document};
+use crate::cmd::{fetch_file_json_retrying, is_variables_forbidden_error, require_document};
 use crate::full_cache;
 use crate::team_catalog;
 use crate::{print, Globals, Output};
@@ -205,6 +205,19 @@ impl PrefetchArgs {
                     staged.last_listed_at_epoch = now_pre;
                     staged.project_name = current.project_name.clone();
                     staged.name = current.name.clone();
+                    // Comments checked within the window (by an earlier run,
+                    // or by `comments`/`node-info`) and already in the current
+                    // sidecar shape: nothing to poll. Without this, a rerun
+                    // re-fetched every file's comments, one request each.
+                    let comments_current = staged.comments_schema_version
+                        == Some(cache::COMMENTS_SCHEMA_VERSION)
+                        && !cache::comments_check_due(&staged, now_pre);
+                    if comments_current {
+                        if let Err(e) = cache_dir.write_meta(&staged) {
+                            eprintln!("cache: write_meta failed for {}: {e:#}", m.file_key);
+                        }
+                        continue;
+                    }
                     // Defer the write until after the comments fetch so we
                     // capture comments_fetched_at_epoch + fingerprint in a
                     // single meta update. This branch also serves as the
@@ -268,7 +281,9 @@ impl PrefetchArgs {
                     // Validate `document` as part of the fetch so a malformed
                     // 200 (missing/null `document`) flows into the failure arm
                     // below — a marker, not an empty cached payload.
-                    let fetched = fetch_file_json(cfg, &f.file_key, None).await.and_then(|file| {
+                    let fetched = fetch_file_json_retrying(cfg, &f.file_key, &truncate(&f.name, 35))
+                        .await
+                        .and_then(|file| {
                         require_document(&file, &f.file_key)?;
                         Ok(file)
                     });
