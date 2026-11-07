@@ -38,6 +38,11 @@ install-path = "CARGO_HOME"
 # Whether to install an updater program
 install-updater = false
 
+# GitHub retired the macos-14 image dist 0.32 defaults to (v0.3.1 build was
+# rejected: "The configuration 'macos-14-arm64-us-default' is not supported").
+[workspace.metadata.dist.github-custom-runners]
+aarch64-apple-darwin = "macos-15"
+
 [workspace.dependencies]
 figma-api = { path = "figma-api" }
 figma-common = { path = "figma-common" }
