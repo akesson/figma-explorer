@@ -29,7 +29,7 @@ on:
 
 jobs:
   notarize-macos:
-    runs-on: macos-14
+    runs-on: macos-15
     env:
       PLAN: ${{ inputs.plan }}
     steps:
